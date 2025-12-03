@@ -1,0 +1,20 @@
+[project]
+name = "napari-flow-editor"
+version = "0.0.1"
+classifiers = [
+    "Framework :: napari",
+]
+dependencies = ["napari"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"napari_flow_editor" = ["napari.yaml"]
+
+[project.entry-points."napari.manifest"]
+napari-flow-editor = "napari_flow_editor:napari.yaml"

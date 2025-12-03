@@ -1,0 +1,47 @@
+{
+  "schema_version": "0.1",
+  "nodes": [
+    {
+      "id": "f3f06322-fb95-4806-971c-000af94c0b67",
+      "type": "median_filter",
+      "label": "Median Filter",
+      "position": {
+        "x": 242.07369793453645,
+        "y": 2.6312358471145387
+      },
+      "parameters": {
+        "radius": 3
+      },
+      "input_connections": {
+        "image_in": "f6006871-b082-4b82-b1fd-75b826cdf0e9.mask_out"
+      }
+    },
+    {
+      "id": "f6006871-b082-4b82-b1fd-75b826cdf0e9",
+      "type": "threshold_otsu",
+      "label": "Otsu Threshold",
+      "position": {
+        "x": -22.80404400832589,
+        "y": 5.262471694229049
+      },
+      "parameters": {},
+      "input_connections": {
+        "image_in": "b0cb2394-5c65-4e2a-b668-241fe9787cae.image_out"
+      }
+    },
+    {
+      "id": "b0cb2394-5c65-4e2a-b668-241fe9787cae",
+      "type": "gaussian_blur",
+      "label": "Gaussian Blur",
+      "position": {
+        "x": -301.71504380246574,
+        "y": -0.8770786157048391
+      },
+      "parameters": {
+        "sigma": 1.5000000000000004,
+        "mode": "wrap"
+      },
+      "input_connections": {}
+    }
+  ]
+}

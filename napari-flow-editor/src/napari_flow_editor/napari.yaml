@@ -1,0 +1,30 @@
+
+#name: napari-flow-editor
+#display_name: Flow Editor
+#contributions:
+
+#  commands:
+#    - id: napari-flow-editor.napari_plugin.FlowEditor
+#      python_name: napari_flow_editor.napari_plugin:FlowEditor
+#      title: FlowEditor
+#  widgets:
+#
+#    - command: napari-flow-editor.napari_plugin.FlowEditor
+#      display_name: FlowEditor
+
+
+
+name: napari-flow-editor
+display_name: Flow Editor
+contributions:
+
+  commands:
+    - id: napari-flow-editor.napari_plugin_v2.FlowEditor
+      python_name: napari_flow_editor.napari_plugin_v2:FlowEditor
+      title: FlowEditor
+  widgets:
+
+    - command: napari-flow-editor.napari_plugin_v2.FlowEditor
+      display_name: FlowEditor
+
+

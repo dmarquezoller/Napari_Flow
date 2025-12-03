@@ -1,0 +1,152 @@
+{
+  "gaussian_blur": {
+    "label": "Gaussian Blur",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "mode": {
+        "type": "enum",
+        "default": "nearest",
+        "options": [
+          "nearest",
+          "reflect",
+          "wrap",
+          "constant"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.gaussian_blur"
+  },
+  "median_filter": {
+    "label": "Median Filter",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 2,
+        "min": 1,
+        "max": 50
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.median_filter"
+  },
+  "prewitt_filter": {
+    "label": "Prewitt Edge Det.",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "edges"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.prewitt_filter"
+  },
+  "sobel_filter": {
+    "label": "Sobel Edge Det.",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "edges"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_filter"
+  },
+  "sobel_split": {
+    "label": "Sobel Split",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "horizontal_edges",
+      "vertical_edges"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_split"
+  },
+  "get_active_layer": {
+    "label": "Get Active Layer",
+    "category": "Input",
+    "inputs": [
+      "image_from_viewer"
+    ],
+    "outputs": [
+      "image"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.get_active_layer"
+  },
+  "blend_images": {
+    "label": "Blend Images",
+    "category": "Math",
+    "inputs": [
+      "image_a",
+      "image_b"
+    ],
+    "outputs": [
+      "blended_image"
+    ],
+    "parameters": {
+      "alpha": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
+  },
+  "dilation": {
+    "label": "Dilation",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 50
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation"
+  },
+  "threshold_otsu": {
+    "label": "Otsu Threshold",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.threshold_otsu"
+  }
+}
