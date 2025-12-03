@@ -13,8 +13,6 @@
 * **Extensible:** Import your own `.py` scripts to add custom nodes instantly.
 * **Save/Load:** Persist your complex workflows to JSON files.
 
----
-
 ## 🛠 Installation
 
 ### Prerequisites
@@ -23,7 +21,7 @@
 
 ### 1. Clone the repository
 ```bash
-git clone [https://github.com/YOUR_USERNAME/napari-flow-editor.git](https://github.com/YOUR_USERNAME/napari-flow-editor.git)
+git clone [https://github.com/dmarquezoller/Napari_Flow.git](https://github.com/dmarquezoller/Napari_Flow.git)
 cd napari-flow-editor
 ```
 ### 2. Install
@@ -32,3 +30,48 @@ We recommend installing in **editable mode** so changes to your node library are
 ```bash
 pip install -e
 ```
+### 3. Run
+Launch Napari from your terminal
+```bash
+napari
+```
+Then navigate to **Plugins > Napari Flow Editor** in the top menu
+
+## 📖 User Guide
+
+### 1. The Interface
+
+
+[Image of node based editor gui]
+
+
+* **The Toolbar** (Top):
+  * **Add Node:** Opens a categorized menu of available algorithms (Filters, Segmentation, etc.).
+  * **Import .py:** Load custom user scripts containing your own nodes.(more info below)
+  * **Save/Load:** Persist your graph structure to a JSON file to use later.
+* **Properties Panel** (Right):
+  * Click any node in the graph to view it here.
+  * You can adjust parameters (like `sigma` or `radius`) and see the connection status of sockets.
+* **Graph View** (Center):
+  * **Left Click:** Select a node.
+  * **Drag (Socket to Socket):** Create a connection wire between nodes.
+  * **Middle Click / Scroll:** Pan and Zoom around the workspace.
+  * **Delete Key:** Remove the selected node.
+
+### 2. How to Create a Pipeline
+Follow these steps to build a simple Gaussian Blur workflow:
+
+1.  **Add Input:**
+    * Go to `Add Node` > `Input` > `Get Active Layer`.
+    * This node automatically grabs the currently selected image from the Napari layer list.
+2.  **Add Processing:**
+    * Go to `Add Node` > `Filters` > `Gaussian Blur`.
+3.  **Connect:**
+    * Click and drag a wire from the **Input** node's `image` output.
+    * Drop it onto the **Blur** node's `image_in` input.
+4.  **Configure:**
+    * Click the **Blur** node to select it.
+    * In the Properties Panel, increase the `sigma` value (e.g., to `5.0`).
+5.  **Run:**
+    * Click the big green **RUN PIPELINE** button.
+    * A new layer named `Gaussian Blur (image_out)` will appear in Napari with the results.
