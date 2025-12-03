@@ -35,15 +35,11 @@ Launch Napari from your terminal
 ```bash
 napari
 ```
-Then navigate to **Plugins > Napari Flow Editor** in the top menu
+Then navigate to `Plugins > Napari Flow Editor` in the top menu
 
 ## 📖 User Guide
 
 ### 1. The Interface
-
-
-[Image of node based editor gui]
-
 
 * **The Toolbar** (Top):
   * **Add Node:** Opens a categorized menu of available algorithms (Filters, Segmentation, etc.).
@@ -51,7 +47,7 @@ Then navigate to **Plugins > Napari Flow Editor** in the top menu
   * **Save/Load:** Persist your graph structure to a JSON file to use later.
 * **Properties Panel** (Right):
   * Click any node in the graph to view it here.
-  * You can adjust parameters (like `sigma` or `radius`) and see the connection status of sockets.
+  * You can adjust parameters (like `sigma or radius`) and see the connection status of sockets.
 * **Graph View** (Center):
   * **Left Click:** Select a node.
   * **Drag (Socket to Socket):** Create a connection wire between nodes.
@@ -62,10 +58,10 @@ Then navigate to **Plugins > Napari Flow Editor** in the top menu
 Follow these steps to build a simple Gaussian Blur workflow:
 
 1.  **Add Input:**
-    * Go to `Add Node` > `Input` > `Get Active Layer`.
+    * Go to `Add Node > Input > Get Active Layer`.
     * This node automatically grabs the currently selected image from the Napari layer list.
 2.  **Add Processing:**
-    * Go to `Add Node` > `Filters` > `Gaussian Blur`.
+    * Go to `Add Node > Filters > Gaussian Blur`.
 3.  **Connect:**
     * Click and drag a wire from the **Input** node's `image` output.
     * Drop it onto the **Blur** node's `image_in` input.
@@ -75,3 +71,48 @@ Follow these steps to build a simple Gaussian Blur workflow:
 5.  **Run:**
     * Click the big green **RUN PIPELINE** button.
     * A new layer named `Gaussian Blur (image_out)` will appear in Napari with the results.
+
+## 👨‍💻 Developer Guide: Adding Custom Nodes
+
+The engine uses a **Wrapper Pattern** to turn standard Python functions into GUI nodes automatically. You do not need to write UI code.
+
+### 1. The Structure
+Create a Python file (e.g., `my_nodes.py`). You must import the `register_node` decorator from the package.
+
+```Python
+from napari_flow_editor.flow_nodes.decorator import register_node
+import skimage.filters
+
+@register_node(
+    label="My Custom Blur",
+    category="Custom",
+    outputs=["image_out"],
+    params_config={
+        "sigma": {"min": 0.1, "max": 20.0, "step": 0.1}
+    }
+)
+def my_blur(image_in, sigma: float = 1.0):
+    # 'image_in' has no default -> Input Socket
+    # 'sigma' has a default -> Float SpinBox Widget
+    return skimage.filters.gaussian(image_in, sigma=sigma)
+
+```
+
+### 2. Decorator Options
+
+| Parameter | Description |
+| :--- | :--- |
+| `label` | The human-readable name shown on the Node title bar (e.g., "Gaussian Blur"). |
+| `category` | The submenu name where the node will appear (e.g., "Filters" or "Segmentation"). |
+| `outputs` | A list of strings defining the output sockets (e.g., `["image_out", "mask"]`). |
+| `params_config` | A dictionary to configure specific widget limits (like `min`, `max`, `step` or `options`). |
+
+### 3. How it works
+
+1. **Scan:** On startup (or import), the `generate_library.py` script inspects the functions marked with `@register_node`.
+2. **Map:** It maps Python types (`float`,`int`,`str`) to Qt Widgets (`SpinBox`,`ComboBox`).
+3. **Execute:** When you click Run, the `ExecutionEngine` imports your function dynamically and passes the data from the previous node.
+
+## 📄 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
