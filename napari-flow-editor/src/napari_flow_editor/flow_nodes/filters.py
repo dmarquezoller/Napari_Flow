@@ -69,3 +69,30 @@ def prewitt_filter(image):
     """Wraps skimage.filters.prewitt"""
     return skimage.filters.prewitt(image, mode='reflect' )
 
+# --- UNSHARP MASK (SHARPEN) ---
+@register_node(
+    label="Unsharp Mask (Sharpen)",
+    category="Filters",
+    outputs=["sharpened"],
+    params_config={
+        "radius": {"min": 0.0, "max": 20.0, "step": 0.5},
+        "amount": {"min": 0.0, "max": 5.0, "step": 0.1}
+    }
+)
+def unsharp_mask(image, radius: float = 1.0, amount: float = 1.0):
+    return skimage.filters.unsharp_mask(image, radius=radius, amount=amount)
+
+# --- FRANGI FILTER (VESSEL DETECTION) ---
+@register_node(
+    label="Frangi (Vessel Detect)",
+    category="Filters",
+    outputs=["vessels"],
+    params_config={
+        "scale_range_min": {"min": 0.1, "max": 10.0},
+        "scale_range_max": {"min": 1.0, "max": 20.0}
+    }
+)
+def frangi_filter(image, scale_range_min: float = 1.0, scale_range_max: float = 10.0):
+    # Frangi returns 'vesselness' score
+    return skimage.filters.frangi(image, sigmas=range(int(scale_range_min), int(scale_range_max), 2))
+
