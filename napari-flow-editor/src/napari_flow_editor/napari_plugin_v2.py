@@ -608,6 +608,7 @@ class FlowEditor(QWidget):
 
     # --- Save Pipeline Method ---
     def save_pipeline(self):
+        # 1. Build the Pipeline Dictionary (Same as before)
         pipeline = {
             "schema_version": "0.1",
             "nodes": []
@@ -615,36 +616,49 @@ class FlowEditor(QWidget):
 
         for item in self.scene.items():
             if isinstance(item, Node):
-                # 1. Build Input Connections Dictionary
-                # Format: { "my_input_name": "source_node_id.source_output_name" }
-                connections = {}
+                # Map connections
+                input_connections = {}
                 for socket in item.inputs:
                     if socket.connected_edges:
-                        # An input usually has only 1 edge
                         edge = socket.connected_edges[0] 
                         if edge.start_socket:
                             src_node = edge.start_socket.node
-                            src_socket_name = edge.start_socket.name
-                            
-                            # The value string: "node_uuid.socket_name"
-                            connection_str = f"{src_node.uid}.{src_socket_name}"
-                            connections[socket.name] = connection_str
+                            connection_str = f"{src_node.uid}.{edge.start_socket.name}"
+                            input_connections[socket.name] = connection_str
 
                 node_data = {
                     "id": item.uid,
                     "type": item.node_type,
-                    "label": item.title, # Save custom title
+                    "label": item.title,
                     "position": {"x": item.pos().x(), "y": item.pos().y()},
                     "parameters": item.parameters,
-                    "input_connections": connections 
+                    "input_connections": input_connections
                 }
                 pipeline["nodes"].append(node_data)
 
-        filename, ok = QInputDialog.getText(self, "Save Pipeline", "File name:", text="pipeline.json")
-        if ok and filename.strip():
-            with open(filename.strip(), "w") as f:
-                json.dump(pipeline, f, indent=2)
+        # 2. Open File Browser to Save
+        # Arguments: Parent, Title, Default Name, File Filter
+        filename, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save Pipeline", 
+            "pipeline.json", 
+            "JSON Files (*.json)"
+        )
 
+        # 3. Write to disk if user selected a file
+        if filename:
+            # Ensure .json extension is present
+            if not filename.endswith(".json"):
+                filename += ".json"
+                
+            try:
+                with open(filename, "w") as f:
+                    json.dump(pipeline, f, indent=2)
+                # Optional: Feedback
+                # print(f"Pipeline saved to {filename}")
+            except Exception as e:
+                print(f"Error saving pipeline: {e}")
+                
     # --- Load Pipeline ---
     def load_pipeline(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Open Pipeline", "", "JSON Files (*.json)")
