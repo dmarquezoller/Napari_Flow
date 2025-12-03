@@ -1,15 +1,15 @@
 from .decorator import register_node
-import numpy as np
 
-# We use a special flag or just handle it in the execution engine
-# But for now, we'll wrap a helper that we assume gets injected with the image
 @register_node(
-    label="Get Active Layer",
+    label="Get Layer",
     category="Input",
-    outputs=["image"],
-    params_config={} 
+    outputs=["data_out"],
+    # We define it as an enum so the JSON knows it's a dropdown.
+    # We leave options empty [] because the GUI fills them in real-time.
+    params_config={
+        "layer_name": {"type": "enum", "options": []} 
+    }
 )
-def get_active_layer(image_from_viewer):
-    # This function is a placeholder. 
-    # The Execution Engine will inject the actual Napari layer data here.
-    return image_from_viewer
+def get_layer(layer_name: str = ""):
+    # The argument 'layer_name' creates the parameter entry in the JSON.
+    return layer_name

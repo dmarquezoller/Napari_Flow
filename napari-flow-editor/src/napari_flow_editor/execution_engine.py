@@ -66,76 +66,81 @@ class ExecutionEngine:
     def execute_node(self, node):
         print(f"Running: {node.title}...")
         
-        # A. Resolve Inputs
-        # We need to find the data from the previous nodes' outputs
+        # --- A. Resolve Inputs (Data from upstream nodes) ---
         func_inputs = {}
         
         for socket in node.inputs:
             if socket.connected_edges:
-                # 1. Find who connects to us
+                # 1. Find the connection
                 edge = socket.connected_edges[0]
                 source_node = edge.start_socket.node
                 source_socket_name = edge.start_socket.name
                 
-                # 2. Grab the data from our results cache
+                # 2. Retrieve data from results cache
                 if source_node.uid in self.results:
+                    # We look up the specific output name (e.g., 'image_out')
                     data = self.results[source_node.uid].get(source_socket_name)
                     func_inputs[socket.name] = data
                 else:
                     raise ValueError(f"Missing data from upstream node: {source_node.title}")
-            else:
-                # SPECIAL CASE: "Get Active Layer"
-                # If this is the input node, we grab data from Napari
-                if node.title == "Get Active Layer":
-                    active_layer = self.viewer.layers.selection.active
-                    if active_layer:
-                        # We inject it into the first argument
-                        func_inputs[socket.name] = active_layer.data
-                    else:
-                        raise ValueError("No active layer selected in Napari!")
 
-        # B. Prepare Parameters
+        # --- B. Prepare Parameters ---
         func_params = node.parameters.copy()
         
-        # C. Import and Run
-        # 1. Get execution path from the Library (stored in node_type usually, or we look it up)
-        # We need to access the global library. 
+        # --- C. SPECIAL CASE: "Get Layer" Node ---
+        # This node doesn't execute a Python function in the traditional sense.
+        # It grabs data from the Napari Viewer.
+        if node.title == "Get Layer":
+            target_name = func_params.get("layer_name")
+            
+            if not target_name:
+                raise ValueError("No layer selected in 'Get Layer' node.")
+
+            if target_name in self.viewer.layers:
+                layer_obj = self.viewer.layers[target_name]
+                data = layer_obj.data
+                
+                # Store result immediately and exit this node
+                # We use the key 'data_out' because that matches the decorator output name in inputs.py
+                self.results[node.uid] = {"data_out": data}
+                return 
+            else:
+                raise ValueError(f"Layer '{target_name}' not found in Napari. Did you delete it?")
+
+        # --- D. Import and Run (Standard Nodes) ---
+        
+        # 1. Get definition from the Global Library
         from .napari_plugin_v2 import NODE_LIBRARY
         
         if node.node_type not in NODE_LIBRARY:
             raise ValueError(f"Unknown node type: {node.node_type}")
             
         def_data = NODE_LIBRARY[node.node_type]
-
+        
+        # 2. Determine how to run it
         if "executable" in def_data:
+            # Case 1: Custom Node (User loaded a .py file) -> Use direct function object
             func = def_data["executable"]
         else:
-            # Standard path-based import (Built-in Nodes)
+            # Case 2: Standard Node -> Import dynamically via string path
             exec_path = def_data["execution_path"] 
             module_name, func_name = exec_path.rsplit(".", 1)
             module = importlib.import_module(module_name)
             func = getattr(module, func_name)
         
-        # Execute Function
-        # We combine inputs and params. 
-        # Note: If function expects 'image', and socket is 'image_in', 
-        # the argument names MUST match in the wrapper!
+        # 3. Combine Inputs and Parameters
+        # Note: func_inputs keys must match function argument names!
         args = {**func_inputs, **func_params}
         
-        # Special handling for the Input Node wrapper which expects 'image_from_viewer'
-        if node.title == "Get Active Layer" and "image_from_viewer" not in args:
-             # Map the socket name (e.g. 'image') to function arg ('image_from_viewer') if needed
-             # Or just pass positional if only one
-             pass
-
+        # 4. EXECUTE
         result = func(**args)
         
-        # D. Store Results
-        # If result is a tuple (multiple outputs), map to socket names
+        # --- E. Store Results ---
         output_names = def_data.get("outputs", ["out"])
-        
         node_outputs = {}
+        
         if isinstance(result, tuple):
+            # Map tuple outputs to socket names in order
             for i, name in enumerate(output_names):
                 if i < len(result):
                     node_outputs[name] = result[i]
@@ -146,15 +151,25 @@ class ExecutionEngine:
         
         self.results[node.uid] = node_outputs
         
-        # E. Display in Napari
-        # If this is a terminal node (no outputs connected) OR we just want to see everything
-        # Let's add it to viewer.
+        # --- F. Display in Napari ---
+        # We auto-display results to visualize the pipeline
         for out_name, out_data in node_outputs.items():
+            # Only display if it looks like image data (NumPy array)
             if isinstance(out_data, np.ndarray):
+                # Naming convention: "Node Name (socket name)"
                 layer_name = f"{node.title} ({out_name})"
                 
-                # Check if layer exists to update it (avoid spamming layers)
+                # Check if layer exists to update it (prevents spamming new layers)
                 try:
                     self.viewer.layers[layer_name].data = out_data
+                    # Force refresh
+                    self.viewer.layers[layer_name].refresh()
                 except KeyError:
-                    self.viewer.add_image(out_data, name=layer_name)
+                    # Create new layer if it doesn't exist
+                    # We assume it's an image. If it's a mask (int/bool), add_labels might be better,
+                    # but add_image handles most things safely.
+                    if out_data.dtype == bool or np.issubdtype(out_data.dtype, np.integer):
+                         # Optional: Try to guess if it's labels or just int image
+                         self.viewer.add_image(out_data, name=layer_name, interpolation2d='nearest')
+                    else:
+                         self.viewer.add_image(out_data, name=layer_name)

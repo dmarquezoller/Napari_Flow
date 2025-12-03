@@ -1,4 +1,29 @@
 {
+  "frangi_filter": {
+    "label": "Frangi (Vessel Detect)",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "vessels"
+    ],
+    "parameters": {
+      "scale_range_min": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 10.0
+      },
+      "scale_range_max": {
+        "type": "float",
+        "default": 10.0,
+        "min": 1.0,
+        "max": 20.0
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.frangi_filter"
+  },
   "gaussian_blur": {
     "label": "Gaussian Blur",
     "category": "Filters",
@@ -85,17 +110,48 @@
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_split"
   },
-  "get_active_layer": {
-    "label": "Get Active Layer",
-    "category": "Input",
+  "unsharp_mask": {
+    "label": "Unsharp Mask (Sharpen)",
+    "category": "Filters",
     "inputs": [
-      "image_from_viewer"
-    ],
-    "outputs": [
       "image"
     ],
-    "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.inputs.get_active_layer"
+    "outputs": [
+      "sharpened"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.5
+      },
+      "amount": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 5.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.unsharp_mask"
+  },
+  "get_layer": {
+    "label": "Get Layer",
+    "category": "Input",
+    "inputs": [],
+    "outputs": [
+      "data_out"
+    ],
+    "parameters": {
+      "layer_name": {
+        "type": "enum",
+        "default": "",
+        "options": []
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer"
   },
   "blend_images": {
     "label": "Blend Images",
@@ -118,6 +174,76 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
   },
+  "gamma_correction": {
+    "label": "Gamma Correction",
+    "category": "Math",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "corrected"
+    ],
+    "parameters": {
+      "gamma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 3.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.math.gamma_correction"
+  },
+  "invert_image": {
+    "label": "Invert Image",
+    "category": "Math",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "inverted"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.math.invert_image"
+  },
+  "binary_closing": {
+    "label": "Binary Closing (Fill Holes)",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 20
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_closing"
+  },
+  "binary_opening": {
+    "label": "Binary Opening (Remove Noise)",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 20
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_opening"
+  },
   "dilation": {
     "label": "Dilation",
     "category": "Morphology",
@@ -137,6 +263,89 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation"
   },
+  "remove_small_objects": {
+    "label": "Remove Small Objects",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "cleaned_mask"
+    ],
+    "parameters": {
+      "min_size": {
+        "type": "int",
+        "default": 64,
+        "min": 10,
+        "max": 1000,
+        "step": 10
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_objects"
+  },
+  "skeletonize": {
+    "label": "Skeletonize",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "skeleton"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.skeletonize"
+  },
+  "clear_border": {
+    "label": "Clear Border",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "cleaned_mask"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.clear_border"
+  },
+  "label_objects": {
+    "label": "Label Objects",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "labels"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.label_objects"
+  },
+  "threshold_local": {
+    "label": "Threshold Local (Adaptive)",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "block_size": {
+        "type": "int",
+        "default": 35,
+        "min": 3,
+        "max": 99,
+        "step": 2
+      },
+      "offset": {
+        "type": "float",
+        "default": 0.0,
+        "min": -0.5,
+        "max": 0.5,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.threshold_local"
+  },
   "threshold_otsu": {
     "label": "Otsu Threshold",
     "category": "Segmentation",
@@ -148,5 +357,49 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.threshold_otsu"
+  },
+  "rescale_image": {
+    "label": "Rescale",
+    "category": "Transform",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "rescaled"
+    ],
+    "parameters": {
+      "scale": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.1,
+        "max": 4.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.transform.rescale_image"
+  },
+  "rotate_image": {
+    "label": "Rotate",
+    "category": "Transform",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "rotated"
+    ],
+    "parameters": {
+      "angle": {
+        "type": "float",
+        "default": 90.0,
+        "min": -180,
+        "max": 180,
+        "step": 1
+      },
+      "resize": {
+        "type": "bool",
+        "default": true
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.transform.rotate_image"
   }
 }

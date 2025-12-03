@@ -536,31 +536,67 @@ class FlowEditor(QWidget):
             for param_name, conf in params_def.items():
                 current_val = node.parameters.get(param_name, conf["default"])
                 
-                # Widget creation logic (Float, Int, Bool, Enum)
+                # --- A. SPECIAL CASE: Dynamic Layer Selector ---
+                # If this is the Input Node, populate the dropdown with REAL Napari layers
+                if node.node_type == "get_layer" and param_name == "layer_name":
+                    widget = QComboBox()
+                    
+                    # Get list of layer names from Napari viewer
+                    layers = [layer.name for layer in self.viewer.layers]
+                    
+                    if not layers:
+                        widget.addItem("No Layers Found")
+                        widget.setEnabled(False)
+                    else:
+                        widget.addItems(layers)
+                        
+                        # Try to select the previously saved value
+                        index = widget.findText(str(current_val))
+                        if index >= 0:
+                            widget.setCurrentIndex(index)
+                        else:
+                            # If saved layer was deleted, default to the first one
+                            widget.setCurrentIndex(0)
+                            # Update the node param immediately so it's valid
+                            self.update_param(node, param_name, layers[0])
+
+                    # Connect signal
+                    widget.currentTextChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    
+                    self.props_layout.addRow("Select Layer:", widget)
+                    continue  # Skip the standard logic below for this specific parameter
+                
+                # --- B. STANDARD WIDGETS ---
+                
+                # FLOAT
                 if conf["type"] == "float":
                     widget = QDoubleSpinBox()
-                    widget.setRange(conf.get("min", -9999), conf.get("max", 9999))
+                    widget.setRange(conf.get("min", -9999.0), conf.get("max", 9999.0))
                     widget.setSingleStep(conf.get("step", 0.1))
                     widget.setValue(float(current_val))
                     widget.valueChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                 
+                # INT
                 elif conf["type"] == "int":
                     widget = QSpinBox()
                     widget.setRange(conf.get("min", -9999), conf.get("max", 9999))
                     widget.setValue(int(current_val))
                     widget.valueChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                 
+                # BOOL
                 elif conf["type"] == "bool":
                     widget = QCheckBox()
                     widget.setChecked(bool(current_val))
                     widget.toggled.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                 
+                # ENUM (Standard static dropdowns from library)
                 elif conf["type"] == "enum":
                     widget = QComboBox()
                     widget.addItems(conf.get("options", []))
                     widget.setCurrentText(str(current_val))
                     widget.currentTextChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                 
+                # STRING / OTHER
                 else:
                     widget = QLineEdit(str(current_val))
                     widget.textChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
@@ -587,7 +623,7 @@ class FlowEditor(QWidget):
                 
                 status_lbl = QLabel(status_text)
                 status_lbl.setStyleSheet(style)
-                self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl) # arrow symbol
+                self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
         
         # B. Outputs
         if node.outputs:
@@ -658,7 +694,7 @@ class FlowEditor(QWidget):
                 # print(f"Pipeline saved to {filename}")
             except Exception as e:
                 print(f"Error saving pipeline: {e}")
-                
+
     # --- Load Pipeline ---
     def load_pipeline(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Open Pipeline", "", "JSON Files (*.json)")
