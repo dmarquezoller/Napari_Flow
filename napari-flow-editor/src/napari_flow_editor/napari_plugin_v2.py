@@ -4,17 +4,19 @@ from qtpy.QtWidgets import (
     QGraphicsDropShadowEffect, QToolBar, QInputDialog, QFileDialog, QVBoxLayout,
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
-    QFrame, QMessageBox
+    QFrame, QMessageBox, QTextEdit
 )
 
 from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor
 )
-from qtpy.QtCore import Qt, QPointF, QRectF
+from qtpy.QtCore import Qt, QPointF, QRectF, QThread
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect
 
+import numpy as np
+
 from napari_flow_editor import generate_library
-from .execution_engine import ExecutionEngine
+from .execution_engine import ExecutionWorker
 
 NODE_LIBRARY = {}
 
@@ -477,6 +479,16 @@ class FlowEditor(QWidget):
         self.view = FlowView(self.scene)
         self.layout.addWidget(self.view)
 
+        # 6. Console (Bottom)
+        self.console_label = QLabel("Execution Log:")
+        self.layout.addWidget(self.console_label)
+
+        self.console = QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setFixedHeight(100) # Small height like a terminal
+        self.console.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: Monospace;")
+        self.layout.addWidget(self.console)
+
         # --- CONNECTIONS ---
         # Connect the Fit Button
         self.btn_fit.clicked.connect(self.view.fit_scene)
@@ -844,8 +856,89 @@ class FlowEditor(QWidget):
     
     # --- Run Pipeline Method ---
     def run_pipeline(self):
-        engine = ExecutionEngine(self.scene, self.viewer)
-        engine.run()
+        # 1. Disable UI
+        self.set_ui_enabled(False)
+        self.console.clear()
+        
+        # 2. Setup Thread
+        self.thread = QThread()
+        self.worker = ExecutionWorker(self.scene, self.viewer)
+        self.worker.moveToThread(self.thread)
+        
+        # 3. Connect Signals
+        self.thread.started.connect(self.worker.run)
+        
+        # LOGGING
+        self.worker.log_signal.connect(self.append_log)
+        
+        # RESULTS (Critical Fix: GUI updates happen here in Main Thread)
+        self.worker.result_signal.connect(self.handle_execution_result)
+        
+        # CLEANUP
+        self.worker.finished_signal.connect(self.thread.quit)
+        self.worker.finished_signal.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        
+        # RE-ENABLE UI
+        self.worker.finished_signal.connect(lambda: self.set_ui_enabled(True))
+        
+        # 4. Start
+        self.thread.start()
+
+    def handle_execution_result(self, node_title, output_name, data):
+        """
+        Receives data from the worker and safely updates Napari.
+        This runs on the MAIN THREAD.
+        """
+        if isinstance(data, np.ndarray):
+            layer_name = f"{node_title} ({output_name})"
+            try:
+                # Update existing layer
+                self.viewer.layers[layer_name].data = data
+                self.viewer.layers[layer_name].refresh()
+            except KeyError:
+                # Create new layer
+                if data.dtype == bool or np.issubdtype(data.dtype, np.integer):
+                    self.viewer.add_labels(data, name=layer_name)
+                else:
+                    self.viewer.add_image(data, name=layer_name)
+
+    def append_log(self, text):
+        self.console.append(text)
+        sb = self.console.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def set_ui_enabled(self, enabled: bool):
+        """Locks/Unlocks buttons during execution."""
+        self.btn_run.setEnabled(enabled)
+        self.btn_add.setEnabled(enabled)
+        self.btn_remove.setEnabled(enabled)
+        self.btn_load.setEnabled(enabled)
+        self.btn_save.setEnabled(enabled)
+        self.btn_import.setEnabled(enabled)
+        
+        if enabled:
+            self.btn_run.setText("RUN PIPELINE")
+            self.btn_run.setStyleSheet("""
+                QPushButton {
+                    background-color: #2E7D32;
+                    color: white;
+                    font-weight: bold;
+                    font-size: 14px;
+                    border-radius: 4px;
+                    border: 1px solid #1B5E20;
+                }
+                QPushButton:hover {
+                    background-color: #388E3C;
+                }
+                QPushButton:pressed {
+                    background-color: #1B5E20;
+                }
+            """)
+
+        else:
+            self.btn_run.setText("Running...")
+            self.btn_run.setStyleSheet("background-color: #555; color: #aaa;") # Grayed out
 
     # --- Import Custom Module Method ---
     def import_custom_module(self):
