@@ -1,28 +1,459 @@
 {
-  "frangi_filter": {
-    "label": "Frangi (Vessel Detect)",
+  "adjust_gamma": {
+    "label": "Adjust Gamma",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "gamma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 3.0,
+        "step": 0.1
+      },
+      "gain": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 3.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_gamma"
+  },
+  "adjust_log": {
+    "label": "Adjust Log",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "gain": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 3.0,
+        "step": 0.1
+      },
+      "inv": {
+        "type": "bool",
+        "default": false
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_log"
+  },
+  "adjust_sigmoid": {
+    "label": "Adjust Sigmoid",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "cut_off": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      },
+      "gain": {
+        "type": "float",
+        "default": 10,
+        "min": 1.0,
+        "max": 20.0,
+        "step": 0.5
+      },
+      "inv": {
+        "type": "bool",
+        "default": false
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_sigmoid"
+  },
+  "cummulative_distribution": {
+    "label": "Cummulative Distribution",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 1,
+        "max": 256,
+        "step": 1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.cummulative_distribution"
+  },
+  "equalize_adapthist": {
+    "label": "Equalize Adaptive",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 1,
+        "max": 256,
+        "step": 1
+      },
+      "clip_limit": {
+        "type": "float",
+        "default": 0.01,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.equalize_adapthist"
+  },
+  "equalize_histogram": {
+    "label": "Equalize Histogram",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 1,
+        "max": 256,
+        "step": 1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.equalize_histogram"
+  },
+  "rescale_intensity": {
+    "label": "Rescale Intensity",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "adjusted"
+    ],
+    "parameters": {
+      "in_min": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      },
+      "in_max": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      },
+      "out_min": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      },
+      "out_max": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.rescale_intensity"
+  },
+  "butterworth": {
+    "label": "Butterworth",
     "category": "Filters",
     "inputs": [
       "image"
     ],
     "outputs": [
-      "vessels"
+      "image_out"
     ],
     "parameters": {
-      "scale_range_min": {
+      "cutoff_frequency_ratio": {
         "type": "float",
-        "default": 1.0,
-        "min": 0.1,
-        "max": 10.0
+        "default": 0.005,
+        "min": 0.0,
+        "max": 0.5,
+        "step": 0.001
       },
-      "scale_range_max": {
-        "type": "float",
-        "default": 10.0,
-        "min": 1.0,
-        "max": 20.0
+      "order": {
+        "type": "int",
+        "default": 2,
+        "min": 1,
+        "max": 10
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.frangi_filter"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.butterworth"
+  },
+  "correlate_sparse": {
+    "label": "Correlate Sparse",
+    "category": "Filters",
+    "inputs": [
+      "image",
+      "kernel"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.correlate_sparse"
+  },
+  "difference_of_gaussians": {
+    "label": "Difference of Gaussians",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "low_sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "high_sigma": {
+        "type": "float",
+        "default": 2.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "mode": {
+        "type": "enum",
+        "default": "nearest",
+        "options": [
+          "nearest",
+          "reflect",
+          "wrap",
+          "constant",
+          "mirror"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.difference_of_gaussians"
+  },
+  "farid": {
+    "label": "Farid",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "nearest",
+          "reflect",
+          "wrap",
+          "constant",
+          "mirror"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.farid"
+  },
+  "farid_horizontal": {
+    "label": "Farid Horizontal",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.farid_horizontal"
+  },
+  "farid_vertical": {
+    "label": "Farid Vertical",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.farid_vertical"
+  },
+  "filter_forward": {
+    "label": "Filter Forward",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.filter_forward"
+  },
+  "filter_inverse": {
+    "label": "Filter Inverse",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "max_gain": {
+        "type": "float",
+        "default": 2.0,
+        "min": 0.0,
+        "max": 10,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.filter_inverse"
+  },
+  "frangi": {
+    "label": "Frangi",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "sigma_range_low": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "sigma_range_high": {
+        "type": "float",
+        "default": 10.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "sigma_step": {
+        "type": "int",
+        "default": 2,
+        "min": 0.0,
+        "max": 5.0,
+        "step": 1
+      },
+      "alpha": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "beta": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "nearest",
+          "reflect",
+          "wrap",
+          "constant",
+          "mirror"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.frangi"
+  },
+  "gabor": {
+    "label": "Gabor",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "frequency": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "theta": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "nearest",
+          "reflect",
+          "wrap",
+          "constant",
+          "mirror"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.gabor"
   },
   "gaussian_blur": {
     "label": "Gaussian Blur",
@@ -54,6 +485,93 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.gaussian_blur"
   },
+  "hessian": {
+    "label": "Hessian (Ridge)",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "sigmas_min": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 20.0
+      },
+      "sigmas_max": {
+        "type": "float",
+        "default": 10.0,
+        "min": 1.0,
+        "max": 50.0
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      },
+      "black_ridges": {
+        "type": "bool",
+        "default": true
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.hessian"
+  },
+  "hysteresis_threshold": {
+    "label": "Hysteresis Threshold",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "low": {
+        "type": "float",
+        "default": 128,
+        "min": 0.0,
+        "max": 255.0,
+        "step": 1
+      },
+      "high": {
+        "type": "float",
+        "default": 255,
+        "min": 0.0,
+        "max": 255.0,
+        "step": 1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.hysteresis_threshold"
+  },
+  "laplace": {
+    "label": "Laplace",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "ksize": {
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 10,
+        "step": 1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.laplace"
+  },
   "median_filter": {
     "label": "Median Filter",
     "category": "Filters",
@@ -73,6 +591,48 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.median_filter"
   },
+  "meijering": {
+    "label": "Meijering (Ridge)",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "sigmas_min": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 20.0,
+        "step": 0.1
+      },
+      "sigmas_max": {
+        "type": "float",
+        "default": 10.0,
+        "min": 1.0,
+        "max": 50.0,
+        "step": 1
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      },
+      "black_ridges": {
+        "type": "bool",
+        "default": true
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.meijering"
+  },
   "prewitt_filter": {
     "label": "Prewitt Edge Det.",
     "category": "Filters",
@@ -84,6 +644,95 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.prewitt_filter"
+  },
+  "rank_order": {
+    "label": "Rank Order",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "ordered_image",
+      "original_values"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.rank_order"
+  },
+  "roberts": {
+    "label": "Roberts",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.roberts"
+  },
+  "sato": {
+    "label": "Sato (Ridge)",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "sigmas_min": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 20.0
+      },
+      "sigmas_max": {
+        "type": "float",
+        "default": 10.0,
+        "min": 1.0,
+        "max": 50.0
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      },
+      "black_ridges": {
+        "type": "bool",
+        "default": true
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.sato"
+  },
+  "scharr": {
+    "label": "Scharr",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.scharr"
   },
   "sobel_filter": {
     "label": "Sobel Edge Det.",
@@ -109,6 +758,226 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_split"
+  },
+  "threshold_isodata": {
+    "label": "Threshold Isodata",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 2,
+        "max": 1024
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_isodata"
+  },
+  "threshold_li": {
+    "label": "Threshold Li",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_li"
+  },
+  "threshold_local": {
+    "label": "Threshold Local",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "block_size": {
+        "type": "int",
+        "default": 15,
+        "min": 3,
+        "max": 101,
+        "step": 2
+      },
+      "method": {
+        "type": "enum",
+        "default": "gaussian",
+        "options": [
+          "gaussian",
+          "mean",
+          "median"
+        ]
+      },
+      "offset": {
+        "type": "float",
+        "default": 0.0,
+        "min": -1.0,
+        "max": 1.0,
+        "step": 0.01
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_local"
+  },
+  "threshold_mean": {
+    "label": "Threshold Mean",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_mean"
+  },
+  "threshold_minimum": {
+    "label": "Threshold Minimum",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 2,
+        "max": 1024
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_minimum"
+  },
+  "threshold_niblack": {
+    "label": "Threshold Niblack",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "window_size": {
+        "type": "int",
+        "default": 15,
+        "min": 3,
+        "max": 101,
+        "step": 2
+      },
+      "k": {
+        "type": "float",
+        "default": 0.2,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_niblack"
+  },
+  "threshold_otsu": {
+    "label": "Threshold Otsu",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 2,
+        "max": 1024
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_otsu"
+  },
+  "threshold_sauvola": {
+    "label": "Threshold Sauvola",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "window_size": {
+        "type": "int",
+        "default": 15,
+        "min": 3,
+        "max": 101,
+        "step": 2
+      },
+      "k": {
+        "type": "float",
+        "default": 0.2,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_sauvola"
+  },
+  "threshold_triangle": {
+    "label": "Threshold Triangle",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 2,
+        "max": 1024
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_triangle"
+  },
+  "threshold_yen": {
+    "label": "Threshold Yen",
+    "category": "Filters",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "nbins": {
+        "type": "int",
+        "default": 256,
+        "min": 2,
+        "max": 1024
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_yen"
   },
   "unsharp_mask": {
     "label": "Unsharp Mask (Sharpen)",
@@ -136,6 +1005,31 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.unsharp_mask"
+  },
+  "wiener": {
+    "label": "Wiener Deconvolution",
+    "category": "Filters",
+    "inputs": [
+      "image",
+      "psf"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "balance": {
+        "type": "float",
+        "default": 0.25,
+        "min": 0.0,
+        "max": 100.0,
+        "step": 0.1
+      },
+      "clip": {
+        "type": "bool",
+        "default": true
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.filters.wiener"
   },
   "get_layer": {
     "label": "Get Layer",
@@ -173,38 +1067,6 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
-  },
-  "gamma_correction": {
-    "label": "Gamma Correction",
-    "category": "Math",
-    "inputs": [
-      "image"
-    ],
-    "outputs": [
-      "corrected"
-    ],
-    "parameters": {
-      "gamma": {
-        "type": "float",
-        "default": 1.0,
-        "min": 0.1,
-        "max": 3.0,
-        "step": 0.1
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.math.gamma_correction"
-  },
-  "invert_image": {
-    "label": "Invert Image",
-    "category": "Math",
-    "inputs": [
-      "image"
-    ],
-    "outputs": [
-      "inverted"
-    ],
-    "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.math.invert_image"
   },
   "binary_closing": {
     "label": "Binary Closing (Fill Holes)",
@@ -244,6 +1106,37 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_opening"
   },
+  "black_tophat": {
+    "label": "Black Tophat (Dark Spots)",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "tophat"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 15,
+        "min": 1,
+        "max": 50
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.black_tophat"
+  },
+  "convex_hull": {
+    "label": "Convex Hull",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "hull"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.convex_hull"
+  },
   "dilation": {
     "label": "Dilation",
     "category": "Morphology",
@@ -262,6 +1155,57 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation"
+  },
+  "erosion": {
+    "label": "Erosion (Shrink)",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 50
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.erosion"
+  },
+  "label_objects": {
+    "label": "Label Objects",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "labels"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.label_objects"
+  },
+  "remove_small_holes": {
+    "label": "Remove Small Holes",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "filled_mask"
+    ],
+    "parameters": {
+      "area_threshold": {
+        "type": "int",
+        "default": 64,
+        "min": 10,
+        "max": 1000,
+        "step": 10
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_holes"
   },
   "remove_small_objects": {
     "label": "Remove Small Objects",
@@ -295,6 +1239,66 @@
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.morphology.skeletonize"
   },
+  "white_tophat": {
+    "label": "White Tophat (Bright Spots)",
+    "category": "Morphology",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "tophat"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "int",
+        "default": 15,
+        "min": 1,
+        "max": 50
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat"
+  },
+  "chan_vese": {
+    "label": "Chan Vese (Active Contour)",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_out"
+    ],
+    "parameters": {
+      "mu": {
+        "type": "float",
+        "default": 0.25,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.05
+      },
+      "lambda1": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 5.0,
+        "step": 0.1
+      },
+      "lambda2": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 5.0,
+        "step": 0.1
+      },
+      "max_num_iter": {
+        "type": "int",
+        "default": 100,
+        "min": 10,
+        "max": 500,
+        "step": 10
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.chan_vese"
+  },
   "clear_border": {
     "label": "Clear Border",
     "category": "Segmentation",
@@ -307,8 +1311,27 @@
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.clear_border"
   },
-  "label_objects": {
-    "label": "Label Objects",
+  "expand_labels": {
+    "label": "Expand Labels",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "expanded_labels"
+    ],
+    "parameters": {
+      "distance": {
+        "type": "int",
+        "default": 10,
+        "min": 1,
+        "max": 100
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.expand_labels"
+  },
+  "felzenszwalb": {
+    "label": "Felzenszwalb",
     "category": "Segmentation",
     "inputs": [
       "image"
@@ -316,50 +1339,222 @@
     "outputs": [
       "labels"
     ],
-    "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.label_objects"
+    "parameters": {
+      "scale": {
+        "type": "int",
+        "default": 100,
+        "min": 1,
+        "max": 1000
+      },
+      "sigma": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.0,
+        "max": 10.0
+      },
+      "min_size": {
+        "type": "int",
+        "default": 20,
+        "min": 10,
+        "max": 1000
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.felzenszwalb"
   },
-  "threshold_local": {
-    "label": "Threshold Local (Adaptive)",
+  "find_boundaries": {
+    "label": "Find Boundaries",
     "category": "Segmentation",
     "inputs": [
       "image"
     ],
     "outputs": [
-      "mask_out"
+      "boundaries"
     ],
     "parameters": {
-      "block_size": {
-        "type": "int",
-        "default": 35,
-        "min": 3,
-        "max": 99,
-        "step": 2
+      "mode": {
+        "type": "enum",
+        "default": "thick",
+        "options": [
+          "thick",
+          "inner",
+          "outer",
+          "subpixel"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.find_boundaries"
+  },
+  "mark_boundaries": {
+    "label": "Mark Boundaries (Overlay)",
+    "category": "Segmentation",
+    "inputs": [
+      "image",
+      "label_img"
+    ],
+    "outputs": [
+      "overlay_image"
+    ],
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "outer",
+        "options": [
+          "thick",
+          "inner",
+          "outer",
+          "subpixel"
+        ]
       },
-      "offset": {
+      "color": {
+        "type": "enum",
+        "default": "red",
+        "options": [
+          "red",
+          "blue",
+          "yellow"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.mark_boundaries"
+  },
+  "quickshift": {
+    "label": "Quickshift",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "labels"
+    ],
+    "parameters": {
+      "ratio": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.05
+      },
+      "kernel_size": {
+        "type": "int",
+        "default": 5,
+        "min": 1,
+        "max": 20
+      },
+      "max_dist": {
+        "type": "int",
+        "default": 10,
+        "min": 1,
+        "max": 100
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.quickshift"
+  },
+  "random_walker": {
+    "label": "Random Walker",
+    "category": "Segmentation",
+    "inputs": [
+      "image",
+      "markers"
+    ],
+    "outputs": [
+      "labels"
+    ],
+    "parameters": {
+      "beta": {
+        "type": "int",
+        "default": 130,
+        "min": 10,
+        "max": 5000,
+        "step": 10
+      },
+      "mode": {
+        "type": "enum",
+        "default": "bf",
+        "options": [
+          "bf",
+          "cg_mg",
+          "cg"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.random_walker"
+  },
+  "slic": {
+    "label": "SLIC (Superpixels)",
+    "category": "Segmentation",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "labels"
+    ],
+    "parameters": {
+      "n_segments": {
+        "type": "int",
+        "default": 100,
+        "min": 10,
+        "max": 5000,
+        "step": 10
+      },
+      "compactness": {
+        "type": "float",
+        "default": 10.0,
+        "min": 0.1,
+        "max": 100.0,
+        "step": 0.1
+      },
+      "sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 5.0
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.slic"
+  },
+  "watershed": {
+    "label": "Watershed",
+    "category": "Segmentation",
+    "inputs": [
+      "image",
+      "markers"
+    ],
+    "outputs": [
+      "labels"
+    ],
+    "parameters": {
+      "compactness": {
         "type": "float",
         "default": 0.0,
-        "min": -0.5,
-        "max": 0.5,
+        "min": 0.0,
+        "max": 5.0,
         "step": 0.01
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.threshold_local"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.watershed"
   },
-  "threshold_otsu": {
-    "label": "Otsu Threshold",
-    "category": "Segmentation",
+  "downscale_local_mean": {
+    "label": "Downscale (Binning)",
+    "category": "Transform",
     "inputs": [
       "image"
     ],
     "outputs": [
-      "mask_out"
+      "downscaled"
     ],
-    "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.threshold_otsu"
+    "parameters": {
+      "factor": {
+        "type": "int",
+        "default": 2,
+        "min": 1,
+        "max": 10,
+        "step": 1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.transform.downscale_local_mean"
   },
   "rescale_image": {
-    "label": "Rescale",
+    "label": "Rescale (Zoom)",
     "category": "Transform",
     "inputs": [
       "image"
@@ -401,5 +1596,66 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.rotate_image"
+  },
+  "swirl": {
+    "label": "Swirl",
+    "category": "Transform",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "swirled"
+    ],
+    "parameters": {
+      "strength": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "max": 10.0,
+        "step": 0.1
+      },
+      "radius": {
+        "type": "float",
+        "default": 100.0,
+        "min": 10,
+        "max": 1000,
+        "step": 10
+      },
+      "rotation": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 6.28
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.transform.swirl"
+  },
+  "warp_polar": {
+    "label": "Warp Polar (Ring to Line)",
+    "category": "Transform",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "polar_image"
+    ],
+    "parameters": {
+      "radius": {
+        "type": "float",
+        "default": 100.0,
+        "min": 10,
+        "max": 2000,
+        "step": 10
+      },
+      "scaling": {
+        "type": "enum",
+        "default": "linear",
+        "options": [
+          "linear",
+          "log"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.transform.warp_polar"
   }
 }

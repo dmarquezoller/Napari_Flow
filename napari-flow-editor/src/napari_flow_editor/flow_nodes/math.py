@@ -1,7 +1,9 @@
 from .decorator import register_node
 import numpy as np
-import skimage.util
-import skimage.exposure
+
+# --- ALREADY IMPLEMENTED --- #
+# - blend images              #          
+# --- --- --- --- --- --- --- #
 
 # --- BLEND IMAGES ---
 @register_node(
@@ -21,23 +23,5 @@ def blend_images(image_a, image_b, alpha: float = 0.5):
     # Simple blend logic
     return (image_a * alpha) + (image_b * (1 - alpha))
 
-# --- INVERT IMAGE ---
-@register_node(
-    label="Invert Image",
-    category="Math",
-    outputs=["inverted"]
-)
-def invert_image(image):
-    return skimage.util.invert(image)
 
-# --- GAMMA CORRECTION ---
-@register_node(
-    label="Gamma Correction",
-    category="Math",
-    outputs=["corrected"],
-    params_config={
-        "gamma": {"min": 0.1, "max": 3.0, "step": 0.1}
-    }
-)
-def gamma_correction(image, gamma: float = 1.0):
-    return skimage.exposure.adjust_gamma(image, gamma)
+
