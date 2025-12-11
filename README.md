@@ -7,8 +7,10 @@
 ## ✨ Features
 
 * **Graph Interface:** Drag-and-drop nodes to create processing pipelines.
-* **Live Parameter Tuning:** Adjust `sigma`, `radius`, and `thresholds` in the properties panel.
-* **Smart Execution:** Topological sorting ensures operations run in the correct order.
+* **🚀Smart Caching:** The engine remembers previous results. If you change a parameter at the end of a pipeline, it **only re-runs the affected nodes**, making tuning instant.
+* **🚦Visual Feedback:** Nodes display traffic-light status dots (Grey/Yellow/Green/Red) so you know exactly what is running or cached. 
+* **🖥️Live Console:** A built-in terminal at the bottom displays real-time execution logs and error traces.
+* **Non-Blocking Execution:** Heavy calculations run in the background, keeping the interface responsive.
 * **Auto-Generated Library:** Nodes are generated automatically from Python functions using decorators.
 * **Extensible:** Import your own `.py` scripts to add custom nodes instantly.
 * **Save/Load:** Persist your complex workflows to JSON files.
@@ -45,14 +47,20 @@ Then navigate to `Plugins > Napari Flow Editor` in the top menu
   * **Add Node:** Opens a categorized menu of available algorithms (Filters, Segmentation, etc.).
   * **Import .py:** Load custom user scripts containing your own nodes.(more info below)
   * **Save/Load:** Persist your graph structure to a JSON file to use later.
+  * **Run Pipeline:** Executes the graph.
 * **Properties Panel** (Right):
   * Click any node in the graph to view it here.
-  * You can adjust parameters (like `sigma or radius`) and see the connection status of sockets.
+  * Adjust parameters (like `sigma` or `radius`) and see the connection status of sockets.
+  * **Dynamic Inputs:** For "Get Layer" nodes, select the target layer from the dropdown menu, the available layers will be the layers currently loaded in napari. 
 * **Graph View** (Center):
-  * **Left Click:** Select a node.
-  * **Drag (Socket to Socket):** Create a connection wire between nodes.
-  * **Middle Click / Scroll:** Pan and Zoom around the workspace.
-  * **Delete Key:** Remove the selected node.
+  * **Status Dots:** Every node has a colored light in the top-right corner: 
+    * **⚪Grey:** Dirty/Parameter Changed (Will re-run next time)
+    * **🟡Yellow:** Running...
+    * **🟢Green:** Done/Cached (will skip next time if input or previous nodes don't change)
+    * **🔴Red:** Error (Check the console)
+  * **Controls:** Left-click to select, drag to connect sockets and middle-click to pan 
+* **Execution Console:** (Bottom)
+  * Displays the live progress of the pipeline and detailed error messages if node fails.
 
 ### 2. How to Create a Pipeline
 Follow these steps to build a simple Gaussian Blur workflow:
@@ -70,7 +78,16 @@ Follow these steps to build a simple Gaussian Blur workflow:
     * In the Properties Panel, increase the `sigma` value (e.g., to `5.0`).
 5.  **Run:**
     * Click the big green **RUN PIPELINE** button.
+    * Along the execution, while a given node is running, the status will turn yellow 🟡 and as soon as it finishes it will turn green 🟢 (or red 🔴 if fails).
     * A new layer named `Gaussian Blur (image_out)` will appear in Napari with the results.
+
+### 3. Smart Caching and Optimization
+The editor is designed for experimentation.
+* If you have a long pipeline (A --> B --> C --> D ) and you only change a parameter in **Node C**:
+  * When you click **Run Pipeline** again, the engine sees that **A** and **B** have not changed.
+  * It **skips** A and B (instantly retrieving their cached results from memory).
+  * In only executes **C** and **D**.
+  * This allows you to tune downstream parameters instantly without waiting for heavy upstream filters to re-calculate.
 
 ## 👨‍💻 Developer Guide: Adding Custom Nodes
 
@@ -109,9 +126,10 @@ def my_blur(image_in, sigma: float = 1.0):
 
 ### 3. How it works
 
-1. **Scan:** On startup (or import), the `generate_library.py` script inspects the functions marked with `@register_node`.
-2. **Map:** It maps Python types (`float`,`int`,`str`) to Qt Widgets (`SpinBox`,`ComboBox`).
-3. **Execute:** When you click Run, the `ExecutionEngine` imports your function dynamically and passes the data from the previous node.
+1. **Scan:** On startup (or import), the system scans functions marked with `@register_node`.
+2. **Hash:** Before running, the engine calculates a **Signature** for every node (Hash of Inputs + Parameters).
+3. **Cache:** If `Current_Signature == Last_Signature`, execution is skipped and cached results are used.
+4. **Thread:** The execution runs in a background `QThread` to keep the UI responsive, sending signals back to update the graph and Napari layers.
 
 ## 📄 License
 
