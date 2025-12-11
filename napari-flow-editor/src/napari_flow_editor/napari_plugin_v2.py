@@ -8,7 +8,7 @@ from qtpy.QtWidgets import (
 )
 
 from qtpy.QtGui import (
-    QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor
+    QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect
@@ -146,9 +146,13 @@ class Node(QGraphicsRectItem):
     def __init__(self, x, y, node_type="generic", title=None, uuid_str=None, scene=None):
         # 1. Setup Data
         self.node_type = node_type
-        # If a UUID is provided (loading), use it. Otherwise generate new one.
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
+
+        # --- State variables ---
+        self.status = "gray"
+        self.last_signature = None
+        self.cached_results = {}
         
         # Load Definition
         inputs_data = ["in"] # Default if not found
@@ -207,20 +211,23 @@ class Node(QGraphicsRectItem):
         return super().itemChange(change, value)
 
     def paint(self, painter, option, widget):
-        # ... (Use the paint method from the previous step) ...
-        # Just ensure you use the corrected paint method I gave you previously
-        # that uses QRectF for drawRect
         rect = self.rect()
+
+        # A. Shadow
         painter.fillRect(rect.adjusted(4, 4, 4, 4), QColor(0, 0, 0, 60))
+        
+        # B. Main Body Gradient
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
         gradient.setColorAt(0, QColor("#3F4242"))
         gradient.setColorAt(1, QColor("#2F3232")) 
         painter.setBrush(QBrush(gradient))
         
+        # C. Selection Border
         border_color = QColor("#ff9900") if self.isSelected() else QColor("#727272")
         painter.setPen(QPen(border_color, 2))
         painter.drawRoundedRect(rect, 12, 12)
 
+        # D. Title Header
         title_rect = QRectF(rect.x(), rect.y(), rect.width(), 25)
         title_grad = QLinearGradient(title_rect.topLeft(), title_rect.bottomRight())
         title_grad.setColorAt(0, QColor("#666"))
@@ -232,9 +239,27 @@ class Node(QGraphicsRectItem):
         fix_rect = QRectF(rect.x(), rect.y() + 15, rect.width(), 10)
         painter.drawRect(fix_rect)
 
+        # E. Title Text
         painter.setPen(Qt.GlobalColor.white)
-        painter.drawText(title_rect, Qt.AlignmentFlag.AlignCenter, self.title)
+        text_rect = QRectF(rect.x(), rect.y(), rect.width()-15, 25)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.title)
 
+        # F. Status Light
+        status_colors = {
+            "gray": QColor("#777777"),   # Dirty/Stale (grey)
+            "yellow": QColor("#FFD700"), # Running (yellow)
+            "green": QColor("#32CD32"),  # Cached/Done (green)
+            "red": QColor("#FF4500")     # Error (red)
+        }
+        light_color = status_colors.get(self.status, QColor("#777777"))
+        
+        painter.setBrush(QBrush(light_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        # Draw small circle in top-right
+        dot_rect = QRectF(rect.x() + rect.width() - 18, rect.y() + 7, 10, 10)
+        painter.drawEllipse(dot_rect)
+        
+        # G. Parameters Text
         font = painter.font()
         font.setPointSize(8)
         painter.setFont(font)
@@ -649,10 +674,31 @@ class FlowEditor(QWidget):
                 status_lbl.setStyleSheet(style)
                 self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
 
-    def update_param(self, node, key, value):
-        node.parameters[key] = value
-        # Force update of nodes
-        node.update()
+    def update_param(self, node, param_name, value):
+        """Updates a parameter and invalidates the node."""
+        node.parameters[param_name] = value
+        # When a parameter changes, this node and all downstream nodes become "stale"
+        self.set_node_status_recursive(node, "gray")
+        self.scene.update() 
+
+    def set_node_status_recursive(self, node, status):
+        """Sets status of a node and recursively updates all downstream nodes."""
+        # Optimization: If already that status, stop (prevents infinite loops in cyclic graphs)
+        if node.status == status:
+            return
+            
+        node.status = status
+        
+        # If turning gray, we must wipe the 'last_signature' so it knows to re-run next time
+        if status == "gray":
+            node.last_signature = None 
+            
+        # Propagate to children (nodes connected to my outputs)
+        for output_socket in node.outputs:
+            for edge in output_socket.connected_edges:
+                if edge.end_socket:
+                    child_node = edge.end_socket.node
+                    self.set_node_status_recursive(child_node, status)
 
     # --- Save Pipeline Method ---
     def save_pipeline(self):
@@ -867,6 +913,7 @@ class FlowEditor(QWidget):
         
         # 3. Connect Signals
         self.thread.started.connect(self.worker.run)
+        self.worker.node_status_signal.connect(self.update_node_status)
         
         # LOGGING
         self.worker.log_signal.connect(self.append_log)
@@ -884,6 +931,18 @@ class FlowEditor(QWidget):
         
         # 4. Start
         self.thread.start()
+
+    def update_node_status(self, node_uid, status):
+        """
+        Received from Worker Thread. 
+        Finds the node by UID and updates its color.
+        """
+        for item in self.scene.items():
+            # We check isinstance to be safe
+            if isinstance(item, Node) and item.uid == node_uid:
+                item.status = status
+                item.update() # Force repaint of the dot
+                break
 
     def handle_execution_result(self, node_title, output_name, data):
         """
