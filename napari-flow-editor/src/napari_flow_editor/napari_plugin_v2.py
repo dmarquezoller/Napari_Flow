@@ -17,6 +17,7 @@ import numpy as np
 
 from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
+from .script_generator import ScriptGenerator
 
 NODE_LIBRARY = {}
 
@@ -441,7 +442,11 @@ class FlowEditor(QWidget):
 
         self.btn_import = QPushButton("Import Nodes (.py)")
         self.btn_import.clicked.connect(self.import_custom_module)
-        toolbar.addWidget(self.btn_import)        
+        toolbar.addWidget(self.btn_import)  
+
+        self.btn_export = QPushButton("Export Script")
+        self.btn_export.clicked.connect(self.export_to_python)
+        toolbar.addWidget(self.btn_export)      
 
         self.layout.addLayout(toolbar)
 
@@ -1062,6 +1067,32 @@ class FlowEditor(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "Import Error", str(e))
+
+    # --- Export to Python Script Method ---
+    def export_to_python(self):
+        """Generates and saves the pipeline as a .py file."""
+        # 1. Generate Code
+        generator = ScriptGenerator(self.scene)
+        code = generator.generate()
+        
+        # 2. Open Save Dialog
+        filename, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Export Python Script", 
+            "pipeline.py", 
+            "Python Files (*.py)"
+        )
+        
+        if filename:
+            if not filename.endswith(".py"):
+                filename += ".py"
+            
+            try:
+                with open(filename, "w") as f:
+                    f.write(code)
+                QMessageBox.information(self, "Success", f"Script exported to {filename}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", str(e))
 
 
 
