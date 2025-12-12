@@ -8,7 +8,7 @@ from qtpy.QtWidgets import (
 )
 
 from qtpy.QtGui import (
-    QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient
+    QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect
@@ -678,6 +678,45 @@ class FlowEditor(QWidget):
                 status_lbl = QLabel(status_text)
                 status_lbl.setStyleSheet(style)
                 self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
+        
+        self.props_layout.addRow(QLabel("")) 
+
+        # --- SECTION 3: PREVIEW LAYER ---
+        self.props_layout.addRow(QLabel("<u>Result Preview</u>"))
+        if hasattr(node, "cached_results") and node.cached_results:
+            # Just grab the first value found in the dict
+            first_key = next(iter(node.cached_results))
+            data = node.cached_results[first_key]
+            
+            if isinstance(data, np.ndarray):
+                # Convert
+                pixmap = self.numpy_to_qpixmap(data)
+                
+                if pixmap:
+                    # Create Label container
+                    preview_lbl = QLabel()
+                    preview_lbl.setPixmap(pixmap)
+                    preview_lbl.setAlignment(Qt.AlignCenter)
+                    preview_lbl.setStyleSheet("border: 1px solid #444; margin-top: 5px;")
+                    
+                    # Add to layout
+                    self.props_layout.addRow(preview_lbl)
+                    
+                    # Add Info text (Shape/Type)
+                    info_text = f"Shape: {data.shape}\nType: {data.dtype}"
+                    self.props_layout.addRow(QLabel(f"<span style='color:#888; font-size:10px;'>{info_text}</span>"))
+                else:
+                    self.props_layout.addRow(QLabel("<em>Preview not available (Format?)</em>"))
+            else:
+                self.props_layout.addRow(QLabel("<em>Output is not an image.</em>"))
+                
+        else:
+            # No data yet
+            if node.status == "gray":
+                self.props_layout.addRow(QLabel("<em>Node has changed. Run to update.</em>"))
+            else:
+                self.props_layout.addRow(QLabel("<em>No cached result.</em>"))
+
 
     def update_param(self, node, param_name, value):
         """Updates a parameter and invalidates the node."""
@@ -966,6 +1005,12 @@ class FlowEditor(QWidget):
                     self.viewer.add_labels(data, name=layer_name)
                 else:
                     self.viewer.add_image(data, name=layer_name)
+        selected_items = self.scene.selectedItems()
+        if selected_items:
+            sel_node = selected_items[0]
+            if isinstance(sel_node, Node) and sel_node.title == node_title:
+                # If the currently viewed node just finished running, refresh the panel!
+                self.on_selection()
 
     def append_log(self, text):
         self.console.append(text)
@@ -1094,6 +1139,69 @@ class FlowEditor(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", str(e))
 
+    def numpy_to_qpixmap(self, array):
+        """Converts NumPy array to QPixmap with automatic coloring for Labels/Masks."""
+        if array is None:
+            return None
+            
+        # 1. Handle 3D Data (Take middle slice)
+        if array.ndim == 3:
+            mid_z = array.shape[0] // 2
+            display_data = array[mid_z, :, :]
+        elif array.ndim == 2:
+            display_data = array
+        else:
+            return None 
+            
+        height, width = display_data.shape
+        
+        # --- A. BOOLEAN MASK (True/False) -> Cyan/Black ---
+        if display_data.dtype == bool:
+            # Create RGB container (Height, Width, 3)
+            rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+            
+            # Set True pixels to Cyan (0, 255, 255)
+            # You can change this color to whatever you like!
+            rgb_image[display_data] = [0, 255, 255] 
+            
+            q_img = QImage(rgb_image.data, width, height, 3 * width, QImage.Format_RGB888)
+            
+        # --- B. LABELS (Integers) -> Random Colors ---
+        elif np.issubdtype(display_data.dtype, np.integer):
+            # Normalize to 0-255 just to see structure, OR apply a color map.
+            # A simple trick for labels is to multiply by a prime number to scramble colors
+            # This makes label 1 and label 2 look very different.
+            
+            # Create RGB container
+            rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+            
+            # Simple pseudo-random coloring based on label ID
+            # We use prime numbers to shuffle the bits for R, G, B
+            mask = display_data > 0
+            ids = display_data[mask]
+            
+            rgb_image[mask, 0] = (ids * 157) % 255  # Red channel
+            rgb_image[mask, 1] = (ids * 31) % 255   # Green channel
+            rgb_image[mask, 2] = (ids * 73) % 255   # Blue channel
+            
+            q_img = QImage(rgb_image.data, width, height, 3 * width, QImage.Format_RGB888)
 
-
-
+        # --- C. STANDARD IMAGE (Floats) -> Grayscale ---
+        else:
+            # Normalize to 0-255
+            data = display_data.astype(float)
+            d_min, d_max = np.min(data), np.max(data)
+            
+            if d_max > d_min:
+                norm = (data - d_min) / (d_max - d_min) * 255
+            else:
+                norm = np.zeros_like(data)
+                
+            norm = norm.astype(np.uint8)
+            
+            # Use Grayscale format
+            q_img = QImage(norm.data, width, height, width, QImage.Format_Grayscale8)
+        
+        # Convert to Pixmap and Scale
+        pixmap = QPixmap.fromImage(q_img)
+        return pixmap.scaled(350, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
