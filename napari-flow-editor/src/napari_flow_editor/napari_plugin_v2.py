@@ -4,7 +4,7 @@ from qtpy.QtWidgets import (
     QGraphicsDropShadowEffect, QToolBar, QInputDialog, QFileDialog, QVBoxLayout,
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
-    QFrame, QMessageBox, QTextEdit
+    QFrame, QMessageBox, QTextEdit, QSplitter
 )
 
 from qtpy.QtGui import (
@@ -452,7 +452,7 @@ class FlowEditor(QWidget):
 
         # 3. Node Properties Panel (Middle)
         self.props_group = QGroupBox("Node Properties")
-        self.props_group.setFixedHeight(250) # Limit height so it doesn't squash the view
+
         # Inner Layout for the GroupBox
         group_layout = QVBoxLayout()
         self.props_group.setLayout(group_layout)
@@ -470,15 +470,18 @@ class FlowEditor(QWidget):
         
         # Put container into scroll area
         scroll.setWidget(scroll_content)
-        
-        # Put scroll area into group box
         group_layout.addWidget(scroll)
-        
-        self.layout.addWidget(self.props_group)
 
+
+        self. bottom_container = QWidget()
+        bottom_layout = QVBoxLayout(self.bottom_container)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+
+        action_layout = QHBoxLayout()
+        
         # 4. Fit Scene Button (Below Properties)
         self.btn_fit = QPushButton("Fit to Scene")
-        self.layout.addWidget(self.btn_fit)
+        bottom_layout.addWidget(self.btn_fit)
 
         # RUN button
         self.btn_run = QPushButton("RUN PIPELINE")
@@ -502,27 +505,36 @@ class FlowEditor(QWidget):
         """)
 
         self.btn_run.clicked.connect(self.run_pipeline)
-        self.layout.addWidget(self.btn_run)
+        action_layout.addWidget(self.btn_run)
+
+        bottom_layout.addLayout(action_layout)
 
         # 5. Graphics View (Bottom)
         self.scene = FlowScene()
         self.view = FlowView(self.scene)
-        self.layout.addWidget(self.view)
+        bottom_layout.addWidget(self.view)
 
         # 6. Console (Bottom)
         self.console_label = QLabel("Execution Log:")
-        self.layout.addWidget(self.console_label)
+        bottom_layout.addWidget(self.console_label)
 
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setFixedHeight(100) # Small height like a terminal
         self.console.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: Monospace;")
-        self.layout.addWidget(self.console)
+        bottom_layout.addWidget(self.console)
 
-        # --- CONNECTIONS ---
-        # Connect the Fit Button
+        # Vertical Spacer
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.addWidget(self.props_group)
+        self.splitter.addWidget(self.bottom_container)
+
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 7)
+
+        self.layout.addWidget(self.splitter)
+
         self.btn_fit.clicked.connect(self.view.fit_scene)
-        
         self.scene.selectionChanged.connect(self.on_selection)
 
     # HELPER TO GET UNIQUE NODE TITLE
