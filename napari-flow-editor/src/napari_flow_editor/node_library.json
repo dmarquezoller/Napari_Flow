@@ -1657,5 +1657,30 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.warp_polar"
+  },
+  "colocalization_scatter": {
+    "label": "Colocalization Scatter",
+    "category": "Plotting",
+    "inputs": [
+      "image_ch1",
+      "image_ch2"
+    ],
+    "outputs": [
+      "plot"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.colocalization_scatter"
+  },
+  "plot_histogram": {
+    "label": "Plot Histogram",
+    "category": "Plotting",
+    "inputs": [
+      "image_in"
+    ],
+    "outputs": [
+      "plot"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.plot_histogram"
   }
 }

@@ -4,7 +4,7 @@ from qtpy.QtWidgets import (
     QGraphicsDropShadowEffect, QToolBar, QInputDialog, QFileDialog, QVBoxLayout,
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
-    QFrame, QMessageBox, QTextEdit, QSplitter
+    QFrame, QMessageBox, QTextEdit, QSplitter, QDialog
 )
 
 from qtpy.QtGui import (
@@ -15,6 +15,10 @@ import os, sys, json, datetime, napari, uuid, importlib.util, inspect
 
 import numpy as np
 
+import matplotlib.pyplot as plt
+
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
 from .script_generator import ScriptGenerator
@@ -1005,6 +1009,12 @@ class FlowEditor(QWidget):
         Receives data from the worker and safely updates Napari.
         This runs on the MAIN THREAD.
         """
+        # CASE A: Result is a plot, not a layer
+        if isinstance(data, Figure):
+            self.show_plot_popup(node_title, data)
+            return # Stop here, don't try to add it as a layer
+        
+        # CASE B: Result is a layer
         if isinstance(data, np.ndarray):
             layer_name = f"{node_title} ({output_name})"
             try:
@@ -1155,7 +1165,20 @@ class FlowEditor(QWidget):
         """Converts NumPy array to QPixmap with automatic coloring for Labels/Masks."""
         if array is None:
             return None
+        
+        if array.ndim == 3 and array.shape[-1] in [3, 4]:
+            display_data = array
+            height, width, channels = display_data.shape
             
+            # Create QImage directly from RGB data
+            # Ensure it is uint8
+            if display_data.dtype != np.uint8:
+                display_data = (display_data * 255).astype(np.uint8)
+                
+            fmt = QImage.Format_RGB888 if channels == 3 else QImage.Format_RGBA8888
+            q_img = QImage(display_data.data, width, height, channels * width, fmt)
+            
+            return QPixmap.fromImage(q_img).scaled(350, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         # 1. Handle 3D Data (Take middle slice)
         if array.ndim == 3:
             mid_z = array.shape[0] // 2
@@ -1217,3 +1240,28 @@ class FlowEditor(QWidget):
         # Convert to Pixmap and Scale
         pixmap = QPixmap.fromImage(q_img)
         return pixmap.scaled(350, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def show_plot_popup(self, title, figure):
+        """Opens a QDialog to display the matplotlib figure."""
+        
+        # Create a Dialog Window
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Result: {title}")
+        dialog.resize(600, 450)
+        
+        # Create Layout
+        layout = QVBoxLayout(dialog)
+        
+        # The 'Canvas' is the Qt Widget that draws the Figure
+        canvas = FigureCanvas(figure)
+        layout.addWidget(canvas)
+        
+        # Add 'Close' button? (Optional, X works fine)
+        # show() makes it non-blocking (you can keep working while it's open)
+        dialog.show() 
+
+        if not hasattr(self, 'plot_windows'):
+            self.plot_windows = []
+        
+        self.plot_windows.append(dialog)
+        dialog.finished.connect(lambda: self.plot_windows.remove(dialog) if dialog in self.plot_windows else None)
