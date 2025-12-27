@@ -14,7 +14,7 @@ from qtpy.QtCore import Qt, QPointF, QRectF, QThread
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect
 
 import numpy as np
-
+import dask.array as da
 import matplotlib.pyplot as plt
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -591,9 +591,20 @@ class FlowEditor(QWidget):
         else:
             params_def = NODE_LIBRARY[node.node_type]["parameters"]
             
+            ### DEBUG ###
+            print(f"DEBUG: Selected Node Type: {node.node_type}")
+            print(f"DEBUG: Full Node Definition: {NODE_LIBRARY[node.node_type]}")
+            print(f"DEBUG: Parameter Keys found: {list(params_def.keys())}")
+            
+            # Loop Check
             for param_name, conf in params_def.items():
-                current_val = node.parameters.get(param_name, conf["default"])
-                
+                print(f"  -> Processing param: '{param_name}' | Type: {conf.get('type')} | Keys: {list(conf.keys())}")
+
+            #############
+            
+            for param_name, conf in params_def.items():
+                default_val = conf.get("default", "")
+                current_val = node.parameters.get(param_name, default_val)
                 # --- A. SPECIAL CASE: Dynamic Layer Selector ---
                 # If this is the Input Node, populate the dropdown with REAL Napari layers
                 if node.node_type == "get_layer" and param_name == "layer_name":
@@ -653,6 +664,36 @@ class FlowEditor(QWidget):
                     widget.addItems(conf.get("options", []))
                     widget.setCurrentText(str(current_val))
                     widget.currentTextChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                
+                # PATH
+                elif conf["type"] == "path":
+                    widget_container = QWidget()
+                    layout = QHBoxLayout(widget_container)
+                    layout.setContentsMargins(0, 0, 0, 0)
+                    
+                    line_edit = QLineEdit(str(current_val))
+                    browse_btn = QPushButton("...")
+                    browse_btn.setFixedWidth(30)
+                    
+                    layout.addWidget(line_edit)
+                    layout.addWidget(browse_btn)
+                    
+                    # --- FIX 2: Pass 'conf' (c=conf) to capture the loop variable properly ---
+                    def open_file_dialog(le=line_edit, n=node, k=param_name, c=conf):
+                        mode = c.get("mode", "file") 
+                        if mode == "directory":
+                            path = QFileDialog.getExistingDirectory(self, "Select Directory")
+                        else:
+                            path, _ = QFileDialog.getOpenFileName(self, "Select File")
+                            
+                        if path:
+                            le.setText(path)
+                            self.update_param(n, k, path)
+
+                    browse_btn.clicked.connect(lambda _: open_file_dialog())
+                    line_edit.textChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    
+                    widget = widget_container
                 
                 # STRING / OTHER
                 else:
@@ -1009,31 +1050,72 @@ class FlowEditor(QWidget):
         Receives data from the worker and safely updates Napari.
         This runs on the MAIN THREAD.
         """
-        # CASE A: Result is a plot, not a layer
+        
+        # 1. FIND THE NODE OBJECT
+        # We need the actual object to access parameters (like "layer_name")
+        node_obj = next((item for item in self.scene.items() 
+                        if isinstance(item, Node) and item.title == node_title), None)
+
+        # 2. UPDATE CACHED RESULTS
+        # Store data so the Preview Panel works when you click the node later
+        if node_obj:
+            node_obj.cached_results[output_name] = data
+            node_obj.status = "green" # Ensure status is green
+
+
+        # --- CASE A: Result is a Plot ---
         if isinstance(data, Figure):
             self.show_plot_popup(node_title, data)
-            return # Stop here, don't try to add it as a layer
-        
-        # CASE B: Result is a layer
-        if isinstance(data, np.ndarray):
+            return
+
+        # --- CASE B: Result is Data (Numpy or Dask/Zarr) ---
+        # We add 'da.Array' to the check so Zarr passes through
+        if isinstance(data, (np.ndarray, da.Array)):
+            
+            # Default Layer Name
             layer_name = f"{node_title} ({output_name})"
+            
+            # SPECIAL: If this is the Zarr node, use the user-defined name
+            if node_obj and node_obj.node_type == "open_zarr":
+                layer_name = node_obj.parameters.get("layer_name", layer_name)
+
             try:
-                # Update existing layer
-                self.viewer.layers[layer_name].data = data
-                self.viewer.layers[layer_name].refresh()
-            except KeyError:
-                # Create new layer
-                if data.dtype == bool or np.issubdtype(data.dtype, np.integer):
-                    self.viewer.add_labels(data, name=layer_name)
+                if layer_name in self.viewer.layers:
+                    # Update existing layer
+                    print(f"⚡ Updating layer: {layer_name}")
+                    self.viewer.layers[layer_name].data = data
+                    self.viewer.layers[layer_name].refresh()
                 else:
-                    self.viewer.add_image(data, name=layer_name)
+                    # Create new layer
+                    print(f"✨ Creating layer: {layer_name}")
+                    
+                    # Check for Labels (Integers) vs Images (Floats)
+                    # Dask arrays need slightly different checking than Numpy
+                    is_labels = False
+                    if isinstance(data, np.ndarray):
+                        is_labels = data.dtype == bool or np.issubdtype(data.dtype, np.integer)
+                    elif isinstance(data, da.Array):
+                        # For Dask, we check the dtype attribute directly
+                        is_labels = data.dtype == bool or np.issubdtype(data.dtype, np.integer)
+
+                    if is_labels:
+                        self.viewer.add_labels(data, name=layer_name)
+                    else:
+                        self.viewer.add_image(data, name=layer_name)
+                        
+            except Exception as e:
+                print(f"Error updating Napari layer '{layer_name}': {e}")
+
+        # --- REFRESH UI IF SELECTED ---
         selected_items = self.scene.selectedItems()
         if selected_items:
             sel_node = selected_items[0]
+            # Compare titles to see if the currently selected node is the one that just finished
             if isinstance(sel_node, Node) and sel_node.title == node_title:
-                # If the currently viewed node just finished running, refresh the panel!
                 self.on_selection()
-
+        
+        # Force a scene update to repaint the status lights
+        self.scene.update()
     def append_log(self, text):
         self.console.append(text)
         sb = self.console.verticalScrollBar()

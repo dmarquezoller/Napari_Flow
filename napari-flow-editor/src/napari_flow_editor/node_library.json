@@ -1047,6 +1047,26 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer"
   },
+  "open_zarr": {
+    "label": "Open Zarr",
+    "category": "Input",
+    "inputs": [],
+    "outputs": [
+      "data"
+    ],
+    "parameters": {
+      "path": {
+        "type": "path",
+        "default": "",
+        "mode": "directory"
+      },
+      "layer_name": {
+        "type": "string",
+        "default": "zarr_layer"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.open_zarr"
+  },
   "blend_images": {
     "label": "Blend Images",
     "category": "Math",

@@ -70,7 +70,7 @@ def generate():
                             param_def.update(extra_config)
                             
                             # Fallback for enums without options
-                            if p_type == "enum" and "options" not in param_def:
+                            if param_def["type"] == "enum" and "options" not in param_def:
                                 param_def["type"] = "string"
 
                             parameters[param_name] = param_def
