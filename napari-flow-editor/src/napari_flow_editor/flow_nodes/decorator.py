@@ -1,5 +1,6 @@
 import functools
-
+import dask.array as da
+import numpy as np
 
 def register_node(label, category, outputs=None, params_config=None):
     """
@@ -33,5 +34,36 @@ def register_node(label, category, outputs=None, params_config=None):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+
+def smart_compute(dask_func=None):
+    """
+    A decorator that automatically routes computation based on input data type.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # 1. Grab the first argument (assumed to be the image)
+            if not args:
+                return func(*args, **kwargs)
+            
+            data = args[0]
+            
+            # 2. Check if it is a Dask Array (Lazy/Big)
+            if isinstance(data, da.Array):
+                if dask_func is not None:
+                    print(f"⚡ [Smart Compute] Dispatching to Dask/Lazy: {dask_func.__name__}")
+                    return dask_func(*args, **kwargs)
+                else:
+                    print(f"⚠️ [Smart Compute] Warning: Input is Dask, but no dask_func provided. Running original.")
+                    return func(*args, **kwargs)
+
+            # 3. Default: It is a Numpy Array (RAM/Small)
+            print(f"💾 [Smart Compute] Dispatching to NumPy/RAM: {func.__name__}")
+            return func(*args, **kwargs)
+            
         return wrapper
     return decorator
