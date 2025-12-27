@@ -44,17 +44,19 @@ def open_zarr(path: str = "", layer_name: str = "zarr_layer"):
     if not path:
         return None
         
-    try:
-        print(f"📂 [Open Zarr] Pointing to: {path}")
+    z_group = zarr.open(str(path), mode='r')
         
-        # Load Metadata Only
-        lazy_image = da.from_zarr(str(path), component='0')
-        
-        print(f"✅ [Open Zarr] Success! Shape: {lazy_image.shape}")
-        return lazy_image
+    # 2. Create a list of Dask arrays for each level
+    # (This assumes standard OME-Zarr structure where keys are numbers)
+    pyramid = []
+    for i in range(len(z_group)):
+        try:
+            d = da.from_zarr(str(path), component=str(i))
+            pyramid.append(d)
+        except:
+            break
+                
+    return pyramid
 
-    except Exception as e:
-        print(f"❌ [Open Zarr] Error: {e}")
-        return None
 
 

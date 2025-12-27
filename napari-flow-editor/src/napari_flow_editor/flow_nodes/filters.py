@@ -1,4 +1,4 @@
-from .decorator import register_node
+from .decorator import register_node, smart_compute
 import skimage.filters
 import numpy as np
 
@@ -196,6 +196,36 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
 
 
 # --- GAUSSIAN BLUR ---
+# Define the Dask-friendly version
+def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
+    # Calculate overlap depth (4 * sigma is standard for Gaussian)
+    depth = int(sigma * 4) + 1
+    def debug_worker(chunk, sigma, mode):
+        # 1. Run the actual filter
+        result = skimage.filters.gaussian(chunk, sigma=sigma, mode=mode)
+        
+        # 2. THE VISUAL DEBUGGER
+        # We add a tiny random brightness to this specific chunk.
+        # If this chunk is computed FRESH, it will have a unique tint.
+        # If it is CACHED, the tint will remain locked.
+        random_tint = np.random.uniform(-0.05, 0.05) 
+        
+        # Print so we know it ran
+        print(f"🎨 [Visual Debug] Painting Chunk {chunk.shape} with tint {random_tint:.4f}")
+        
+        return result + random_tint
+    
+    # map_overlap applies the filter to chunks with a "halo"
+    return image.map_overlap(
+        debug_worker,
+        depth=depth,
+        boundary=mode,
+        dtype=image.dtype,
+        sigma=sigma,
+        mode=mode
+    )
+
+# --- 2. DEFINE THE NODE (Standard) ---
 @register_node(
     label="Gaussian Blur",
     category="Filters",
@@ -205,8 +235,9 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
         "mode": {"options": ["nearest", "reflect", "wrap", "constant"]}
     }
 )
+@smart_compute(dask_func=dask_gaussian_blur) # <--- Links the two versions
 def gaussian_blur(image, sigma: float = 1.0, mode: str = 'nearest'):
-    """Wraps skimage.filters.gaussian"""
+    """Standard implementation for NumPy arrays"""
     return skimage.filters.gaussian(image, sigma=sigma, mode=mode)
 
 

@@ -11,7 +11,7 @@ from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread
-import os, sys, json, datetime, napari, uuid, importlib.util, inspect
+import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr
 
 import numpy as np
 import dask.array as da
@@ -440,6 +440,10 @@ class FlowEditor(QWidget):
         self.btn_save.clicked.connect(self.save_pipeline)
         toolbar.addWidget(self.btn_save)
 
+        self.btn_save_zarr = QPushButton("Save to Zarr")
+        self.btn_save_zarr.clicked.connect(self.save_to_zarr)
+        toolbar.addWidget(self.btn_save_zarr)
+
         self.btn_load = QPushButton("Load Pipeline")
         self.btn_load.clicked.connect(self.load_pipeline)
         toolbar.addWidget(self.btn_load)
@@ -590,17 +594,6 @@ class FlowEditor(QWidget):
             self.props_layout.addRow(QLabel("No parameters defined."))
         else:
             params_def = NODE_LIBRARY[node.node_type]["parameters"]
-            
-            ### DEBUG ###
-            print(f"DEBUG: Selected Node Type: {node.node_type}")
-            print(f"DEBUG: Full Node Definition: {NODE_LIBRARY[node.node_type]}")
-            print(f"DEBUG: Parameter Keys found: {list(params_def.keys())}")
-            
-            # Loop Check
-            for param_name, conf in params_def.items():
-                print(f"  -> Processing param: '{param_name}' | Type: {conf.get('type')} | Keys: {list(conf.keys())}")
-
-            #############
             
             for param_name, conf in params_def.items():
                 default_val = conf.get("default", "")
@@ -1070,7 +1063,7 @@ class FlowEditor(QWidget):
 
         # --- CASE B: Result is Data (Numpy or Dask/Zarr) ---
         # We add 'da.Array' to the check so Zarr passes through
-        if isinstance(data, (np.ndarray, da.Array)):
+        if isinstance(data, (np.ndarray, da.Array , list)):
             
             # Default Layer Name
             layer_name = f"{node_title} ({output_name})"
@@ -1347,3 +1340,87 @@ class FlowEditor(QWidget):
         
         self.plot_windows.append(dialog)
         dialog.finished.connect(lambda: self.plot_windows.remove(dialog) if dialog in self.plot_windows else None)
+
+    def save_to_zarr(self):
+        layer = self.viewer.layers.selection.active
+        if not layer:
+            QMessageBox.warning(self, "No Selection", "Please select a layer to save.")
+            return
+
+        # 1. Select Parent Folder
+        path = QFileDialog.getExistingDirectory(self, "Select Zarr Group (Parent Folder)")
+        if not path:
+            return
+            
+        # --- SAFETY CHECK: Are we inside an Image Group? ---
+        # If the user selected a .zarr folder that already has '0', '1' inside it...
+        if os.path.exists(os.path.join(path, "0")) and os.path.exists(os.path.join(path, ".zattrs")):
+            reply = QMessageBox.question(
+                self, "Structure Warning",
+                "The selected Zarr file appears to be a Single Image (it contains raw data at the root).\n\n"
+                "You cannot save a new layer INSIDE it without restructuring it first.\n\n"
+                "Do you want to create a NEW Zarr file next to it instead?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Move selection up one level (outside the .zarr)
+                path = os.path.dirname(path)
+            else:
+                # User insists on saving inside. This will break standard readers unless they know what they are doing.
+                # We proceed, but know that 'drag-and-drop' might fail.
+                pass
+        # ---------------------------------------------------
+
+        # 2. Ask for Name
+        default_name = f"{layer.name}_processed.zarr"
+        dataset_name, ok = QInputDialog.getText(self, "Save to Zarr", 
+                                            "Dataset Name:", 
+                                            text=default_name)
+        if not ok or not dataset_name:
+            return
+
+        full_path = os.path.join(path, dataset_name)
+        
+        # ... (Rest of the saving logic remains the same) ...
+        # ... (Copy the 'data_to_save' logic from the previous fix) ...
+        
+        raw_data = layer.data
+        is_multiscale = getattr(layer, 'multiscale', False)
+        
+        if is_multiscale:
+            data_to_save = list(raw_data)
+            print(f"📦 Detected Napari MultiScaleData. Converted to list.")
+        else:
+            data_to_save = raw_data
+
+        try:
+            root_group = zarr.open_group(full_path, mode='w')
+
+            def save_single_array(array, component_name):
+                # (Use the robust helper from before)
+                if isinstance(array, da.Array):
+                    da.to_zarr(array, url=full_path, component=component_name, overwrite=True)
+                elif isinstance(array, np.ndarray):
+                    root_group.create_dataset(component_name, data=array, overwrite=True)
+                elif isinstance(array, (list, tuple)):
+                    save_single_array(array[0], component_name)
+                else:
+                    root_group.create_dataset(component_name, data=np.asarray(array), overwrite=True)
+
+            if isinstance(data_to_save, (list, tuple)):
+                for i, level_array in enumerate(data_to_save):
+                    save_single_array(level_array, str(i))
+                root_group.attrs["multiscales"] = [{
+                    "version": "0.4",
+                    "datasets": [{"path": str(i)} for i in range(len(data_to_save))]
+                }]
+            else:
+                save_single_array(data_to_save, "0")
+
+            QMessageBox.information(self, "Success", f"Layer saved to:\n{full_path}")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Could not save Zarr:\n{e}")
