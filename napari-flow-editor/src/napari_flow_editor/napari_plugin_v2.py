@@ -1038,77 +1038,80 @@ class FlowEditor(QWidget):
                 item.update() # Force repaint of the dot
                 break
 
+
     def handle_execution_result(self, node_title, output_name, data):
-        """
-        Receives data from the worker and safely updates Napari.
-        This runs on the MAIN THREAD.
-        """
-        
-        # 1. FIND THE NODE OBJECT
-        # We need the actual object to access parameters (like "layer_name")
+        # 1. Find the Node Object to update status/cache
         node_obj = next((item for item in self.scene.items() 
                         if isinstance(item, Node) and item.title == node_title), None)
-
-        # 2. UPDATE CACHED RESULTS
-        # Store data so the Preview Panel works when you click the node later
+        
         if node_obj:
             node_obj.cached_results[output_name] = data
-            node_obj.status = "green" # Ensure status is green
+            node_obj.status = "green"
 
+        # --- HELPER: Adds a single layer to the viewer ---
+        def add_layer_to_viewer(layer_data, layer_meta, layer_type):
+            # A. Name Handling
+            # If the plugin didn't give a name, make one up.
+            if "name" not in layer_meta or not layer_meta["name"]:
+                layer_meta["name"] = f"{node_title} data"
+                
+            name = layer_meta["name"]
 
-        # --- CASE A: Result is a Plot ---
-        if isinstance(data, Figure):
-            self.show_plot_popup(node_title, data)
-            return
-
-        # --- CASE B: Result is Data (Numpy or Dask/Zarr) ---
-        # We add 'da.Array' to the check so Zarr passes through
-        if isinstance(data, (np.ndarray, da.Array , list)):
-            
-            # Default Layer Name
-            layer_name = f"{node_title} ({output_name})"
-            
-            # SPECIAL: If this is the Zarr node, use the user-defined name
-            if node_obj and node_obj.node_type == "open_zarr":
-                layer_name = node_obj.parameters.get("layer_name", layer_name)
+            # B. Multiscale Fix (The "Tuple has no shape" fix)
+            # Napari expects multiscale pyramids to be a LIST, not a TUPLE.
+            if isinstance(layer_data, tuple):
+                layer_data = list(layer_data)
 
             try:
-                if layer_name in self.viewer.layers:
-                    # Update existing layer
-                    print(f"⚡ Updating layer: {layer_name}")
-                    self.viewer.layers[layer_name].data = data
-                    self.viewer.layers[layer_name].refresh()
+                # C. Update or Create
+                if name in self.viewer.layers:
+                    print(f"⚡ Updating layer: {name}")
+                    layer = self.viewer.layers[name]
+                    layer.data = layer_data
+                    # Update specific meta keys that might have changed
+                    if "scale" in layer_meta: layer.scale = layer_meta["scale"]
+                    if "translate" in layer_meta: layer.translate = layer_meta["translate"]
+                    if "contrast_limits" in layer_meta: layer.contrast_limits = layer_meta["contrast_limits"]
                 else:
-                    # Create new layer
-                    print(f"✨ Creating layer: {layer_name}")
-                    
-                    # Check for Labels (Integers) vs Images (Floats)
-                    # Dask arrays need slightly different checking than Numpy
-                    is_labels = False
-                    if isinstance(data, np.ndarray):
-                        is_labels = data.dtype == bool or np.issubdtype(data.dtype, np.integer)
-                    elif isinstance(data, da.Array):
-                        # For Dask, we check the dtype attribute directly
-                        is_labels = data.dtype == bool or np.issubdtype(data.dtype, np.integer)
-
-                    if is_labels:
-                        self.viewer.add_labels(data, name=layer_name)
+                    print(f"✨ Creating layer: {name} ({layer_type})")
+                    if layer_type == "labels":
+                        self.viewer.add_labels(layer_data, **layer_meta)
                     else:
-                        self.viewer.add_image(data, name=layer_name)
+                        self.viewer.add_image(layer_data, **layer_meta)
                         
             except Exception as e:
-                print(f"Error updating Napari layer '{layer_name}': {e}")
+                print(f"❌ Error adding layer '{name}': {e}")
 
-        # --- REFRESH UI IF SELECTED ---
-        selected_items = self.scene.selectedItems()
-        if selected_items:
-            sel_node = selected_items[0]
-            # Compare titles to see if the currently selected node is the one that just finished
-            if isinstance(sel_node, Node) and sel_node.title == node_title:
-                self.on_selection()
+
+        # --- MAIN LOGIC ---
+
+        # Case 1: The Standard "Drag and Drop" Result
+        # It is a LIST of tuples: [(data, meta, type), (data, meta, type)]
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], tuple):
+            print(f"📦 Received {len(data)} layers from plugin.")
+            for layer in data:
+                # Unpack (Data, Meta, Type)
+                if len(layer) == 3:
+                    d, m, t = layer
+                    add_layer_to_viewer(d, m, t)
+                elif len(layer) == 2:
+                    d, m = layer
+                    # Guess type if missing
+                    t = "labels" if (hasattr(d, "dtype") and d.dtype == bool) else "image"
+                    add_layer_to_viewer(d, m, t)
+            return
+
+        # Case 2: Fallback for single arrays (Old nodes)
+        if isinstance(data, (list, tuple)) and len(data) == 2 and isinstance(data[1], dict):
+            # Single tuple (Data, Meta)
+            add_layer_to_viewer(data[0], data[1], "image")
+        else:
+            # Just Raw Data
+            add_layer_to_viewer(data, {"name": f"{node_title} output"}, "image")
         
-        # Force a scene update to repaint the status lights
+        # Refresh UI
         self.scene.update()
+
     def append_log(self, text):
         self.console.append(text)
         sb = self.console.verticalScrollBar()

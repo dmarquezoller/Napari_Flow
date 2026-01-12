@@ -1,4 +1,57 @@
 {
+  "run_cellpose": {
+    "label": "Cellpose Segmentation",
+    "category": "Deep Learning",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "mask_layer"
+    ],
+    "parameters": {
+      "model_type": {
+        "type": "enum",
+        "default": "nuclei",
+        "options": [
+          "nuclei",
+          "cyto2",
+          "cyto3",
+          "tissuenet",
+          "livecell"
+        ],
+        "value": "nuclei"
+      },
+      "diameter": {
+        "type": "float",
+        "default": 30.0,
+        "min": 0.0,
+        "max": 300.0,
+        "step": 1.0,
+        "value": 30.0
+      },
+      "flow_threshold": {
+        "type": "float",
+        "default": 0.4,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.1,
+        "value": 0.4
+      },
+      "process_3d": {
+        "type": "bool",
+        "default": false,
+        "value": false,
+        "label": "Process as 3D Vol"
+      },
+      "use_gpu": {
+        "type": "bool",
+        "default": true,
+        "value": true,
+        "label": "Use GPU"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_cellpose"
+  },
   "adjust_gamma": {
     "label": "Adjust Gamma",
     "category": "Exposure",
@@ -1047,8 +1100,8 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer"
   },
-  "open_zarr": {
-    "label": "Open Zarr",
+  "open_ome_zarr": {
+    "label": "Open Ome-Zarr",
     "category": "Input",
     "inputs": [],
     "outputs": [
@@ -1059,13 +1112,9 @@
         "type": "path",
         "default": "",
         "mode": "directory"
-      },
-      "layer_name": {
-        "type": "string",
-        "default": "zarr_layer"
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.inputs.open_zarr"
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.open_ome_zarr"
   },
   "blend_images": {
     "label": "Blend Images",

@@ -3,6 +3,9 @@ import dask.array as da
 from pathlib import Path
 import zarr
 import napari
+from ome_zarr.reader import Reader
+from ome_zarr.io import parse_url
+from napari.plugins.io import read_data_with_plugins
 
 @register_node(
     label="Get Layer",
@@ -19,44 +22,46 @@ def get_layer(layer_name: str = ""):
     return layer_name
 
 
+# flow_nodes/inputs.py
+from .decorator import register_node
+import os
+# Import the internal Napari reader function
+from napari.plugins.io import read_data_with_plugins
+
+# flow_nodes/inputs.py
+from .decorator import register_node
+import os
+from napari.plugins.io import read_data_with_plugins
 
 @register_node(
-    label="Open Zarr",
+    label="Open Ome-Zarr",
     category="Input",
     outputs=["data"],
     params_config={
-        # This tells your UI to use the folder picker we designed
-        "path": {
-            "type": "path", 
-            "mode": "directory" 
-        },
-        # Allow user to name the layer in Napari
-        "layer_name": {
-            "type": "string",
-            "default": "zarr_layer"
-        }
+        "path": {"type": "path", "mode": "directory"},
     }
 )
-def open_zarr(path: str = "", layer_name: str = "zarr_layer"):
+def open_ome_zarr(path: str = ""):
     """
-    Loads a Zarr dataset lazily. 
+    Uses the official napari-ome-zarr plugin logic to read the file.
+    Returns a LIST of LayerDataTuples: [(data, meta, layer_type), ...]
     """
-    if not path:
+    if not path or not os.path.exists(path):
         return None
-        
-    z_group = zarr.open(str(path), mode='r')
-        
-    # 2. Create a list of Dask arrays for each level
-    # (This assumes standard OME-Zarr structure where keys are numbers)
-    pyramid = []
-    for i in range(len(z_group)):
-        try:
-            d = da.from_zarr(str(path), component=str(i))
-            pyramid.append(d)
-        except:
-            break
-                
-    return pyramid
 
+    print(f"🔌 Invoking native napari-ome-zarr plugin for: {path}")
 
+    # 1. READ: We use the internal function that 'viewer.open()' uses.
+    # CRITICAL: We pass [path] as a list, otherwise it crashes.
+    try:
+        layers = read_data_with_plugins([path], plugin="napari-ome-zarr")
+    except Exception as e:
+        print(f"Plugin Read Error: {e}")
+        return None
 
+    if not layers:
+        raise ValueError("The plugin could not read this file.")
+
+    # 2. RETURN: We pass the exact list of layers (images, labels, etc.) 
+    # to the Main Thread.
+    return layers
