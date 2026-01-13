@@ -1,7 +1,7 @@
 import functools
 import dask.array as da
 import numpy as np
-import inspect  # <--- CRITICAL IMPORT
+from typing import Callable, Optional
 
 def register_node(label, category, outputs=None, params_config=None):
     """
@@ -28,75 +28,144 @@ def register_node(label, category, outputs=None, params_config=None):
     return decorator
 
 
-def smart_compute(dask_func=None):
-    """
-    Traffic Controller:
-    1. Finds the main input data (whether passed via args or kwargs).
-    2. If List (Pyramid) -> Recurses for every level.
-    3. If Dask -> Uses dask_func.
-    4. If NumPy -> Uses standard func.
-    """
-    def decorator(func):
-        @functools.wraps(func)
+# --- THE DISPATCHER ---
+def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Callable] = None):
+    def decorator(node_func):
+        @functools.wraps(node_func)
         def wrapper(*args, **kwargs):
             
-            # --- 1. FIND THE DATA ARGUMENT ---
-            # We need to know which argument is the image/data. 
-            # Usually it's the first parameter defined in the function.
-            data = None
-            param_name = None
-            
-            if args:
-                # Easy case: It's the first positional argument
-                data = args[0]
-            else:
-                # Hard case: It's buried in kwargs.
-                # We use inspect to find the name of the first parameter (e.g., 'image')
-                try:
-                    sig = inspect.signature(func)
-                    param_name = list(sig.parameters.keys())[0]
-                    if param_name in kwargs:
-                        data = kwargs[param_name]
-                except Exception:
-                    # If we can't find it, just pass through (e.g. function with no inputs)
-                    pass
+            # --- CONTEXT ---
+            context = {
+                "meta": {},
+                "type": "image",
+                "has_wrapper": False,
+                "is_pyramid": False,
+                "pyramid_loc": None 
+            }
 
-            # If we still have no data, execute normally
-            if data is None:
-                return func(*args, **kwargs)
+            # --- 1. UNWRAP LOGIC ---
+            unwrapped_args = []
+            unwrapped_kwargs = {}
 
-            # --- 2. HANDLE PYRAMID (List of Arrays) ---
-            if isinstance(data, list):
-                # print(f"🔄 [Smart Compute] Splitting Pyramid for {func.__name__}...")
-                output_pyramid = []
-                for level_data in data:
-                    # RECURSION: We call 'wrapper' again for this specific level.
-                    # We must reconstruct the call exactly as it came in.
-                    
-                    if args:
-                        # If called with args: (list, 1.0) -> (level_data, 1.0)
-                        new_args = (level_data,) + args[1:]
-                        output_pyramid.append(wrapper(*new_args, **kwargs))
-                    else:
-                        # If called with kwargs: {'image': list} -> {'image': level_data}
-                        new_kwargs = kwargs.copy()
-                        new_kwargs[param_name] = level_data
-                        output_pyramid.append(wrapper(**new_kwargs))
+            def unwrap(item):
+                raw = item
+                # A. OME-Zarr Layer List
+                if isinstance(item, list) and len(item) > 0 and isinstance(item[0], tuple):
+                    target = item[0]
+                    # Find 'image' if possible, else take first
+                    for layer in item:
+                        if len(layer) >= 3 and layer[2] == 'image': target = layer; break
+                    raw = target[0]
+                    if not context["meta"]:
+                        context["meta"] = target[1].copy() if len(target) > 1 else {}
+                        context["type"] = target[2] if len(target) > 2 else "image"
+                        context["has_wrapper"] = True
                 
-                return output_pyramid
+                # B. Napari Layer Tuple
+                elif isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], dict):
+                    raw = item[0]
+                    if not context["meta"]:
+                        context["meta"] = item[1].copy()
+                        context["has_wrapper"] = True
 
-            # --- 3. HANDLE DASK (Lazy) ---
-            if isinstance(data, da.Array):
-                if dask_func is not None:
-                    # print(f"⚡ [Smart Compute] Dask Lazy: {dask_func.__name__}")
-                    return dask_func(*args, **kwargs)
-                else:
-                    print(f"⚠️ [Smart Compute] Input is Dask but no dask_func defined. Running eager.")
-                    return func(*args, **kwargs)
+                # C. Detect Pyramid
+                if isinstance(raw, list) and len(raw) > 0:
+                    first = raw[0]
+                    if isinstance(first, (da.Array, np.ndarray)) or hasattr(first, 'shape'):
+                        context["is_pyramid"] = True
+                        return raw 
 
-            # --- 4. HANDLE NUMPY (RAM) ---
-            # print(f"💾 [Smart Compute] NumPy Eager: {func.__name__}")
-            return func(*args, **kwargs)
-            
+                return raw
+
+            # Process Args & Kwargs
+            for i, arg in enumerate(args):
+                val = unwrap(arg)
+                unwrapped_args.append(val)
+                if isinstance(val, list) and context["is_pyramid"] and context["pyramid_loc"] is None:
+                    context["pyramid_loc"] = ("arg", i)
+
+            for k, v in kwargs.items():
+                val = unwrap(v)
+                unwrapped_kwargs[k] = val
+                if isinstance(val, list) and context["is_pyramid"] and context["pyramid_loc"] is None:
+                    context["pyramid_loc"] = ("kwarg", k)
+
+            # --- 2. EXECUTION CORE ---
+            def execute_core(args_in, kwargs_in):
+                check_obj = None
+                if args_in: check_obj = args_in[0]
+                elif kwargs_in:
+                    for v in kwargs_in.values():
+                        if isinstance(v, (da.Array, np.ndarray)): check_obj = v; break
+                
+                is_dask = isinstance(check_obj, da.Array)
+                if is_dask and dask_func: return dask_func(*args_in, **kwargs_in)
+                else: return node_func(*args_in, **kwargs_in)
+
+            # --- 3. RUN ---
+            result = None
+            if context["is_pyramid"] and context["pyramid_loc"] is not None:
+                loc_type, loc_key = context["pyramid_loc"]
+                pyramid_levels = unwrapped_args[loc_key] if loc_type == "arg" else unwrapped_kwargs[loc_key]
+                pyramid_output = []
+                for level_data in pyramid_levels:
+                    current_args = list(unwrapped_args)
+                    current_kwargs = unwrapped_kwargs.copy()
+                    if loc_type == "arg": current_args[loc_key] = level_data
+                    else: current_kwargs[loc_key] = level_data
+                    pyramid_output.append(execute_core(current_args, current_kwargs))
+                result = pyramid_output
+            else:
+                if context["is_pyramid"] and context["pyramid_loc"] is None:
+                     for k, v in unwrapped_kwargs.items():
+                         if isinstance(v, list): unwrapped_kwargs[k] = v[0]
+                result = execute_core(unwrapped_args, unwrapped_kwargs)
+
+            # --- 4. RE-WRAP & SANITIZE ---
+            if context["has_wrapper"] and result is not None:
+                
+                # Check data type (Handle Pyramids too)
+                check_res = result[0] if isinstance(result, list) else result
+                
+                # --- AUTO-CORRECT TYPE ---
+                if hasattr(check_res, 'dtype') and check_res.dtype.kind == 'f':
+                    # It's a Float -> Must be an Image
+                    context["type"] = 'image'
+                    
+                    # --- SANITIZE METADATA ---
+                    # Only keep Geometry. Discard "Labels" metadata (color_dict, etc)
+                    safe_keys = {'scale', 'translate', 'rotate', 'shear', 'affine', 'opacity', 'blending', 'visible', 'metadata', 'name'}
+                    context["meta"] = {k: v for k, v in context["meta"].items() if k in safe_keys}
+
+                # --- AUTO-CONTRAST ---
+                try:
+                    # 1. Slice small corner
+                    sample = check_res
+                    if isinstance(sample, da.Array):
+                        slices = tuple(slice(0, min(s, 512)) for s in sample.shape)
+                        computed_chunk = sample[slices].compute()
+                        c_min, c_max = float(computed_chunk.min()), float(computed_chunk.max())
+                    else:
+                        c_min, c_max = float(sample.min()), float(sample.max())
+                    
+                    # 2. Avoid flat contrast (0,0)
+                    if c_max == c_min: c_max += 0.0001
+                        
+                    context["meta"]["contrast_limits"] = [c_min, c_max]
+                
+                except Exception:
+                    # Fallback: Let Napari guess
+                    context["meta"].pop("contrast_limits", None)
+
+                # Rename
+                old_name = context["meta"].get("name", "Layer")
+                if "(Processed)" not in old_name:
+                    context["meta"]["name"] = f"{old_name} (Processed)"
+                
+
+                return (result, context["meta"], context["type"])
+
+            return result
+
         return wrapper
     return decorator

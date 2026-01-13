@@ -196,28 +196,10 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
 
 
 # --- GAUSSIAN BLUR ---
-# Define the Dask-friendly version
 def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
-    # Calculate overlap depth (4 * sigma is standard for Gaussian)
     depth = int(sigma * 4) + 1
-    def debug_worker(chunk, sigma, mode):
-        # 1. Run the actual filter
-        result = skimage.filters.gaussian(chunk, sigma=sigma, mode=mode)
-        
-        # 2. THE VISUAL DEBUGGER
-        # We add a tiny random brightness to this specific chunk.
-        # If this chunk is computed FRESH, it will have a unique tint.
-        # If it is CACHED, the tint will remain locked.
-        random_tint = np.random.uniform(-0.05, 0.05) 
-        
-        # Print so we know it ran
-        print(f"🎨 [Visual Debug] Painting Chunk {chunk.shape} with tint {random_tint:.4f}")
-        
-        return result + random_tint
-    
-    # map_overlap applies the filter to chunks with a "halo"
     return image.map_overlap(
-        debug_worker,
+        skimage.filters.gaussian,
         depth=depth,
         boundary=mode,
         dtype=image.dtype,
@@ -225,7 +207,7 @@ def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
         mode=mode
     )
 
-# --- 2. DEFINE THE NODE (Standard) ---
+# --- BACKEND 2: NUMPY (The Main Node) ---
 @register_node(
     label="Gaussian Blur",
     category="Filters",
@@ -235,10 +217,12 @@ def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
         "mode": {"options": ["nearest", "reflect", "wrap", "constant"]}
     }
 )
-@smart_compute(dask_func=dask_gaussian_blur) # <--- Links the two versions
+# You connect the backends here 👇
+@smart_compute(dask_func=dask_gaussian_blur) 
 def gaussian_blur(image, sigma: float = 1.0, mode: str = 'nearest'):
-    """Standard implementation for NumPy arrays"""
+    """Standard Numpy Implementation"""
     return skimage.filters.gaussian(image, sigma=sigma, mode=mode)
+
 
 
 # --- MEDIAN FILTER ---
@@ -348,7 +332,7 @@ def laplace(image, ksize: int = 3):
         "black_ridges": {"type": "bool"}
     }
 )
-def meijering(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, mode: str = 'reflect', black_ridges: bool = True):
+def meijering(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, sigmas_step: int = 1,mode: str = 'reflect', black_ridges: bool = True):
     sigmas = range(int(sigmas_min), int(sigmas_max), int(sigmas_step))
     return skimage.filters.meijering(image, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
 

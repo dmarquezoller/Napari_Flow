@@ -1040,7 +1040,7 @@ class FlowEditor(QWidget):
 
 
     def handle_execution_result(self, node_title, output_name, data):
-        # 1. Find the Node Object to update status/cache
+        # 1. Update Cache
         node_obj = next((item for item in self.scene.items() 
                         if isinstance(item, Node) and item.title == node_title), None)
         
@@ -1050,28 +1050,28 @@ class FlowEditor(QWidget):
 
         # --- HELPER: Adds a single layer to the viewer ---
         def add_layer_to_viewer(layer_data, layer_meta, layer_type):
-            # A. Name Handling
-            # If the plugin didn't give a name, make one up.
             if "name" not in layer_meta or not layer_meta["name"]:
                 layer_meta["name"] = f"{node_title} data"
-                
             name = layer_meta["name"]
 
-            # B. Multiscale Fix (The "Tuple has no shape" fix)
-            # Napari expects multiscale pyramids to be a LIST, not a TUPLE.
+            # --- FIX 1: Handle Multiscale Pyramid (List) ---
+            # If data is a list, Napari MUST know it is multiscale
+            if isinstance(layer_data, list):
+                # Ensure it's not empty and contains arrays
+                if len(layer_data) > 0:
+                    layer_meta["multiscale"] = True
+
+            # --- FIX 2: Handle Tuple Data (Legacy) ---
             if isinstance(layer_data, tuple):
                 layer_data = list(layer_data)
 
             try:
-                # C. Update or Create
                 if name in self.viewer.layers:
                     print(f"⚡ Updating layer: {name}")
                     layer = self.viewer.layers[name]
-                    layer.data = layer_data
-                    # Update specific meta keys that might have changed
-                    if "scale" in layer_meta: layer.scale = layer_meta["scale"]
-                    if "translate" in layer_meta: layer.translate = layer_meta["translate"]
+                    # Update meta first (so multiscale flag is known if needed)
                     if "contrast_limits" in layer_meta: layer.contrast_limits = layer_meta["contrast_limits"]
+                    layer.data = layer_data 
                 else:
                     print(f"✨ Creating layer: {name} ({layer_type})")
                     if layer_type == "labels":
@@ -1081,35 +1081,35 @@ class FlowEditor(QWidget):
                         
             except Exception as e:
                 print(f"❌ Error adding layer '{name}': {e}")
+                import traceback
+                traceback.print_exc()
 
+        # --- MAIN LOGIC (Updated for Tuple Handling) ---
 
-        # --- MAIN LOGIC ---
+        # Case 1: Result is (Data, Meta, Type) - The New Standard
+        if isinstance(data, tuple) and len(data) == 3 and isinstance(data[1], dict):
+            d, m, t = data
+            add_layer_to_viewer(d, m, t)
+            self.scene.update()
+            return
 
-        # Case 1: The Standard "Drag and Drop" Result
-        # It is a LIST of tuples: [(data, meta, type), (data, meta, type)]
+        # Case 2: Result is (Data, Meta)
+        if isinstance(data, (list, tuple)) and len(data) == 2 and isinstance(data[1], dict):
+            add_layer_to_viewer(data[0], data[1], "image")
+            self.scene.update()
+            return
+
+        # Case 3: OME-Zarr List of Layers (Legacy Drag-drop)
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], tuple):
             print(f"📦 Received {len(data)} layers from plugin.")
             for layer in data:
-                # Unpack (Data, Meta, Type)
                 if len(layer) == 3:
-                    d, m, t = layer
-                    add_layer_to_viewer(d, m, t)
-                elif len(layer) == 2:
-                    d, m = layer
-                    # Guess type if missing
-                    t = "labels" if (hasattr(d, "dtype") and d.dtype == bool) else "image"
-                    add_layer_to_viewer(d, m, t)
+                    add_layer_to_viewer(layer[0], layer[1], layer[2])
+            self.scene.update()
             return
 
-        # Case 2: Fallback for single arrays (Old nodes)
-        if isinstance(data, (list, tuple)) and len(data) == 2 and isinstance(data[1], dict):
-            # Single tuple (Data, Meta)
-            add_layer_to_viewer(data[0], data[1], "image")
-        else:
-            # Just Raw Data
-            add_layer_to_viewer(data, {"name": f"{node_title} output"}, "image")
-        
-        # Refresh UI
+        # Case 4: Raw Data (Fallback)
+        add_layer_to_viewer(data, {"name": f"{node_title} output"}, "image")
         self.scene.update()
 
     def append_log(self, text):
@@ -1242,8 +1242,31 @@ class FlowEditor(QWidget):
     def numpy_to_qpixmap(self, array):
         """Converts NumPy array to QPixmap with automatic coloring for Labels/Masks."""
         if array is None:
+                    return None
+                
+        # --- FIX: Handle Multiscale Pyramid (List) ---
+        if isinstance(array, list):
+            if len(array) == 0: return None
+            # Take the highest resolution (Level 0) for the preview
+            array = array[0]
+
+        # --- FIX: Handle Dask Arrays (Compute small slice) ---
+        if hasattr(array, "compute"):
+            # It's Dask. We cannot check .shape immediately if it's lazy, 
+            # but usually dask has .shape. We need a real numpy array for QImage.
+            try:
+                # Take middle slice if 3D
+                if array.ndim == 3:
+                     mid = array.shape[0] // 2
+                     array = array[mid]
+                # Compute just this 2D slice
+                array = array.compute() 
+            except:
+                return None
+
+        # Standard Safety Check
+        if not hasattr(array, "ndim") or not hasattr(array, "shape"):
             return None
-        
         if array.ndim == 3 and array.shape[-1] in [3, 4]:
             display_data = array
             height, width, channels = display_data.shape

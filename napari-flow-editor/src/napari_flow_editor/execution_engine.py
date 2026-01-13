@@ -110,7 +110,6 @@ class ExecutionWorker(QObject):
                 source_node = edge.start_socket.node
                 source_socket_name = edge.start_socket.name
                 
-                # CRITICAL CHANGE: Grab from source_node.cached_results directly
                 if source_socket_name in source_node.cached_results:
                     data = source_node.cached_results[source_socket_name]
                     func_inputs[socket.name] = data
@@ -122,10 +121,9 @@ class ExecutionWorker(QObject):
         
         if node.node_type == "get_layer":
             target_name = func_params.get("layer_name")
-            # We assume reading data is thread-safe enough for read-only access
             if target_name in self.viewer.layers:
                 data = self.viewer.layers[target_name].data
-                return {"data_out": data} # Return immediately
+                return {"data_out": data} 
             else:
                 raise ValueError(f"Layer '{target_name}' not found.")
 
@@ -145,12 +143,30 @@ class ExecutionWorker(QObject):
         args = {**func_inputs, **func_params}
         result = func(**args)
         
-        # --- D. Format Results ---
+        # --- D. Format Results (THE FIX) ---
         output_names = def_data.get("outputs", ["out"])
         node_outputs = {}
-        if isinstance(result, tuple):
+
+        # 1. Check if it is a Napari Layer Tuple (Data, Meta, Type)
+        #    Structure: Tuple where the second item is a dictionary
+        is_layer_tuple = (
+            isinstance(result, tuple) 
+            and len(result) >= 2 
+            and isinstance(result[1], dict)
+        )
+
+        if is_layer_tuple:
+            # Treat this tuple as a SINGLE object (Result + Metadata)
+            # Assign the whole tuple to the first output name
+            if output_names:
+                node_outputs[output_names[0]] = result
+        
+        # 2. Check if it is standard Multiple Outputs (e.g. Sobel X, Sobel Y)
+        elif isinstance(result, tuple):
              for i, name in enumerate(output_names):
                 if i < len(result): node_outputs[name] = result[i]
+        
+        # 3. Single Object Result
         else:
              if output_names: node_outputs[output_names[0]] = result
              
