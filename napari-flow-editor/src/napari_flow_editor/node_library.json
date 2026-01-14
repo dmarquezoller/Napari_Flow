@@ -45,8 +45,8 @@
       },
       "use_gpu": {
         "type": "bool",
-        "default": true,
-        "value": true,
+        "default": false,
+        "value": false,
         "label": "Use GPU"
       }
     },

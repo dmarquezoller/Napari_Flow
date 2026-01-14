@@ -1,6 +1,12 @@
 import numpy as np
+import traceback
+import logging
+import sys
+import torch  # Critical for thread control
+
 from .decorator import register_node
 
+# --- SAFE IMPORTS ---
 try:
     from cellpose import models
     CELLPOSE_AVAILABLE = True
@@ -19,7 +25,7 @@ except ImportError:
         "diameter": {"min": 0.0, "max": 300.0, "step": 1.0, "value": 30.0},
         "flow_threshold": {"min": 0.0, "max": 1.0, "step": 0.1, "value": 0.4},
         "process_3d": {"type": "bool", "value": False, "label": "Process as 3D Vol"},
-        "use_gpu": {"type": "bool", "value": True, "label": "Use GPU"}
+        "use_gpu": {"type": "bool", "value": False, "label": "Use GPU"} 
     }
 )
 def run_cellpose(image, 
@@ -27,49 +33,106 @@ def run_cellpose(image,
                  diameter: float = 30.0, 
                  flow_threshold: float = 0.4, 
                  process_3d: bool = False,
-                 use_gpu: bool = True):
+                 use_gpu: bool = False):
     
     if not CELLPOSE_AVAILABLE:
-        raise ImportError("Cellpose not installed.")
+        raise ImportError("Cellpose not installed. Please run: pip install cellpose")
 
-    print(f"--- Cellpose Execution ---")
+    # --- 1. LOGGING SETUP ---
+    # Force Cellpose to print progress to stdout so the GUI captures it
+    cp_logger = logging.getLogger("cellpose")
+    cp_logger.setLevel(logging.INFO)
+    if not cp_logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        cp_logger.addHandler(handler)
+
+    print(f"--- Cellpose Execution: {model_type} (GPU={use_gpu}) ---")
+
+    # --- 2. INPUT UNWRAPPING ---
+    # Extract the raw array from Napari layers (which might be Tuples or Lists)
+    raw_img = image
+    if isinstance(image, list) and len(image) > 0:
+        if isinstance(image[0], tuple): # (data, meta)
+            raw_img = image[0][0]
+        else:
+            raw_img = image[0]
+    elif isinstance(image, tuple) and len(image) >= 2:
+        raw_img = image[0]
     
-    # Initialize Model
-    model = models.CellposeModel(gpu=use_gpu, model_type=model_type)
+    image = raw_img
+
+    # --- 3. DASK / LAZY LOADING ---
+    if hasattr(image, "compute"):
+        print("  > Downloading data from lazy/Dask array...")
+        image = image.compute()
     
-    # --- FIX START ---
-    
-    # 1. Logic for True 3D Volume (Process 3D = True)
-    if process_3d and image.ndim == 3:
-        print("Running full 3D inference (Volumetric)...")
+    image = np.asarray(image)
+
+    # --- 4. BOOLEAN FIX (CRITICAL FOR BLOBS) ---
+    # Cellpose/OpenCV crashes on bool. Convert True/False -> 255/0
+    if image.dtype == bool:
+        print("  > Converting Boolean image to uint8...")
+        image = image.astype(np.uint8) * 255
+
+    # --- 5. CPU FREEZE PROTECTION ---
+    # Restrict PyTorch to 1 thread to avoid deadlocking the GUI
+    torch.set_num_threads(1)
+
+    # --- 6. MODEL INITIALIZATION ---
+    # Note: 'pretrained_model' is the correct argument for Cellpose v4+
+    print(f"  > Loading model '{model_type}'...")
+    try:
+        model = models.CellposeModel(gpu=use_gpu, pretrained_model=model_type)
+    except TypeError:
+        # Fallback for older versions
+        model = models.CellposeModel(gpu=use_gpu, model_type=model_type)
+
+    masks = None
+
+    # --- 7. INFERENCE ---
+    try:
+        # We set net_avg=False for speed during testing.
+        # We REMOVED 'channels' so Cellpose auto-detects grayscale.
         
-        # We must explicitly tell Cellpose that Axis 0 is Z (Depth)
-        # Napari images are typically (Z, Y, X)
-        results = model.eval(
-            image, 
-            diameter=diameter, 
-            flow_threshold=flow_threshold, 
-            do_3D=True,
-            z_axis=0  # <--- CRITICAL FIX: Tells Cellpose "0 is Depth, not Color"
-        )
-        return results[0] if isinstance(results, tuple) else results
+        # Case A: True 3D Volume
+        if process_3d and image.ndim == 3:
+            print(f"  > Running 3D Inference on volume {image.shape}...")
+            results = model.eval(
+                image, 
+                diameter=diameter, 
+                flow_threshold=flow_threshold, 
+                do_3D=True,
+                net_avg=False # Speed up
+            )
 
-    # 2. Logic for Batch 2D (Process 3D = False)
-    # If 3D image but process_3d=False, treat as list of 2D slices
-    elif image.ndim == 3:
-        print(f"Processing stack of {image.shape[0]} slices (Batch 2D)...")
-        final_masks = []
-        
-        for i, slice_img in enumerate(image):
-            print(f"  > Processing slice {i+1}/{image.shape[0]}...")
-            res = model.eval(slice_img, diameter=diameter, flow_threshold=flow_threshold, do_3D=False)
-            mask = res[0] if isinstance(res, tuple) else res
-            final_masks.append(mask)
-            
-        return np.array(final_masks).astype(np.uint32)
+        # Case B: Batch 2D (Stack) or Single 2D
+        else:
+            print(f"  > Running 2D inference on {image.shape}...")
+            results = model.eval(
+                image, 
+                diameter=diameter, 
+                do_3D=False,
+                flow_threshold=flow_threshold
+                )
 
-    # 3. Logic for Single 2D Image
-    else:
-        print("Processing single 2D image...")
-        res = model.eval(image, diameter=diameter, flow_threshold=flow_threshold, do_3D=False)
-        return res[0] if isinstance(res, tuple) else res
+        # Unpack results (Cellpose returns tuple or array depending on version)
+        if isinstance(results, tuple):
+            masks = results[0]
+        else:
+            masks = results
+
+    except Exception as e:
+        print(f"❌ Cellpose Inference Failed: {e}")
+        traceback.print_exc()
+        raise e
+
+    # --- 8. FORMAT OUTPUT ---
+    masks = np.array(masks, dtype=np.uint32)
+
+    # Return (Data, Metadata, LayerType)
+    return (
+        masks, 
+        {"name": f"Masks ({model_type})", "opacity": 0.7}, 
+        "labels"
+    )

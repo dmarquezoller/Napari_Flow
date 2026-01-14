@@ -4,6 +4,7 @@ import traceback
 import json
 import hashlib
 from qtpy.QtCore import QObject, Signal
+import time
 
 class ExecutionWorker(QObject):
     # Signals
@@ -55,7 +56,7 @@ class ExecutionWorker(QObject):
                     node.cached_results = results
                     node.last_signature = current_signature
                     self.node_status_signal.emit(node.uid, "green") # Turn Green (Done)
-                    
+                    time.sleep(0.05) 
                 except Exception as e:
                     self.node_status_signal.emit(node.uid, "red") # Turn Red (Error)
                     raise e # Stop the pipeline
