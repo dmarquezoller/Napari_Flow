@@ -19,7 +19,13 @@
           "tissuenet",
           "livecell"
         ],
-        "value": "nuclei"
+        "value": "nuclei",
+        "label": "Standard Model"
+      },
+      "custom_path": {
+        "type": "path",
+        "default": "",
+        "mode": "file"
       },
       "diameter": {
         "type": "float",
@@ -51,6 +57,62 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_cellpose"
+  },
+  "train_cellpose": {
+    "label": "Train Cellpose Model",
+    "category": "Deep Learning",
+    "inputs": [
+      "image",
+      "labels"
+    ],
+    "outputs": [
+      "model_path"
+    ],
+    "parameters": {
+      "base_model": {
+        "type": "enum",
+        "default": "nuclei",
+        "options": [
+          "nuclei",
+          "cyto2",
+          "tissuenet",
+          "livecell"
+        ],
+        "value": "nuclei",
+        "label": "Base Model (Start Point)"
+      },
+      "model_name": {
+        "type": "str",
+        "default": "my_custom_model",
+        "value": "my_custom_model",
+        "label": "New Model Name"
+      },
+      "epochs": {
+        "type": "int",
+        "default": 50,
+        "min": 10,
+        "max": 1000,
+        "step": 10,
+        "value": 50,
+        "label": "Epochs"
+      },
+      "learning_rate": {
+        "type": "float",
+        "default": 0.1,
+        "min": 0.001,
+        "max": 1.0,
+        "step": 0.001,
+        "value": 0.1,
+        "label": "Learning Rate"
+      },
+      "use_gpu": {
+        "type": "bool",
+        "default": false,
+        "value": false,
+        "label": "Use GPU"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.train_cellpose"
   },
   "adjust_gamma": {
     "label": "Adjust Gamma",
