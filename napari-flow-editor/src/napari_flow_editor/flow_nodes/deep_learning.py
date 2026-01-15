@@ -1,10 +1,11 @@
 import numpy as np
-import traceback
-import logging
 import sys
 import os
-import torch 
-from datetime import datetime
+import tempfile
+import subprocess
+import torch
+import logging
+import traceback
 
 from .decorator import register_node
 
@@ -16,7 +17,7 @@ except ImportError:
     CELLPOSE_AVAILABLE = False
 
 # =============================================================================
-# NODE 1: RUN CELLPOSE (INFERENCE) - UPDATED with Custom Path
+# CELLPOSE NODES
 # =============================================================================
 @register_node(
     label="Cellpose Segmentation",
@@ -101,9 +102,6 @@ def run_cellpose(image,
     return (masks, {"name": f"Masks ({os.path.basename(final_model_arg)})", "opacity": 0.7}, "labels")
 
 
-# =============================================================================
-# NODE 2: TRAIN CELLPOSE (NEW!)
-# =============================================================================
 @register_node(
     label="Train Cellpose Model",
     category="Deep Learning",
@@ -186,9 +184,127 @@ def train_cellpose(image,
     return (str(new_model_path), {"name": "Model Path"}, "text")
 
 
+
+
+
+# =============================================================================
+# STARDIST NODES
+# =============================================================================
+
+
+@register_node(
+    label="StarDist Segmentation",
+    category="Deep Learning",
+    outputs=["mask_layer"],
+    params_config={
+        "model_type": {
+            "options": ["2D_versatile_fluo", "2D_versatile_he"], 
+            "value": "2D_versatile_fluo",
+            "label": "Model"
+        },
+        "prob_thresh": {"min": 0.0, "max": 1.0, "step": 0.05, "value": 0.5},
+        "nms_thresh": {"min": 0.0, "max": 1.0, "step": 0.05, "value": 0.3},
+        "norm_pmin": {"min": 0.0, "max": 100.0, "step": 1.0, "value": 1.0},
+        "norm_pmax": {"min": 0.0, "max": 100.0, "step": 1.0, "value": 99.8}
+    }
+)
+def run_stardist(image, 
+                 model_type: str = '2D_versatile_fluo', 
+                 prob_thresh: float = 0.5, 
+                 nms_thresh: float = 0.3,
+                 norm_pmin: float = 1.0,
+                 norm_pmax: float = 99.8):
+    
+    # 1. Prepare Paths
+    image = _ensure_numpy(image)
+    if image.dtype == bool: image = image.astype(np.float32)
+    
+    # Locate the worker script
+    # Assumes stardist_worker.py is in the parent folder of flow_nodes
+    current_dir = os.path.dirname(os.path.abspath(__file__)) # .../flow_nodes
+    parent_dir = os.path.dirname(current_dir)                # .../napari_flow_editor
+    worker_script = os.path.join(parent_dir, "stardist_worker.py")
+    
+    if not os.path.exists(worker_script):
+        # Fallback for different install structures
+        worker_script = os.path.join(current_dir, "..", "stardist_worker.py")
+        if not os.path.exists(worker_script):
+             raise FileNotFoundError(f"Could not find stardist_worker.py at {worker_script}")
+
+    # 2. Create Temp Files
+    # We use a temp directory to pass data safely
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        in_path = os.path.join(tmp_dir, "input.npy")
+        out_path = os.path.join(tmp_dir, "output.npy")
+        
+        # 3. Save Image for Worker
+        print(f"--- Launching StarDist Subprocess ---")
+        np.save(in_path, image)
+        
+        # 4. Build Command
+        # We use sys.executable to ensure we use the SAME python environment (conda env)
+        cmd = [
+            sys.executable, worker_script,
+            "--input", in_path,
+            "--output", out_path,
+            "--model", model_type,
+            "--prob", str(prob_thresh),
+            "--nms", str(nms_thresh),
+            "--pmin", str(norm_pmin),
+            "--pmax", str(norm_pmax)
+        ]
+        
+        # 5. Execute
+        print(f"  > Running: {' '.join(cmd)}")
+        
+        # Check for environment issues
+        env = os.environ.copy()
+        # Force Python to not buffer output so we see errors
+        env["PYTHONUNBUFFERED"] = "1"
+
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        
+        # 6. Check Results
+        if result.returncode != 0:
+            print("❌ Worker Failed!")
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            raise RuntimeError(f"StarDist crashed: {result.stderr}")
+        else:
+            print("  > Worker finished successfully.")
+            # Print worker logs for debugging
+            print(result.stdout)
+            
+        # 7. Load Result
+        if not os.path.exists(out_path):
+            raise RuntimeError("Worker finished but output file is missing.")
+            
+        masks = np.load(out_path)
+
+    return (
+        masks.astype(np.uint32), 
+        {"name": f"StarDist ({model_type})", "opacity": 0.7}, 
+        "labels"
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # =============================================================================
 # HELPERS
 # =============================================================================
+
 def _ensure_numpy(image):
     """Unwraps Napari layers/Dask arrays to pure NumPy"""
     raw_img = image

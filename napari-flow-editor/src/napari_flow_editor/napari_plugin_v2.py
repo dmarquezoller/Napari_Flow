@@ -23,6 +23,10 @@ from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
 from .script_generator import ScriptGenerator
 
+
+
+
+
 NODE_LIBRARY = {}
 
 # --- SOCKET -----------------------------------------------------
