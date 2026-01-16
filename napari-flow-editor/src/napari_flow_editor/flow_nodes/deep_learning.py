@@ -198,10 +198,11 @@ def train_cellpose(image,
     outputs=["mask_layer"],
     params_config={
         "model_type": {
-            "options": ["2D_versatile_fluo", "2D_versatile_he"], 
+            "options": ["2D_versatile_fluo", "2D_versatile_he", "3D_demo"], 
             "value": "2D_versatile_fluo",
             "label": "Model"
         },
+        "scale": {"min": 0.1, "max": 2.0, "step": 0.1, "value": 1.0, "label": "Scale"},
         "prob_thresh": {"min": 0.0, "max": 1.0, "step": 0.05, "value": 0.5},
         "nms_thresh": {"min": 0.0, "max": 1.0, "step": 0.05, "value": 0.3},
         "norm_pmin": {"min": 0.0, "max": 100.0, "step": 1.0, "value": 1.0},
@@ -210,6 +211,7 @@ def train_cellpose(image,
 )
 def run_stardist(image, 
                  model_type: str = '2D_versatile_fluo', 
+                 scale: float = 1.0,
                  prob_thresh: float = 0.5, 
                  nms_thresh: float = 0.3,
                  norm_pmin: float = 1.0,
@@ -251,7 +253,8 @@ def run_stardist(image,
             "--prob", str(prob_thresh),
             "--nms", str(nms_thresh),
             "--pmin", str(norm_pmin),
-            "--pmax", str(norm_pmax)
+            "--pmax", str(norm_pmax),
+            "--scale", str(scale)
         ]
         
         # 5. Execute
@@ -288,6 +291,89 @@ def run_stardist(image,
     )
 
 
+
+@register_node(
+    label="Train StarDist Model",
+    category="Deep Learning",
+    outputs=[], # No output data, it produces a file on disk
+    params_config={
+        "model_name": {"type": "str", "value": "my_custom_nuclei", "label": "New Model Name"},
+        "epochs": {"min": 10, "max": 500, "value": 50, "label": "Epochs"},
+        "patch_size": {"options": [128, 256, 512], "value": 256, "label": "Patch Size"},
+    }
+)
+def train_stardist(image, labels, model_name="my_custom_nuclei", epochs=50, patch_size=256):
+    
+    # 1. Validation
+    image = _ensure_numpy(image)
+    labels = _ensure_numpy(labels)
+    
+    # Check 1: Exact match (Ideal for Grayscale)
+    if image.shape == labels.shape:
+        pass
+    
+    # Check 2: Image has extra channel dim (e.g. RGB or Multi-channel)
+    # Checks if Image is (T, Y, X, C) and Labels is (T, Y, X)
+    elif image.ndim == labels.ndim + 1 and image.shape[:-1] == labels.shape:
+        pass
+        
+    # Check 3: Image is (Y, X, C) and Labels is (Y, X)
+    elif image.ndim == labels.ndim + 1 and image.shape[:-1] == labels.shape:
+        pass
+
+    else:
+        # If none of the above, it's a real error
+        raise ValueError(f"Shape mismatch! Image {image.shape} vs Labels {labels.shape}. "
+                         "Ensure frames match and labels are single-channel.")
+    
+    # 2. Locate Worker
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    worker_script = os.path.join(parent_dir, "stardist_train_worker.py")
+    
+    if not os.path.exists(worker_script):
+        # Fallback check
+        worker_script = os.path.join(current_dir, "..", "stardist_train_worker.py")
+    
+    # 3. Define Model Output Folder
+    # We save models to a "models" folder inside your napari-flow-editor directory
+    # so they are easy to find later.
+    models_dir = os.path.join(parent_dir, "custom_models")
+    if not os.path.exists(models_dir):
+        os.makedirs(models_dir)
+
+    # 4. Run Training via Subprocess
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        print("--- Prepare Training Data ---")
+        img_path = os.path.join(tmp_dir, "train_img.npy")
+        lbl_path = os.path.join(tmp_dir, "train_lbl.npy")
+        
+        np.save(img_path, image)
+        np.save(lbl_path, labels)
+        
+        print(f"--- Launching Training Job: {model_name} ---")
+        cmd = [
+            sys.executable, worker_script,
+            "--img", img_path,
+            "--lbl", lbl_path,
+            "--name", model_name,
+            "--outdir", models_dir,
+            "--epochs", str(epochs),
+            "--patch", str(patch_size)
+        ]
+        
+        # We allow output to stream to console so you can see the progress bar
+        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
+        proc.wait()
+        
+        if proc.returncode != 0:
+            raise RuntimeError("Training Failed! Check terminal for errors.")
+            
+        print(f"✅ Training Complete!")
+        print(f"📁 Model saved to: {os.path.join(models_dir, model_name)}")
+        print("💡 Restart Napari or Refresh to see it in the Segmentation node options.")
+
+    return None
 
 
 
