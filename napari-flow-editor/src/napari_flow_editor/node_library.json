@@ -77,7 +77,13 @@
           "3D_demo"
         ],
         "value": "2D_versatile_fluo",
-        "label": "Model"
+        "label": "Pretrained Model"
+      },
+      "custom_path": {
+        "type": "path",
+        "default": "",
+        "mode": "directory",
+        "label": "Custom Model Folder (Optional)"
       },
       "scale": {
         "type": "float",

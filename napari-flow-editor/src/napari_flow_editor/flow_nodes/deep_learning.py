@@ -191,7 +191,6 @@ def train_cellpose(image,
 # STARDIST NODES
 # =============================================================================
 
-
 @register_node(
     label="StarDist Segmentation",
     category="Deep Learning",
@@ -200,7 +199,13 @@ def train_cellpose(image,
         "model_type": {
             "options": ["2D_versatile_fluo", "2D_versatile_he", "3D_demo"], 
             "value": "2D_versatile_fluo",
-            "label": "Model"
+            "label": "Pretrained Model"
+        },
+        # New Input for Custom Model
+        "custom_path": {
+            "type": "path", 
+            "mode": "directory", 
+            "label": "Custom Model Folder (Optional)"
         },
         "scale": {"min": 0.1, "max": 2.0, "step": 0.1, "value": 1.0, "label": "Scale"},
         "prob_thresh": {"min": 0.0, "max": 1.0, "step": 0.05, "value": 0.5},
@@ -211,45 +216,50 @@ def train_cellpose(image,
 )
 def run_stardist(image, 
                  model_type: str = '2D_versatile_fluo', 
+                 custom_path: str = "",  # <--- New Argument
                  scale: float = 1.0,
                  prob_thresh: float = 0.5, 
                  nms_thresh: float = 0.3,
                  norm_pmin: float = 1.0,
                  norm_pmax: float = 99.8):
     
-    # 1. Prepare Paths
+    # 1. Determine Model Source
+    # Logic: If custom_path is set and exists, use it. Otherwise use the dropdown.
+    final_model_id = model_type
+    
+    if custom_path and isinstance(custom_path, str) and os.path.isdir(custom_path):
+        print(f"🔹 Using Custom Model: {custom_path}")
+        final_model_id = custom_path
+    else:
+        print(f"🔹 Using Pretrained Model: {final_model_id}")
+
+    # 2. Prepare Data
     image = _ensure_numpy(image)
     if image.dtype == bool: image = image.astype(np.float32)
     
-    # Locate the worker script
-    # Assumes stardist_worker.py is in the parent folder of flow_nodes
-    current_dir = os.path.dirname(os.path.abspath(__file__)) # .../flow_nodes
-    parent_dir = os.path.dirname(current_dir)                # .../napari_flow_editor
+    # 3. Locate Worker
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
     worker_script = os.path.join(parent_dir, "stardist_worker.py")
     
     if not os.path.exists(worker_script):
-        # Fallback for different install structures
         worker_script = os.path.join(current_dir, "..", "stardist_worker.py")
         if not os.path.exists(worker_script):
              raise FileNotFoundError(f"Could not find stardist_worker.py at {worker_script}")
 
-    # 2. Create Temp Files
-    # We use a temp directory to pass data safely
+    # 4. Execute Subprocess
     with tempfile.TemporaryDirectory() as tmp_dir:
         in_path = os.path.join(tmp_dir, "input.npy")
         out_path = os.path.join(tmp_dir, "output.npy")
         
-        # 3. Save Image for Worker
         print(f"--- Launching StarDist Subprocess ---")
         np.save(in_path, image)
         
-        # 4. Build Command
-        # We use sys.executable to ensure we use the SAME python environment (conda env)
         cmd = [
             sys.executable, worker_script,
             "--input", in_path,
             "--output", out_path,
-            "--model", model_type,
+            "--model", final_model_id, # <--- Passes either Name or Path
             "--prob", str(prob_thresh),
             "--nms", str(nms_thresh),
             "--pmin", str(norm_pmin),
@@ -257,17 +267,11 @@ def run_stardist(image,
             "--scale", str(scale)
         ]
         
-        # 5. Execute
-        print(f"  > Running: {' '.join(cmd)}")
-        
-        # Check for environment issues
         env = os.environ.copy()
-        # Force Python to not buffer output so we see errors
         env["PYTHONUNBUFFERED"] = "1"
 
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
         
-        # 6. Check Results
         if result.returncode != 0:
             print("❌ Worker Failed!")
             print("STDOUT:", result.stdout)
@@ -275,10 +279,8 @@ def run_stardist(image,
             raise RuntimeError(f"StarDist crashed: {result.stderr}")
         else:
             print("  > Worker finished successfully.")
-            # Print worker logs for debugging
             print(result.stdout)
             
-        # 7. Load Result
         if not os.path.exists(out_path):
             raise RuntimeError("Worker finished but output file is missing.")
             
@@ -286,7 +288,7 @@ def run_stardist(image,
 
     return (
         masks.astype(np.uint32), 
-        {"name": f"StarDist ({model_type})", "opacity": 0.7}, 
+        {"name": f"StarDist ({os.path.basename(final_model_id)})", "opacity": 0.7}, 
         "labels"
     )
 
