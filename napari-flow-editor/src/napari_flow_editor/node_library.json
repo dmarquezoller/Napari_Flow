@@ -1314,6 +1314,41 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
   },
+  "measure_labels": {
+    "label": "Region Properties",
+    "category": "Measure",
+    "inputs": [
+      "labels",
+      "image"
+    ],
+    "outputs": [
+      "measurements_table"
+    ],
+    "parameters": {
+      "properties": {
+        "type": "enum",
+        "default": "All",
+        "options": [
+          "Basic (Area, Perim)",
+          "Shape (Eccentricity, Solidity)",
+          "All"
+        ],
+        "value": "All",
+        "label": "Metrics to Calculate"
+      },
+      "mode": {
+        "type": "enum",
+        "default": "2D Slice-by-Slice (Time/Z)",
+        "options": [
+          "2D Slice-by-Slice (Time/Z)",
+          "3D Volumetric"
+        ],
+        "value": "2D Slice-by-Slice (Time/Z)",
+        "label": "Analysis Mode"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.measure.measure_labels"
+  },
   "binary_closing": {
     "label": "Binary Closing (Fill Holes)",
     "category": "Morphology",
@@ -1503,6 +1538,29 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat"
+  },
+  "save_table": {
+    "label": "Save Table (CSV)",
+    "category": "Outputs",
+    "inputs": [
+      "table"
+    ],
+    "outputs": [],
+    "parameters": {
+      "folder": {
+        "type": "path",
+        "default": "",
+        "mode": "directory",
+        "label": "Save Folder"
+      },
+      "filename": {
+        "type": "text",
+        "default": "results.csv",
+        "value": "results.csv",
+        "label": "Filename"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.outputs.save_table"
   },
   "chan_vese": {
     "label": "Chan Vese (Active Contour)",
