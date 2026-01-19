@@ -1080,6 +1080,10 @@ class FlowEditor(QWidget):
                     print(f"✨ Creating layer: {name} ({layer_type})")
                     if layer_type == "labels":
                         self.viewer.add_labels(layer_data, **layer_meta)
+                    elif layer_type == "tracks":
+                        self.viewer.add_tracks(layer_data, **layer_meta)
+                    elif layer_type == "points":
+                        self.viewer.add_points(layer_data, **layer_meta)
                     else:
                         self.viewer.add_image(layer_data, **layer_meta)
                         

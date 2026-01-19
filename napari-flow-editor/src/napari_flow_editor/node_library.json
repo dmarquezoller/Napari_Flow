@@ -129,6 +129,28 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_stardist"
   },
+  "run_ultrack_node": {
+    "label": "Ultrack Tracking",
+    "category": "Deep Learning",
+    "inputs": [
+      "labels"
+    ],
+    "outputs": [
+      "detection_layer",
+      "edges_layer",
+      "tracks_layer"
+    ],
+    "parameters": {
+      "config_path": {
+        "type": "path",
+        "default": "",
+        "mode": "file",
+        "label": "Config File (Optional, .toml)",
+        "value": ""
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_ultrack_node"
+  },
   "train_cellpose": {
     "label": "Train Cellpose Model",
     "category": "Deep Learning",
@@ -1313,6 +1335,37 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
+  },
+  "crop_image": {
+    "label": "Crop / Slice Image",
+    "category": "Math",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "cropped_image"
+    ],
+    "parameters": {
+      "t_crop": {
+        "type": "text",
+        "default": ":",
+        "label": "Time/Z (Dim 0) [e.g. 0:10]",
+        "value": "0:10"
+      },
+      "y_crop": {
+        "type": "text",
+        "default": ":",
+        "label": "Y (Dim 1) [e.g. 100:500]",
+        "value": ":"
+      },
+      "x_crop": {
+        "type": "text",
+        "default": ":",
+        "label": "X (Dim 2) [e.g. 100:500]",
+        "value": ":"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.math.crop_image"
   },
   "measure_labels": {
     "label": "Region Properties",

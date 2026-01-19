@@ -7,3 +7,12 @@ dask[complete]
 zarr
 ome-zarr
 dask-image
+
+#### FOR PYTHON 3.11 ###
+
+napari[all]
+scikit-image 
+stardist
+ultrack
+pandas
+notebook

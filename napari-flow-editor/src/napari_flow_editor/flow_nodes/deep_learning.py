@@ -6,7 +6,11 @@ import subprocess
 import torch
 import logging
 import traceback
-
+import pandas as pd
+import ultrack
+from ultrack.config import MainConfig
+from ultrack.utils import estimate_parameters_from_labels, labels_to_contours
+from ultrack import to_tracks_layer
 from .decorator import register_node
 
 # --- SAFE IMPORTS ---
@@ -378,16 +382,119 @@ def train_stardist(image, labels, model_name="my_custom_nuclei", epochs=50, patc
     return None
 
 
+# =============================================================================
+# ULTRACK NODES 
+# =============================================================================
+@register_node(
+    label="Ultrack Tracking",
+    category="Deep Learning",
+    outputs=["detection_layer", "edges_layer", "tracks_layer"], 
+    params_config={
+        "config_path": {
+            "type": "path", 
+            "mode": "file", 
+            "label": "Config File (Optional, .toml)",
+            "value": ""
+        }
+    } 
+)
+def run_ultrack_node(labels, config_path=""):
+    print("\n--- Ultrack: Initializing Pipeline ---")
 
+    # 1. IMPORTS
+    try:
+        import ultrack
+        from ultrack.config import MainConfig, load_config
+        from ultrack import to_tracks_layer
+        
+        # Hunt for utils (Robust Import)
+        try:
+            from ultrack.utils import estimate_parameters_from_labels
+        except ImportError:
+            try: from ultrack.utils.estimation import estimate_parameters_from_labels
+            except: estimate_parameters_from_labels = None
 
+        try:
+            from ultrack.utils import labels_to_contours
+        except ImportError:
+            try: from ultrack.core.segmentation.processing import labels_to_contours
+            except: 
+                if hasattr(ultrack, "labels_to_contours"): labels_to_contours = ultrack.labels_to_contours
+                else: raise ImportError("Could not find labels_to_contours")
 
+    except ImportError as e:
+        raise ImportError(f"Ultrack import failed: {e}")
 
+    # 2. DATA
+    if hasattr(labels, "compute"): labels = labels.compute()
+    labels = np.asarray(labels)
+    if labels.ndim not in [3, 4]: raise ValueError("Input must be (T, Y, X) or (T, Z, Y, X)")
+    print(f"Data Shape: {labels.shape}")
 
+    # 3. CONFIGURATION
+    print("Step 1: Configuring...")
+    
+    if config_path and os.path.exists(config_path):
+        # A) Load from File
+        print(f"   > Loading config from: {config_path}")
+        try:
+            cfg = load_config(config_path)
+            # Ensure single worker to avoid Napari freeze/crashes
+            cfg.linking_config.n_workers = 1
+        except Exception as e:
+            print(f"   ❌ Error loading config file: {e}. Falling back to defaults.")
+            cfg = MainConfig()
+            cfg.linking_config.n_workers = 1
+    else:
+        # B) Auto-Estimate
+        print("   > No config selected. Auto-estimating from labels...")
+        cfg = MainConfig()
+        try:
+            if estimate_parameters_from_labels:
+                estimate_parameters_from_labels(labels, cfg.linking_config, is_3d=(labels.ndim == 4))
+            cfg.linking_config.n_workers = 1 
+            print(f"   > Estimated Max Dist: {cfg.linking_config.max_distance:.2f}")
+        except:
+            print("   > Estimation failed, using defaults.")
+            cfg.linking_config.n_workers = 1
 
+    # 4. CONTOURS (DETECTION & EDGES)
+    print("Step 2: Computing contours (labels_to_contours)...")
+    detection, edges = labels_to_contours(labels, sigma=0.0)
 
+    # 5. TRACKING
+    print("Step 3: Solving tracking...")
+    ultrack.track(
+        cfg,
+        detection=detection,
+        edges=edges,
+        overwrite=True
+    )
 
+    # 6. OUTPUTS
+    print("Step 4: Formatting layers...")
+    try:
+        tracks_df, graph = to_tracks_layer(cfg)
+        
+        cols = ['track_id', 't'] + (['z'] if 'z' in tracks_df.columns else []) + ['y', 'x']
+        tracks_data = tracks_df[cols].to_numpy()
+        
+        clean_graph = {}
+        for child, parents in graph.items():
+            clean_graph[child] = list(parents) if isinstance(parents, (list, tuple)) else [parents]
+            
+    except Exception as e:
+        print(f"⚠️ No tracks found: {e}")
+        tracks_data = np.empty((0, 4))
+        clean_graph = {}
 
+    print("--- Finished ---")
 
+    return (
+        (detection, {"name": "Ultrack Detection"}, "image"),
+        (edges, {"name": "Ultrack Edges"}, "image"),
+        (tracks_data, {"name": "Ultrack Lineages", "graph": clean_graph}, "tracks")
+    )
 
 # =============================================================================
 # HELPERS
@@ -415,3 +522,5 @@ def _setup_logger():
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(logging.Formatter("%(message)s"))
         cp_logger.addHandler(handler)
+
+
