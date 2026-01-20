@@ -1367,6 +1367,26 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.crop_image"
   },
+  "crop_image_interactive": {
+    "label": "Interactive Crop (Robust)",
+    "category": "Math",
+    "inputs": [
+      "image",
+      "roi_layer"
+    ],
+    "outputs": [
+      "cropped_image"
+    ],
+    "parameters": {
+      "t_crop": {
+        "type": "text",
+        "default": ":",
+        "label": "Time/Z (Dim 0) [e.g. 0:10 or :]",
+        "value": ":"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.math.crop_image_interactive"
+  },
   "measure_labels": {
     "label": "Region Properties",
     "category": "Measure",
