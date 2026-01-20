@@ -1428,6 +1428,68 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.crop_image_interactive"
   },
+  "filter_labels_by_csv": {
+    "label": "Filter Labels by CSV",
+    "category": "Measurement",
+    "inputs": [
+      "labels_layer"
+    ],
+    "outputs": [
+      "filtered_labels"
+    ],
+    "parameters": {
+      "csv_path": {
+        "type": "path",
+        "default": "",
+        "mode": "file",
+        "label": "CSV File"
+      },
+      "column_name": {
+        "type": "enum",
+        "default": "area",
+        "options": [
+          "area",
+          "mean_intensity",
+          "max_intensity",
+          "min_intensity",
+          "solidity",
+          "eccentricity",
+          "circularity",
+          "perimeter",
+          "major_axis_length",
+          "minor_axis_length",
+          "label"
+        ],
+        "label": "Filter Column",
+        "value": "area"
+      },
+      "operation": {
+        "type": "string",
+        "default": ">",
+        "options": [
+          ">",
+          "<",
+          ">=",
+          "<=",
+          "==",
+          "!="
+        ],
+        "label": "Condition",
+        "value": ">"
+      },
+      "threshold": {
+        "type": "float",
+        "default": 100.0,
+        "label": "Threshold Value",
+        "value": 100.0
+      },
+      "id_column": {
+        "type": "string",
+        "default": "label"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.measure.filter_labels_by_csv"
+  },
   "measure_labels": {
     "label": "Region Properties",
     "category": "Measure",
