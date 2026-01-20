@@ -7,6 +7,7 @@ import torch
 import logging
 import traceback
 import pandas as pd
+from pathlib import Path
 import ultrack
 from ultrack.config import MainConfig
 from ultrack.utils import estimate_parameters_from_labels, labels_to_contours
@@ -378,6 +379,80 @@ def train_stardist(image, labels, model_name="my_custom_nuclei", epochs=50, patc
         print(f"✅ Training Complete!")
         print(f"📁 Model saved to: {os.path.join(models_dir, model_name)}")
         print("💡 Restart Napari or Refresh to see it in the Segmentation node options.")
+
+    return None
+
+
+# REFINE STARDIST MODEL
+@register_node(
+    label="Refine StarDist Model",
+    category="Deep Learning",
+    outputs=[],
+    params_config={
+        "base_model_path": {"type": "path", "label": "Base Model Folder", "mode": "directory"},
+        "new_model_name": {"type": "text", "label": "New Model Name", "value": "refined_model_v1"},
+        "epochs": {"min": 1, "max": 1000, "value": 50, "label": "Epochs"},
+        "learning_rate": {"min": 0.00001, "max": 0.01, "value": 0.0001, "step": 0.00001, "label": "Learning Rate"}
+    }
+)
+def refine_stardist_model(image, labels, base_model_path="", new_model_name="refined_model_v1", epochs=50, learning_rate=0.0001):
+    
+    # 1. Validation
+    if image is None or labels is None:
+        raise ValueError("Image and Labels are required.")
+    
+    # Ensure inputs are numpy
+    image = _ensure_numpy(image)
+    labels = _ensure_numpy(labels)
+
+    # 2. Locate Worker (Same folder logic as Training)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    worker_script = os.path.join(parent_dir, "stardist_refine_worker.py")
+    
+    if not os.path.exists(worker_script):
+        # Fallback check
+        worker_script = os.path.join(current_dir, "..", "stardist_refine_worker.py")
+
+    print(f"--- Refine Node: Preparing Worker ---")
+
+    # 3. Prepare Data & Run Subprocess
+    # We use the exact same temp directory structure as the working Train node
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        img_path = os.path.join(tmp_dir, "train_img.npy")
+        lbl_path = os.path.join(tmp_dir, "train_lbl.npy")
+        
+        np.save(img_path, image)
+        np.save(lbl_path, labels)
+        
+        # Output directory (same as training)
+        models_dir = os.path.join(parent_dir, "custom_models")
+        if not os.path.exists(models_dir):
+            os.makedirs(models_dir)
+
+        print(f"   > Launching Refinement Job: {new_model_name}")
+        
+        cmd = [
+            sys.executable, worker_script,
+            "--img", img_path,
+            "--lbl", lbl_path,
+            "--base_model", str(base_model_path),
+            "--name", str(new_model_name),
+            "--outdir", models_dir,
+            "--epochs", str(epochs),
+            "--lr", str(learning_rate)
+        ]
+
+        # Stream output to console so you see the progress bar (just like training)
+        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
+        proc.wait()
+
+        if proc.returncode != 0:
+            raise RuntimeError("Refinement Worker Failed! Check terminal for errors.")
+
+        final_path = os.path.join(models_dir, new_model_name)
+        print(f"✅ Refinement Complete!")
+        print(f"📁 Model saved to: {final_path}")
 
     return None
 

@@ -1,4 +1,45 @@
 {
+  "refine_stardist_model": {
+    "label": "Refine StarDist Model",
+    "category": "Deep Learning",
+    "inputs": [
+      "image",
+      "labels"
+    ],
+    "outputs": [],
+    "parameters": {
+      "base_model_path": {
+        "type": "path",
+        "default": "",
+        "label": "Base Model Folder",
+        "mode": "directory"
+      },
+      "new_model_name": {
+        "type": "text",
+        "default": "refined_model_v1",
+        "label": "New Model Name",
+        "value": "refined_model_v1"
+      },
+      "epochs": {
+        "type": "string",
+        "default": 50,
+        "min": 1,
+        "max": 1000,
+        "value": 50,
+        "label": "Epochs"
+      },
+      "learning_rate": {
+        "type": "string",
+        "default": 0.0001,
+        "min": 1e-05,
+        "max": 0.01,
+        "value": 0.0001,
+        "step": 1e-05,
+        "label": "Learning Rate"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.refine_stardist_model"
+  },
   "run_cellpose": {
     "label": "Cellpose Segmentation",
     "category": "Deep Learning",
@@ -1368,7 +1409,7 @@
     "execution_path": "napari_flow_editor.flow_nodes.math.crop_image"
   },
   "crop_image_interactive": {
-    "label": "Interactive Crop (Robust)",
+    "label": "Interactive Crop",
     "category": "Math",
     "inputs": [
       "image",
