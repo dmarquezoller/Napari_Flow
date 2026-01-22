@@ -1,5 +1,6 @@
 from .decorator import register_node
 import dask.array as da
+import pandas as pd
 from pathlib import Path
 import zarr
 import napari
@@ -65,3 +66,38 @@ def open_ome_zarr(path: str = ""):
     # 2. RETURN: We pass the exact list of layers (images, labels, etc.) 
     # to the Main Thread.
     return layers
+
+# LOAD CSV NODE #
+
+@register_node(
+    label="Load CSV",
+    category="Input",
+    outputs=["csv_data"],
+    params_config={
+        "file_path": {
+            "type": "path", 
+            "label": "CSV File", 
+            "mode": "file", 
+            "filter": "*.csv"
+        }
+    }
+)
+def load_csv(file_path=""):
+    """
+    Loads a CSV file and passes it to the next node.
+    """
+    if not file_path:
+        raise ValueError("Please select a CSV file.")
+    
+    try:
+        df = pd.read_csv(file_path)
+        print(f"--- Load CSV ---")
+        print(f"   > Loaded {len(df)} rows from {file_path.split('/')[-1]}")
+        
+        # We return the dataframe packaged as a "dataframe" type.
+        # Even if Napari doesn't visualize 'dataframe' layers, the flow editor 
+        # passes this object to the next node.
+        return (df, {"name": "Loaded Data"}, "dataframe")
+        
+    except Exception as e:
+        raise ValueError(f"Failed to load CSV: {e}")

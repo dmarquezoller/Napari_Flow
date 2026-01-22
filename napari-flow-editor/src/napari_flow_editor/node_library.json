@@ -1340,6 +1340,24 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer"
   },
+  "load_csv": {
+    "label": "Load CSV",
+    "category": "Input",
+    "inputs": [],
+    "outputs": [
+      "csv_data"
+    ],
+    "parameters": {
+      "file_path": {
+        "type": "path",
+        "default": "",
+        "label": "CSV File",
+        "mode": "file",
+        "filter": "*.csv"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.load_csv"
+  },
   "open_ome_zarr": {
     "label": "Open Ome-Zarr",
     "category": "Input",
@@ -1430,20 +1448,15 @@
   },
   "filter_labels_by_csv": {
     "label": "Filter Labels by CSV",
-    "category": "Measurement",
+    "category": "Measure",
     "inputs": [
-      "labels_layer"
+      "labels_layer",
+      "csv_data"
     ],
     "outputs": [
       "filtered_labels"
     ],
     "parameters": {
-      "csv_path": {
-        "type": "path",
-        "default": "",
-        "mode": "file",
-        "label": "CSV File"
-      },
       "column_name": {
         "type": "enum",
         "default": "area",
@@ -1460,11 +1473,11 @@
           "minor_axis_length",
           "label"
         ],
-        "label": "Filter Column",
+        "label": "Filter Property",
         "value": "area"
       },
       "operation": {
-        "type": "string",
+        "type": "enum",
         "default": ">",
         "options": [
           ">",
@@ -1484,8 +1497,10 @@
         "value": 100.0
       },
       "id_column": {
-        "type": "string",
-        "default": "label"
+        "type": "text",
+        "default": "label",
+        "label": "ID Column (Ignore if standard)",
+        "value": "label"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.measure.filter_labels_by_csv"

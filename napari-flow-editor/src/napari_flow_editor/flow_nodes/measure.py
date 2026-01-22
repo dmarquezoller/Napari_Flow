@@ -132,18 +132,35 @@ def measure_labels(labels, image, properties: str = "All", mode: str = "2D Slice
     
 
 
-
-import numpy as np
-import pandas as pd
-from .decorator import register_node
-
 def _ensure_numpy(image):
     if hasattr(image, "compute"): return image.compute()
     return np.asarray(image)
 
+def _ensure_dataframe(data):
+    """
+    Unwraps input to ensure we have a pandas DataFrame.
+    Handles cases where data might be passed as (data, meta, type) tuple.
+    """
+    if isinstance(data, pd.DataFrame):
+        return data
+    
+    # If it's a tuple (data, meta, type), grab the first element
+    if isinstance(data, tuple) and len(data) > 0:
+        if isinstance(data[0], pd.DataFrame):
+            return data[0]
+            
+    # If it's a list (sometimes happens with multi-inputs), try the first item
+    if isinstance(data, list) and len(data) > 0:
+        if isinstance(data[0], pd.DataFrame):
+            return data[0]
+
+    raise ValueError(f"Input is not a valid DataFrame. Got: {type(data)}")
+
+
+
 @register_node(
     label="Filter Labels by CSV",
-    category="Measurement",
+    category="Measure",
     outputs=["filtered_labels"],
     params_config={
         "column_name": {
@@ -161,10 +178,11 @@ def _ensure_numpy(image):
                 "minor_axis_length",
                 "label"
             ],
-            "label": "Filter Column", 
+            "label": "Filter Property", 
             "value": "area"
         },
         "operation": {
+            "type": "enum",
             "options": [">", "<", ">=", "<=", "==", "!="], 
             "label": "Condition", 
             "value": ">"
@@ -174,17 +192,16 @@ def _ensure_numpy(image):
             "label": "Threshold Value", 
             "value": 100.0
         },
-        "csv_path": {
-            "type": "path",
-            "mode": "file",
-            "label": "CSV File"
+        "id_column": {
+            "type": "text",
+            "label": "ID Column (Ignore if standard)",
+            "value": "label"
         }
     }
 )
-def filter_labels_by_csv(labels_layer, csv_path="", column_name="area", operation=">", threshold=100.0, id_column="label"):
+def filter_labels_by_csv(labels_layer, csv_data, column_name="area", operation=">", threshold=100.0, id_column="label"):
     """
-    Filters a label image based on values in a CSV file.
-    Only keeps labels that satisfy: CSV[column] [op] threshold.
+    Filters a label image based on values in a CSV input.
     """
     
     print(f"--- Filtering Labels ---")
@@ -192,24 +209,21 @@ def filter_labels_by_csv(labels_layer, csv_path="", column_name="area", operatio
     # 1. Load Inputs
     labels = _ensure_numpy(labels_layer)
     
-    if not isinstance(csv_path, str) or not csv_path.endswith(".csv"):
-        raise ValueError("Please provide a valid CSV file path output from a Measure node.")
-        
+    # Use helper to extract DataFrame safely from the connection
     try:
-        df = pd.read_csv(csv_path)
-        print(f"   > Loaded CSV: {len(df)} rows")
+        df = _ensure_dataframe(csv_data)
+        print(f"   > Received DataFrame with {len(df)} rows.")
     except Exception as e:
-        raise ValueError(f"Could not read CSV: {e}")
+        raise ValueError(f"Invalid input connection. Please connect a 'Load CSV' node. ({e})")
 
     # 2. Validation
-    # Check if the column exists (even if it's in our hardcoded list, the CSV might lack it)
     if column_name not in df.columns:
-        raise ValueError(f"Column '{column_name}' not found in CSV. \nAvailable columns: {list(df.columns)}")
+        raise ValueError(f"Column '{column_name}' not found in CSV.\nAvailable: {list(df.columns)}")
     
     if id_column not in df.columns:
-        raise ValueError(f"ID Column '{id_column}' not found in CSV. Please check the CSV structure.")
+        raise ValueError(f"ID Column '{id_column}' not found. Check your CSV structure.")
 
-    # 3. Apply Filter Logic (Pandas Magic)
+    # 3. Apply Filter Logic
     try:
         if operation == ">":
             filtered_df = df[df[column_name] > threshold]
@@ -227,10 +241,9 @@ def filter_labels_by_csv(labels_layer, csv_path="", column_name="area", operatio
             filtered_df = df 
 
     except TypeError:
-        raise ValueError(f"Filter failed. Ensure column '{column_name}' contains numbers, not text.")
+        raise ValueError(f"Filter failed. Ensure column '{column_name}' contains numbers.")
 
     # 4. Filter the Image
-    # Get the IDs that survived the filter
     valid_ids = filtered_df[id_column].unique()
     
     count_before = len(df)
@@ -242,10 +255,8 @@ def filter_labels_by_csv(labels_layer, csv_path="", column_name="area", operatio
         print("   > WARNING: No objects matched criteria. Returning empty image.")
         return (np.zeros_like(labels), {"name": "Empty Filtered"}, "labels")
 
-    # Fast Vectorized Filtering (much faster than loops)
+    # Fast Vectorized Filtering
     mask = np.isin(labels, valid_ids)
-    
-    # Where mask is True, keep label. Where False, set to 0.
     filtered_img = np.where(mask, labels, 0).astype(labels.dtype)
 
-    return (filtered_img, {"name": f"Filtered ({column_name} {operation} {threshold})"}, "labels")
+    return (filtered_img, {"name": f"Filtered ({column_name})"}, "labels")
