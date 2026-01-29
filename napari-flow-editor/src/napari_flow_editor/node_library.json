@@ -1457,50 +1457,70 @@
       "filtered_labels"
     ],
     "parameters": {
-      "column_name": {
-        "type": "enum",
-        "default": "area",
-        "options": [
-          "area",
-          "mean_intensity",
-          "max_intensity",
-          "min_intensity",
-          "solidity",
-          "eccentricity",
-          "circularity",
-          "perimeter",
-          "major_axis_length",
-          "minor_axis_length",
-          "label"
+      "filters": {
+        "type": "table",
+        "default": [
+          {
+            "col": "area",
+            "op": ">",
+            "val": 100
+          }
         ],
-        "label": "Filter Property",
-        "value": "area"
-      },
-      "operation": {
-        "type": "enum",
-        "default": ">",
-        "options": [
-          ">",
-          "<",
-          ">=",
-          "<=",
-          "==",
-          "!="
+        "label": "Filter Rules",
+        "columns": [
+          {
+            "name": "col",
+            "label": "Filter Property",
+            "type": "enum",
+            "options": [
+              "area",
+              "mean_intensity",
+              "max_intensity",
+              "min_intensity",
+              "solidity",
+              "eccentricity",
+              "circularity",
+              "perimeter",
+              "major_axis_length",
+              "minor_axis_length",
+              "label"
+            ]
+          },
+          {
+            "name": "op",
+            "label": "Operation",
+            "type": "enum",
+            "options": [
+              ">",
+              "<",
+              ">=",
+              "<=",
+              "==",
+              "!="
+            ]
+          },
+          {
+            "name": "val",
+            "label": "Threshold",
+            "type": "float",
+            "value": 100.0
+          }
         ],
-        "label": "Condition",
-        "value": ">"
+        "value": [
+          {
+            "col": "area",
+            "op": ">",
+            "val": 100
+          }
+        ]
       },
-      "threshold": {
-        "type": "float",
-        "default": 100.0,
-        "label": "Threshold Value",
-        "value": 100.0
+      "frame_column": {
+        "type": "string",
+        "default": "frame"
       },
       "id_column": {
-        "type": "text",
-        "default": "label",
-        "label": "ID Column (Ignore if standard)",
-        "value": "label"
+        "type": "string",
+        "default": "label"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.measure.filter_labels_by_csv"

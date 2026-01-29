@@ -4,13 +4,13 @@ from qtpy.QtWidgets import (
     QGraphicsDropShadowEffect, QToolBar, QInputDialog, QFileDialog, QVBoxLayout,
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
-    QFrame, QMessageBox, QTextEdit, QSplitter, QDialog
+    QFrame, QMessageBox, QTextEdit, QSplitter, QDialog, QTableWidget, QHeaderView, QAbstractItemView
 )
 
 from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
-from qtpy.QtCore import Qt, QPointF, QRectF, QThread
+from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr
 
 import numpy as np
@@ -24,10 +24,161 @@ from .execution_engine import ExecutionWorker
 from .script_generator import ScriptGenerator
 
 
-
-
-
 NODE_LIBRARY = {}
+
+# --- CUSTOM WIDGET: TABLE WITH ADD/REMOVE BUTTONS ---
+class DynamicTableWidget(QWidget):
+    valueChanged = Signal(list)
+
+    def __init__(self, column_config):
+        super().__init__()
+        self.column_config = column_config 
+        self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.table = QTableWidget()
+        
+        # --- CHANGE 1: Add extra column for "Delete" button ---
+        self.table.setColumnCount(len(column_config) + 1)
+        
+        # Headers: use config labels + one empty for the 'X' button
+        headers = [c['label'] for c in column_config] + [""]
+        self.table.setHorizontalHeaderLabels(headers)
+        
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # Make the last column (Delete button) fixed width so it doesn't stretch
+        self.table.horizontalHeader().setSectionResizeMode(len(column_config), QHeaderView.ResizeToContents)
+        
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setMinimumHeight(200)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_add = QPushButton(" + Add Rule ")
+        # We removed the global "Remove" button because we now have per-row buttons
+        btn_layout.addWidget(self.btn_add)
+        
+        self.layout.addWidget(self.table)
+        self.layout.addLayout(btn_layout)
+        self.setLayout(self.layout)
+
+        self.btn_add.clicked.connect(self.add_row)
+
+    def add_row(self):
+        self.blockSignals(True)
+        row_idx = self.table.rowCount()
+        self.table.insertRow(row_idx)
+        
+        # 1. Add Data Widgets
+        for col_idx, col_def in enumerate(self.column_config):
+            self._set_cell_widget(row_idx, col_idx, col_def, col_def.get('value'))
+            
+        # 2. Add Delete Button (In the last column)
+        self._add_delete_btn(row_idx)
+        
+        self.blockSignals(False)
+        self.emit_change()
+
+    def _add_delete_btn(self, row_idx):
+        """Adds a delete button to the specific row index."""
+        btn_del = QPushButton("✖")
+        btn_del.setFixedSize(24, 24)
+        # Optional: Make it red
+        btn_del.setStyleSheet("QPushButton { color: red; font-weight: bold; }")
+        
+        # Connect to a helper that finds which row this button belongs to
+        btn_del.clicked.connect(self.remove_row_via_button)
+        
+        # Use a container widget to center the button in the cell
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0,0,0,0)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.addWidget(btn_del)
+        
+        # The delete column is the last one
+        del_col = len(self.column_config)
+        self.table.setCellWidget(row_idx, del_col, container)
+
+    def remove_row_via_button(self):
+        """Finds the button that was clicked and removes its row."""
+        # sender() gives us the button that was clicked
+        btn_clicked = self.sender()
+        if not btn_clicked: return
+
+        # Search for the button in the table to find its row
+        del_col = len(self.column_config)
+        for r in range(self.table.rowCount()):
+            # We wrapped the button in a container, so we check children
+            container = self.table.cellWidget(r, del_col)
+            if container and container.findChild(QPushButton) == btn_clicked:
+                self.table.removeRow(r)
+                self.emit_change()
+                return
+
+    def _set_cell_widget(self, r, c, col_def, value=None):
+        val_type = col_def.get('type', 'text')
+        
+        if val_type == 'enum':
+            w = QComboBox()
+            w.addItems(col_def.get('options', []))
+            if value: w.setCurrentText(str(value))
+            w.currentTextChanged.connect(lambda _: self.emit_change())
+            
+        elif val_type == 'float':
+            w = QDoubleSpinBox()
+            w.setRange(-1e9, 1e9)
+            if value is not None: w.setValue(float(value))
+            w.valueChanged.connect(lambda _: self.emit_change())
+            
+        else:
+            w = QLineEdit()
+            if value: w.setText(str(value))
+            w.textChanged.connect(lambda _: self.emit_change())
+            
+        self.table.setCellWidget(r, c, w)
+
+    def emit_change(self):
+        self.valueChanged.emit(self.get_value())
+
+    def get_value(self):
+        data = []
+        for r in range(self.table.rowCount()):
+            row_data = {}
+            # Loop ONLY through the config columns (ignore the last 'Delete' column)
+            for c, col_def in enumerate(self.column_config):
+                w = self.table.cellWidget(r, c)
+                
+                if isinstance(w, QComboBox): 
+                    val = w.currentText()
+                elif isinstance(w, (QSpinBox, QDoubleSpinBox)): 
+                    val = w.value()
+                elif isinstance(w, QLineEdit):
+                    val = w.text()
+                else:
+                    val = None
+                    
+                row_data[col_def['name']] = val
+            data.append(row_data)
+        return data
+
+    def set_value(self, data):
+        self.blockSignals(True)
+        self.table.setRowCount(0)
+        if isinstance(data, list):
+            for row_dict in data:
+                row_idx = self.table.rowCount()
+                self.table.insertRow(row_idx)
+                
+                # 1. Fill Data
+                for c, col_def in enumerate(self.column_config):
+                    if col_def['name'] in row_dict:
+                        self._set_cell_widget(row_idx, c, col_def, row_dict[col_def['name']])
+                
+                # 2. Add Delete Button
+                self._add_delete_btn(row_idx)
+                
+        self.blockSignals(False)
 
 # --- SOCKET -----------------------------------------------------
 class Socket(QGraphicsEllipseItem):
@@ -691,6 +842,24 @@ class FlowEditor(QWidget):
                     line_edit.textChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                     
                     widget = widget_container
+                
+                # TABLE
+                elif conf["type"] == "table":
+                    widget = DynamicTableWidget(conf.get('columns', []))
+                    
+                    # 2. Load Data
+                    val_to_load = current_val if current_val is not None else conf.get('value', [])
+                    widget.set_value(val_to_load)
+                    
+                    # 3. Connect Signal (Standard Logic)
+                    # This now works exactly like a Spinner or Enum: 
+                    # When data changes, it updates the node immediately.
+                    widget.valueChanged.connect(lambda data, n=node, k=param_name: self.update_param(n, k, data))
+                    
+                    self.props_layout.addRow(param_name.capitalize(), widget)
+                    continue
+
+
                 
                 # STRING / OTHER
                 else:

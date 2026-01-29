@@ -163,100 +163,94 @@ def _ensure_dataframe(data):
     category="Measure",
     outputs=["filtered_labels"],
     params_config={
-        "column_name": {
-            "type": "enum",
-            "options": [
-                "area", 
-                "mean_intensity", 
-                "max_intensity", 
-                "min_intensity", 
-                "solidity", 
-                "eccentricity", 
-                "circularity", 
-                "perimeter", 
-                "major_axis_length", 
-                "minor_axis_length",
-                "label"
+        "filters": {
+            "type": "table",  
+            "label": "Filter Rules",
+            "columns": [
+                {"name": "col", "label": "Filter Property", "type": "enum",
+                 "options": ["area", "mean_intensity", "max_intensity", "min_intensity", "solidity", "eccentricity", "circularity", "perimeter", "major_axis_length", "minor_axis_length", "label"]},
+                {"name": "op", "label": "Operation", "type": "enum",
+                 "options": [">", "<", ">=", "<=", "==", "!="]},
+                {"name": "val", "label": "Threshold", "type": "float", "value": 100.00}
             ],
-            "label": "Filter Property", 
-            "value": "area"
+            "value": [{"col": "area", "op": ">", "val": 100}]
         },
-        "operation": {
-            "type": "enum",
-            "options": [">", "<", ">=", "<=", "==", "!="], 
-            "label": "Condition", 
-            "value": ">"
-        },
-        "threshold": {
-            "type": "float", 
-            "label": "Threshold Value", 
-            "value": 100.0
-        },
-        "id_column": {
-            "type": "text",
-            "label": "ID Column (Ignore if standard)",
-            "value": "label"
-        }
+        "frame_col": {"type": "text", "value": "frame"},
+        "id_col": {"type": "text", "value": "label"}
     }
 )
-def filter_labels_by_csv(labels_layer, csv_data, column_name="area", operation=">", threshold=100.0, id_column="label"):
-    """
-    Filters a label image based on values in a CSV input.
-    """
+def filter_labels_by_csv(labels_layer, csv_data, filters=[{"col": "area", "op": ">", "val": 100}], frame_column="frame", id_column="label"):
     
-    print(f"--- Filtering Labels ---")
+    print(f"--- Filtering Labels (Multi-Rule) ---")
     
     # 1. Load Inputs
     labels = _ensure_numpy(labels_layer)
-    
-    # Use helper to extract DataFrame safely from the connection
     try:
         df = _ensure_dataframe(csv_data)
-        print(f"   > Received DataFrame with {len(df)} rows.")
     except Exception as e:
-        raise ValueError(f"Invalid input connection. Please connect a 'Load CSV' node. ({e})")
+        raise ValueError(f"Invalid CSV input. Please connect a 'Load CSV' node. ({e})")
 
     # 2. Validation
-    if column_name not in df.columns:
-        raise ValueError(f"Column '{column_name}' not found in CSV.\nAvailable: {list(df.columns)}")
-    
     if id_column not in df.columns:
-        raise ValueError(f"ID Column '{id_column}' not found. Check your CSV structure.")
+        raise ValueError(f"ID Column '{id_column}' not found in CSV.")
 
-    # 3. Apply Filter Logic
+    # 3. Determine Mode
+    is_time_series = False
+    if frame_column in df.columns and labels.ndim >= 3:
+        is_time_series = True
+        print(f"   > Mode: Time-Series (Found '{frame_column}')")
+    else:
+        print(f"   > Mode: Global")
+
+    # 4. Build Query from Table (THE NEW PART)
+    # We convert the list of dicts into a string like: "area > 100 and solidity < 0.9"
     try:
-        if operation == ">":
-            filtered_df = df[df[column_name] > threshold]
-        elif operation == "<":
-            filtered_df = df[df[column_name] < threshold]
-        elif operation == ">=":
-            filtered_df = df[df[column_name] >= threshold]
-        elif operation == "<=":
-            filtered_df = df[df[column_name] <= threshold]
-        elif operation == "==":
-            filtered_df = df[df[column_name] == threshold]
-        elif operation == "!=":
-            filtered_df = df[df[column_name] != threshold]
+        query_parts = []
+        for row in filters:
+            col = row['col']
+            op = row['op']
+            val = row['val']
+            
+            # Basic validation
+            if col not in df.columns:
+                print(f"   ⚠️ Warning: Column '{col}' not found. Skipping rule.")
+                continue
+                
+            query_parts.append(f"{col} {op} {val}")
+        
+        if not query_parts:
+            print("   > No valid filters found. Returning original.")
+            filtered_df = df
         else:
-            filtered_df = df 
+            full_query_string = " and ".join(query_parts)
+            print(f"   > Applying Query: {full_query_string}")
+            filtered_df = df.query(full_query_string)
 
-    except TypeError:
-        raise ValueError(f"Filter failed. Ensure column '{column_name}' contains numbers.")
+    except Exception as e:
+        raise ValueError(f"Filter Logic Error: {e}")
 
-    # 4. Filter the Image
-    valid_ids = filtered_df[id_column].unique()
-    
-    count_before = len(df)
-    count_after = len(valid_ids)
-    print(f"   > Condition: '{column_name}' {operation} {threshold}")
-    print(f"   > Objects: {count_before} -> {count_after} (Removed {count_before - count_after})")
+    print(f"   > Result: {len(df)} -> {len(filtered_df)} objects kept.")
 
-    if count_after == 0:
-        print("   > WARNING: No objects matched criteria. Returning empty image.")
-        return (np.zeros_like(labels), {"name": "Empty Filtered"}, "labels")
+    # 5. Apply to Image (Standard Frame-Aware Logic)
+    output_labels = np.zeros_like(labels)
 
-    # Fast Vectorized Filtering
-    mask = np.isin(labels, valid_ids)
-    filtered_img = np.where(mask, labels, 0).astype(labels.dtype)
+    if is_time_series:
+        n_frames = labels.shape[0]
+        # Optimization: Group dataframe by frame once
+        grouped = filtered_df.groupby(frame_column)[id_column].apply(set).to_dict()
+        
+        for t in range(n_frames):
+            valid_ids = grouped.get(t, set())
+            if not valid_ids: continue
+            
+            frame_slice = labels[t]
+            # Fast numpy mask
+            mask = np.isin(frame_slice, list(valid_ids))
+            output_labels[t] = np.where(mask, frame_slice, 0)
+    else:
+        valid_ids = filtered_df[id_column].unique()
+        if len(valid_ids) > 0:
+            mask = np.isin(labels, valid_ids)
+            output_labels = np.where(mask, labels, 0).astype(labels.dtype)
 
-    return (filtered_img, {"name": f"Filtered ({column_name})"}, "labels")
+    return (output_labels, {"name": "Filtered Labels"}, "labels")
