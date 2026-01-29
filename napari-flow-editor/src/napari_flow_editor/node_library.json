@@ -1467,6 +1467,7 @@
           }
         ],
         "label": "Filter Rules",
+        "max_rows": 2,
         "columns": [
           {
             "name": "col",

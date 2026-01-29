@@ -166,6 +166,7 @@ def _ensure_dataframe(data):
         "filters": {
             "type": "table",  
             "label": "Filter Rules",
+            "max_rows": 2,
             "columns": [
                 {"name": "col", "label": "Filter Property", "type": "enum",
                  "options": ["area", "mean_intensity", "max_intensity", "min_intensity", "solidity", "eccentricity", "circularity", "perimeter", "major_axis_length", "minor_axis_length", "label"]},
