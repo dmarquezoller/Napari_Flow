@@ -18,6 +18,8 @@ from napari.plugins.io import read_data_with_plugins
         "layer_name": {"type": "enum", "options": []},
         "axis_map": {"type": "table", "label": "Dimensions (e.g. T, Z, Z, Y, X)",
                      "max_rows": 1,
+                     "row_unique": True,
+                     "allow_duplicates": ["-"],
                      "columns": [
                          {"name": "d0", "label": "Dim 0", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
                          {"name": "d1", "label": "Dim 1", "type": "enum", "options": ["-","T","Z","C","Y","X"]},

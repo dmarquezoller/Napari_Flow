@@ -1350,6 +1350,10 @@
         ],
         "label": "Dimensions (e.g. T, Z, Z, Y, X)",
         "max_rows": 1,
+        "row_unique": true,
+        "allow_duplicates": [
+          "-"
+        ],
         "columns": [
           {
             "name": "d0",
