@@ -99,12 +99,14 @@ class ExecutionWorker(QObject):
     def execute_node_logic(self, node, library_def):
         """
         Performs the actual import and execution.
-        Returns the dictionary of outputs.
+        Returns the dictionary of outputs as (Data, Metadata) tuples.
         """
         self.log_signal.emit(f"Executing: {node.title}...")
         
-        current_metadata = {}
-        # --- A. Inputs (Grab from CACHE) ---
+        # This dictionary will accumulate metadata from all parents
+        current_metadata = {} 
+
+        # --- A. Inputs (Grab from CACHE & Inherit Metadata) ---
         func_inputs = {}
         for socket in node.inputs:
             if socket.connected_edges:
@@ -113,8 +115,24 @@ class ExecutionWorker(QObject):
                 source_socket_name = edge.start_socket.name
                 
                 if source_socket_name in source_node.cached_results:
-                    data = source_node.cached_results[source_socket_name]
-                    func_inputs[socket.name] = data
+                    # Get the package
+                    data_package = source_node.cached_results[source_socket_name]
+                    
+                    # 1. Check if it is an Envelope (Data, Meta)
+                    if isinstance(data_package, tuple) and len(data_package) == 2 and isinstance(data_package[1], dict):
+                        # UNPACK: Separate data for calculation, keep meta for history
+                        data_only = data_package[0]
+                        incoming_meta = data_package[1]
+                        
+                        # Inherit the metadata
+                        current_metadata.update(incoming_meta)
+                        func_inputs[socket.name] = data_only
+                        
+                        # Debug
+                        # print(f"DEBUG: Inherited metadata from {source_node.title}: {incoming_meta.keys()}")
+                    else:
+                        # Fallback for raw data (no metadata yet)
+                        func_inputs[socket.name] = data_package
                 else:
                     raise ValueError(f"Missing data from upstream node: {source_node.title}")
 
@@ -125,13 +143,24 @@ class ExecutionWorker(QObject):
             target_name = func_params.get("layer_name")
             if target_name in self.viewer.layers:
                 layer = self.viewer.layers[target_name]
+                
+                # 1. Grab existing metadata safely
+                # We copy it so we don't accidentally modify the real layer later
+                layer_meta = layer.metadata.copy() if hasattr(layer, 'metadata') else {}
+                
+                # 2. Add Axes from Table (if exists)
                 axis_map = func_params.get("axis_map", [])
                 if axis_map:
                     row = axis_map[0]
                     axes = [row.get(f"d{i}") for i in range(5) if row.get(f"d{i}", "-") != "-"]
-                    layer.metadata["axes"] = axes
-                    self.log_signal.emit(f"Set axes for layer '{target_name}': {axes}")
-                return {"data_out": layer.data}
+                    layer.metadata["axes"] = axes   
+
+                # 3. Store the Source Name (Useful for tracking)
+                layer_meta = layer.metadata.copy() if hasattr(layer, 'metadata') else {}
+                layer_meta["source_layer"] = target_name
+
+                # RETURN THE ENVELOPE: (Array, Dictionary)
+                return {"data_out": (layer.data, layer_meta)}
             else:
                 raise ValueError(f"Layer '{target_name}' not found.")
 
@@ -148,37 +177,36 @@ class ExecutionWorker(QObject):
             module = importlib.import_module(module_name)
             func = getattr(module, func_name)
 
+        # Run the function with RAW arrays (extracted in Step A)
         args = {**func_inputs, **func_params}
         result = func(**args)
         
-        # --- D. Format Results (THE FIX) ---
+        # --- D. Format Results & Emit ---
         output_names = def_data.get("outputs", ["out"])
         node_outputs = {}
 
-        # 1. Check if it is a Napari Layer Tuple (Data, Meta, Type)
-        #    Structure: Tuple where the second item is a dictionary
-        is_layer_tuple = (
-            isinstance(result, tuple) 
-            and len(result) >= 2 
-            and isinstance(result[1], dict)
-        )
+        # Helper: Wraps a result array into an Envelope (Result, Inherited_Metadata)
+        def wrap_result(res):
+            # If function returned its own metadata (rare), merge it
+            if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
+                merged = current_metadata.copy()
+                merged.update(res[1])
+                return (res[0], merged)
+            # Otherwise, just attach the inherited metadata
+            return (res, current_metadata)
 
-        if is_layer_tuple:
-            # Treat this tuple as a SINGLE object (Result + Metadata)
-            # Assign the whole tuple to the first output name
-            if output_names:
-                node_outputs[output_names[0]] = result
-        
-        # 2. Check if it is standard Multiple Outputs (e.g. Sobel X, Sobel Y)
-        elif isinstance(result, tuple):
+        # 1. Map results to output names
+        if isinstance(result, tuple) and len(output_names) > 1:
              for i, name in enumerate(output_names):
-                if i < len(result): node_outputs[name] = result[i]
-        
-        # 3. Single Object Result
+                if i < len(result): node_outputs[name] = wrap_result(result[i])
+        elif isinstance(result, dict):
+             for k, v in result.items():
+                 node_outputs[k] = wrap_result(v)
         else:
-             if output_names: node_outputs[output_names[0]] = result
+             if output_names: node_outputs[output_names[0]] = wrap_result(result)
              
-        # Emit to GUI for display
+        # 2. Emit to GUI
+        # We send the WHOLE ENVELOPE (Data, Meta) to the GUI
         for out_name, out_data in node_outputs.items():
             self.result_signal.emit(node.title, out_name, out_data)
             

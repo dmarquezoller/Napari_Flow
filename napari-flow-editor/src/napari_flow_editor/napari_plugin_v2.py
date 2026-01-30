@@ -1213,83 +1213,85 @@ class FlowEditor(QWidget):
                 item.update() # Force repaint of the dot
                 break
 
-
     def handle_execution_result(self, node_title, output_name, data):
         # 1. Update Cache
         node_obj = next((item for item in self.scene.items() 
                         if isinstance(item, Node) and item.title == node_title), None)
-        
         if node_obj:
             node_obj.cached_results[output_name] = data
             node_obj.status = "green"
 
-        # --- HELPER: Adds a single layer to the viewer ---
-        def add_layer_to_viewer(layer_data, layer_meta, layer_type):
-            if "name" not in layer_meta or not layer_meta["name"]:
-                layer_meta["name"] = f"{node_title} data"
-            name = layer_meta["name"]
+        # --- A. UNPACK ENVELOPE (Separate Data from Metadata) ---
+        display_data = data
+        display_meta = {}
 
-            # --- FIX 1: Handle Multiscale Pyramid (List) ---
-            # If data is a list, Napari MUST know it is multiscale
-            if isinstance(layer_data, list):
-                # Ensure it's not empty and contains arrays
-                if len(layer_data) > 0:
-                    layer_meta["multiscale"] = True
+        # If data is (Value, Dict), we assume it's (Data, Metadata)
+        if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
+            display_data = data[0]
+            display_meta = data[1]
 
-            # --- FIX 2: Handle Tuple Data (Legacy) ---
-            if isinstance(layer_data, tuple):
-                layer_data = list(layer_data)
+        # --- B. THE "STRIPPER" (Fixes the (Mask, Stats) Crash) ---
+        # If the unpacked data is STILL a tuple (e.g. Filter returns (Mask, Stats)),
+        # we must strip the extra stats, otherwise Napari tries to draw the stats as a frame.
+        if isinstance(display_data, (tuple, list)):
+            # Check if the first item is a valid array (has shape/ndim)
+            if len(display_data) > 0:
+                first_item = display_data[0]
+                if hasattr(first_item, "shape") and hasattr(first_item, "dtype"):
+                    # IT IS AN IMAGE! Discard the rest (stats/tables)
+                    display_data = first_item
+                    
+        # --- C. THE BOUNCER (Blocks pure CSV/Dict outputs) ---
+        import pandas as pd
+        if isinstance(display_data, (pd.DataFrame, dict, str)):
+            # If the data itself is just a table/dict (e.g. Load CSV), stop here.
+            print(f"ℹ️ Output '{output_name}' is non-visual data. Skipping display.")
+            return
+
+        # --- D. DISPLAY HELPER ---
+        def add_layer_to_viewer(layer_data, raw_meta):
+            layer_name = raw_meta.get("name", f"{node_title} Output")
+            
+            # Separate Napari args from Custom Metadata
+            valid_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma"}
+            napari_kwargs = {"name": layer_name}
+            custom_metadata = {}
+
+            for k, v in raw_meta.items():
+                if k in valid_args: napari_kwargs[k] = v
+                else: custom_metadata[k] = v
+            
+            napari_kwargs["metadata"] = custom_metadata
 
             try:
-                if name in self.viewer.layers:
-                    print(f"⚡ Updating layer: {name}")
-                    layer = self.viewer.layers[name]
-                    # Update meta first (so multiscale flag is known if needed)
-                    if "contrast_limits" in layer_meta: layer.contrast_limits = layer_meta["contrast_limits"]
-                    layer.data = layer_data 
+                # Update existing or Create new
+                if layer_name in self.viewer.layers:
+                    layer = self.viewer.layers[layer_name]
+                    layer.data = layer_data
+                    layer.metadata.update(custom_metadata)
                 else:
-                    print(f"✨ Creating layer: {name} ({layer_type})")
-                    if layer_type == "labels":
-                        self.viewer.add_labels(layer_data, **layer_meta)
-                    elif layer_type == "tracks":
-                        self.viewer.add_tracks(layer_data, **layer_meta)
-                    elif layer_type == "points":
-                        self.viewer.add_points(layer_data, **layer_meta)
+                    # Auto-detect Labels vs Image
+                    import numpy as np
+                    is_labels = False
+                    if hasattr(layer_data, "dtype"):
+                        # Heuristic: Bool or Integer = Labels
+                        if layer_data.dtype == bool or np.issubdtype(layer_data.dtype, np.integer):
+                             is_labels = True
+
+                    if is_labels:
+                        self.viewer.add_labels(layer_data, **napari_kwargs)
                     else:
-                        self.viewer.add_image(layer_data, **layer_meta)
+                        self.viewer.add_image(layer_data, **napari_kwargs)
                         
             except Exception as e:
-                print(f"❌ Error adding layer '{name}': {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"❌ Error displaying layer '{layer_name}': {e}")
+                # Optional: Print traceback to see exactly why Napari hated it
+                # import traceback
+                # traceback.print_exc()
 
-        # --- MAIN LOGIC (Updated for Tuple Handling) ---
+        # Execute
+        add_layer_to_viewer(display_data, display_meta)
 
-        # Case 1: Result is (Data, Meta, Type) - The New Standard
-        if isinstance(data, tuple) and len(data) == 3 and isinstance(data[1], dict):
-            d, m, t = data
-            add_layer_to_viewer(d, m, t)
-            self.scene.update()
-            return
-
-        # Case 2: Result is (Data, Meta)
-        if isinstance(data, (list, tuple)) and len(data) == 2 and isinstance(data[1], dict):
-            add_layer_to_viewer(data[0], data[1], "image")
-            self.scene.update()
-            return
-
-        # Case 3: OME-Zarr List of Layers (Legacy Drag-drop)
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], tuple):
-            print(f"📦 Received {len(data)} layers from plugin.")
-            for layer in data:
-                if len(layer) == 3:
-                    add_layer_to_viewer(layer[0], layer[1], layer[2])
-            self.scene.update()
-            return
-
-        # Case 4: Raw Data (Fallback)
-        add_layer_to_viewer(data, {"name": f"{node_title} output"}, "image")
-        self.scene.update()
 
     def append_log(self, text):
         self.console.append(text)
