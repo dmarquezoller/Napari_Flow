@@ -1214,67 +1214,65 @@ class FlowEditor(QWidget):
                 break
 
     def handle_execution_result(self, node_title, output_name, data):
-        # 1. Update Cache
+        # 1. Update Cache (Always save the raw data for downstream nodes!)
         node_obj = next((item for item in self.scene.items() 
                         if isinstance(item, Node) and item.title == node_title), None)
         if node_obj:
             node_obj.cached_results[output_name] = data
             node_obj.status = "green"
 
-        # --- A. UNPACK ENVELOPE (Separate Data from Metadata) ---
+        # --- A. UNPACK ENVELOPE ---
+        # Separates the Engine's wrapper: (Data, Metadata) -> Data, Metadata
         display_data = data
         display_meta = {}
 
-        # If data is (Value, Dict), we assume it's (Data, Metadata)
         if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
             display_data = data[0]
             display_meta = data[1]
 
-        # --- B. THE "STRIPPER" (Fixes the (Mask, Stats) Crash) ---
-        # If the unpacked data is STILL a tuple (e.g. Filter returns (Mask, Stats)),
-        # we must strip the extra stats, otherwise Napari tries to draw the stats as a frame.
+        # --- B. THE STRIPPER (Fixes "Filter" crashes) ---
+        # If the data itself is a Tuple/List (e.g. (Mask, Stats)), extracting the image.
         if isinstance(display_data, (tuple, list)):
-            # Check if the first item is a valid array (has shape/ndim)
             if len(display_data) > 0:
                 first_item = display_data[0]
+                # If the first item is an image array, use it and discard the rest.
                 if hasattr(first_item, "shape") and hasattr(first_item, "dtype"):
-                    # IT IS AN IMAGE! Discard the rest (stats/tables)
                     display_data = first_item
-                    
-        # --- C. THE BOUNCER (Blocks pure CSV/Dict outputs) ---
+        
+        # --- C. THE BOUNCER (Fixes "CSV" crashes) ---
+        # If the final extracted data is a Table or Dictionary, do not plot.
         import pandas as pd
         if isinstance(display_data, (pd.DataFrame, dict, str)):
-            # If the data itself is just a table/dict (e.g. Load CSV), stop here.
-            print(f"ℹ️ Output '{output_name}' is non-visual data. Skipping display.")
+            print(f"ℹ️ Output '{output_name}' is non-visual. Skipping display.")
             return
 
         # --- D. DISPLAY HELPER ---
         def add_layer_to_viewer(layer_data, raw_meta):
+            # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
             
-            # Separate Napari args from Custom Metadata
-            valid_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma"}
+            # 2. Filter Metadata (Napari args vs. Custom User Data)
+            valid_napari_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma"}
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
 
             for k, v in raw_meta.items():
-                if k in valid_args: napari_kwargs[k] = v
+                if k in valid_napari_args: napari_kwargs[k] = v
                 else: custom_metadata[k] = v
             
             napari_kwargs["metadata"] = custom_metadata
 
+            # 3. Create/Update Layer
             try:
-                # Update existing or Create new
                 if layer_name in self.viewer.layers:
                     layer = self.viewer.layers[layer_name]
                     layer.data = layer_data
                     layer.metadata.update(custom_metadata)
                 else:
-                    # Auto-detect Labels vs Image
+                    # Heuristic: Is it Labels or Image?
                     import numpy as np
                     is_labels = False
                     if hasattr(layer_data, "dtype"):
-                        # Heuristic: Bool or Integer = Labels
                         if layer_data.dtype == bool or np.issubdtype(layer_data.dtype, np.integer):
                              is_labels = True
 
@@ -1282,14 +1280,11 @@ class FlowEditor(QWidget):
                         self.viewer.add_labels(layer_data, **napari_kwargs)
                     else:
                         self.viewer.add_image(layer_data, **napari_kwargs)
-                        
             except Exception as e:
+                # If something weird slips through (like a single number), we catch it here
                 print(f"❌ Error displaying layer '{layer_name}': {e}")
-                # Optional: Print traceback to see exactly why Napari hated it
-                # import traceback
-                # traceback.print_exc()
 
-        # Execute
+        # Execute Display
         add_layer_to_viewer(display_data, display_meta)
 
 
