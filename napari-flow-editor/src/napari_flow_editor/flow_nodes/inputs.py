@@ -15,10 +15,21 @@ from napari.plugins.io import read_data_with_plugins
     # We define it as an enum so the JSON knows it's a dropdown.
     # We leave options empty [] because the GUI fills them in real-time.
     params_config={
-        "layer_name": {"type": "enum", "options": []} 
+        "layer_name": {"type": "enum", "options": []},
+        "axis_map": {"type": "table", "label": "Dimensions (e.g. T, Z, Z, Y, X)",
+                     "max_rows": 1,
+                     "columns": [
+                         {"name": "d0", "label": "Dim 0", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
+                         {"name": "d1", "label": "Dim 1", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
+                         {"name": "d2", "label": "Dim 2", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
+                         {"name": "d3", "label": "Dim 3", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
+                         {"name": "d4", "label": "Dim 4", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
+                     ],
+                     "value": [{"d0": "Y", "d1": "X", "d2": "-", "d3": "-", "d4": "-"}]
+                    }
     }
 )
-def get_layer(layer_name: str = ""):
+def get_layer(layer_name: str = "", axis_map: list = [{"d0": "Y", "d1": "X", "d2": "-", "d3": "-", "d4": "-"}]):
     # The argument 'layer_name' creates the parameter entry in the JSON.
     return layer_name
 

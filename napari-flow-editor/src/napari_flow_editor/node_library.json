@@ -1336,6 +1336,96 @@
         "type": "enum",
         "default": "",
         "options": []
+      },
+      "axis_map": {
+        "type": "table",
+        "default": [
+          {
+            "d0": "Y",
+            "d1": "X",
+            "d2": "-",
+            "d3": "-",
+            "d4": "-"
+          }
+        ],
+        "label": "Dimensions (e.g. T, Z, Z, Y, X)",
+        "max_rows": 1,
+        "columns": [
+          {
+            "name": "d0",
+            "label": "Dim 0",
+            "type": "enum",
+            "options": [
+              "-",
+              "T",
+              "Z",
+              "C",
+              "Y",
+              "X"
+            ]
+          },
+          {
+            "name": "d1",
+            "label": "Dim 1",
+            "type": "enum",
+            "options": [
+              "-",
+              "T",
+              "Z",
+              "C",
+              "Y",
+              "X"
+            ]
+          },
+          {
+            "name": "d2",
+            "label": "Dim 2",
+            "type": "enum",
+            "options": [
+              "-",
+              "T",
+              "Z",
+              "C",
+              "Y",
+              "X"
+            ]
+          },
+          {
+            "name": "d3",
+            "label": "Dim 3",
+            "type": "enum",
+            "options": [
+              "-",
+              "T",
+              "Z",
+              "C",
+              "Y",
+              "X"
+            ]
+          },
+          {
+            "name": "d4",
+            "label": "Dim 4",
+            "type": "enum",
+            "options": [
+              "-",
+              "T",
+              "Z",
+              "C",
+              "Y",
+              "X"
+            ]
+          }
+        ],
+        "value": [
+          {
+            "d0": "Y",
+            "d1": "X",
+            "d2": "-",
+            "d3": "-",
+            "d4": "-"
+          }
+        ]
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer"

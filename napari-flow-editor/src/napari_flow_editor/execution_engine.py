@@ -103,6 +103,7 @@ class ExecutionWorker(QObject):
         """
         self.log_signal.emit(f"Executing: {node.title}...")
         
+        current_metadata = {}
         # --- A. Inputs (Grab from CACHE) ---
         func_inputs = {}
         for socket in node.inputs:
@@ -123,8 +124,14 @@ class ExecutionWorker(QObject):
         if node.node_type == "get_layer":
             target_name = func_params.get("layer_name")
             if target_name in self.viewer.layers:
-                data = self.viewer.layers[target_name].data
-                return {"data_out": data} 
+                layer = self.viewer.layers[target_name]
+                axis_map = func_params.get("axis_map", [])
+                if axis_map:
+                    row = axis_map[0]
+                    axes = [row.get(f"d{i}") for i in range(5) if row.get(f"d{i}", "-") != "-"]
+                    layer.metadata["axes"] = axes
+                    self.log_signal.emit(f"Set axes for layer '{target_name}': {axes}")
+                return {"data_out": layer.data}
             else:
                 raise ValueError(f"Layer '{target_name}' not found.")
 
