@@ -1328,7 +1328,7 @@ class FlowEditor(QWidget):
             layer_name = raw_meta.get("name", f"{node_title} Output")
             
             # 2. Filter Metadata (Napari args vs. Custom User Data)
-            valid_napari_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma"}
+            valid_napari_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma", "rgb"}
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
 
@@ -1344,13 +1344,20 @@ class FlowEditor(QWidget):
                     layer = self.viewer.layers[layer_name]
                     layer.data = layer_data
                     layer.metadata.update(custom_metadata)
+                    if "rgb" in napari_kwargs:
+                        if hasattr(layer, "rgb"):
+                            layer.rgb = napari_kwargs["rgb"]
                 else:
                     # Heuristic: Is it Labels or Image?
                     import numpy as np
-                    is_labels = False
+                    is_labels = False  
                     if hasattr(layer_data, "dtype"):
+                        # Check if it's integer type
                         if layer_data.dtype == bool or np.issubdtype(layer_data.dtype, np.integer):
-                             is_labels = True
+                            # ONLY make it a Label if it is NOT RGB
+                            # (Images can be integers too, e.g. uint8, uint16)
+                            if not napari_kwargs.get("rgb", False):
+                                is_labels = True
 
                     if is_labels:
                         self.viewer.add_labels(layer_data, **napari_kwargs)

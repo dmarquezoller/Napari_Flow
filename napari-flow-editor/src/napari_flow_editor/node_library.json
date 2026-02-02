@@ -1489,39 +1489,8 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
   },
-  "crop_image": {
-    "label": "Crop / Slice Image",
-    "category": "Math",
-    "inputs": [
-      "image"
-    ],
-    "outputs": [
-      "cropped_image"
-    ],
-    "parameters": {
-      "t_crop": {
-        "type": "text",
-        "default": ":",
-        "label": "Time/Z (Dim 0) [e.g. 0:10]",
-        "value": "0:10"
-      },
-      "y_crop": {
-        "type": "text",
-        "default": ":",
-        "label": "Y (Dim 1) [e.g. 100:500]",
-        "value": ":"
-      },
-      "x_crop": {
-        "type": "text",
-        "default": ":",
-        "label": "X (Dim 2) [e.g. 100:500]",
-        "value": ":"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.math.crop_image"
-  },
   "crop_image_interactive": {
-    "label": "Interactive Crop",
+    "label": "Interactive Crop (Legacy)",
     "category": "Math",
     "inputs": [
       "image",
@@ -1539,6 +1508,25 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.crop_image_interactive"
+  },
+  "interactive_crop": {
+    "label": "Interactive Crop",
+    "category": "Math",
+    "inputs": [
+      "image_input"
+    ],
+    "outputs": [
+      "cropped_image"
+    ],
+    "parameters": {
+      "t_crop": {
+        "type": "text",
+        "default": ":",
+        "label": "Time/Z Slice",
+        "value": ":"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.math.interactive_crop"
   },
   "filter_labels_by_csv": {
     "label": "Filter Labels by CSV",

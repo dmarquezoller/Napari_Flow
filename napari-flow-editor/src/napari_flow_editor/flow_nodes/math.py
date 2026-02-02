@@ -1,6 +1,10 @@
 from .decorator import register_node
 from .deep_learning import _ensure_numpy
 import numpy as np
+import napari
+import queue
+import threading
+from qtpy.QtCore import QObject, Signal
 
 # --- ALREADY IMPLEMENTED --- #
 # - blend images              #          
@@ -27,87 +31,223 @@ def blend_images(image_a, image_b, alpha: float = 0.5):
 
 # --- CROP/SLICE IMAGE --- #
 
+# =============================================================================
+# 1. THE WORKER (Put this in workers.py if you want)
+# =============================================================================
+class CropGUIWorker(QObject):
+    run_on_main_signal = Signal(object, object)
 
-def _parse_slice(slice_str):
-    """Converts string '0:10' or '10:' to a python slice object."""
-    if not slice_str or slice_str.strip() == ":" or slice_str.strip() == "":
-        return slice(None)
-    try:
-        # Handles 'start:stop' and 'start:stop:step'
-        parts = [int(p) if p.strip() else None for p in slice_str.split(':')]
-        return slice(*parts)
-    except ValueError:
-        print(f"Warning: Invalid slice string '{slice_str}'. Using full range.")
-        return slice(None)
+    def __init__(self):
+        super().__init__()
+        self.run_on_main_signal.connect(self._execute_slot)
 
+    def _execute_slot(self, func, result_queue):
+        try:
+            result = func()
+            result_queue.put((True, result))
+        except Exception as e:
+            result_queue.put((False, e))
+
+    def setup_interaction(self, layer_name):
+        """Creates the layer and returns an Event to wait on."""
+        def _setup():
+            viewer = napari.current_viewer()
+            if not viewer: raise ValueError("No Viewer")
+            
+            if layer_name in viewer.layers: viewer.layers.remove(layer_name)
+            
+            # Create the 'Prompt' layer
+            roi_layer = viewer.add_shapes(
+                name=layer_name, edge_color="#00ff00", face_color=[0,0,0,0], edge_width=3
+            )
+            roi_layer.mode = 'add_rectangle'
+            viewer.layers.selection.active = roi_layer
+
+            # Wait for drawing
+            done_event = threading.Event()
+            def on_data_change(e):
+                if len(roi_layer.data) > 0:
+                    done_event.set()
+                    roi_layer.events.data.disconnect(on_data_change)
+            roi_layer.events.data.connect(on_data_change)
+            return done_event
+
+        q = queue.Queue()
+        self.run_on_main_signal.emit(_setup, q)
+        success, event = q.get()
+        if not success: raise event
+        return event
+
+    def finish_interaction(self, layer_name):
+        """Gets data and deletes the layer."""
+        def _finish():
+            viewer = napari.current_viewer()
+            if not viewer or layer_name not in viewer.layers: return None
+            l = viewer.layers[layer_name]
+            data = [np.array(s) for s in l.data] # Copy data
+            viewer.layers.remove(layer_name)     # Cleanup
+            return data
+
+        q = queue.Queue()
+        self.run_on_main_signal.emit(_finish, q)
+        success, data = q.get()
+        if not success: raise data
+        return data
+
+# Initialize Worker
+crop_worker = CropGUIWorker()
+
+
+# =============================================================================
+# 2. THE NODE (Clean and Simple)
+# =============================================================================
 @register_node(
-    label="Crop / Slice Image",
+    label="Interactive Crop",
     category="Math",
     outputs=["cropped_image"],
     params_config={
-        "t_crop": {
-            "type": "text", 
-            "label": "Time/Z (Dim 0) [e.g. 0:10]", 
-            "value": "0:10"
-        },
-        "y_crop": {
-            "type": "text", 
-            "label": "Y (Dim 1) [e.g. 100:500]", 
-            "value": ":"
-        },
-        "x_crop": {
-            "type": "text", 
-            "label": "X (Dim 2) [e.g. 100:500]", 
-            "value": ":"
-        }
+        "t_crop": {"type": "text", "label": "Time/Z Slice", "value": ":"}
     }
 )
-def crop_image(image, t_crop=":", y_crop=":", x_crop=":"):
-    """
-    Crops an n-dimensional image using string slices.
-    """
+def interactive_crop(image_input, t_crop=":"):
+    # --- 1. UNPACK ---
+    image = image_input
+    meta = {}
+    if isinstance(image_input, tuple):
+        if len(image_input) >= 2:
+            image = image_input[0]
+            if isinstance(image_input[1], dict): meta = image_input[1]
+    
     image = _ensure_numpy(image)
-    if image is None:
-        return None
+    if image is None: return None
 
-    # Parse inputs
+    # --- 2. INTERACTION (Wait for Draw) ---
+    LAYER_NAME = "---- DRAW CROP (Waiting...) ----"
+    print(f">> Please draw a rectangle in the '{LAYER_NAME}' layer.")
+    
+    # Pause and Wait
+    drawing_event = crop_worker.setup_interaction(LAYER_NAME)
+    drawing_event.wait() 
+    
+    # Get Shapes
+    shapes_data = crop_worker.finish_interaction(LAYER_NAME)
+    if not shapes_data: raise ValueError("No ROI data received.")
+
+    # --- 3. YOUR TEMPLATE LOGIC STARTS HERE ---
+    
+    # A. Parse Time Slice
     sl_t = _parse_slice(t_crop)
-    sl_y = _parse_slice(y_crop)
-    sl_x = _parse_slice(x_crop)
+
+    # B. Parse ROI (Y/X) - Adapted from your template
+    last_shape = shapes_data[-1]
+    min_coords = np.min(last_shape, axis=0)
+    max_coords = np.max(last_shape, axis=0)
     
-    print(f"--- Cropping Image (Original: {image.shape}) ---")
+    # Napari shapes are always (..., Y, X)
+    y_min, x_min = int(min_coords[-2]), int(min_coords[-1])
+    y_max, x_max = int(max_coords[-2]), int(max_coords[-1])
+
+    y_min, x_min = max(0, y_min), max(0, x_min)
+    if y_max <= y_min: y_max = y_min + 1
+    if x_max <= x_min: x_max = x_min + 1
     
-    # Apply logic based on dimensions
-    # Assuming shape is (Time, Y, X, C) or (Time, Y, X)
+    sl_y = slice(y_min, y_max)
+    sl_x = slice(x_min, x_max)
+
+    print(f"--- Cropping Input: {image.shape} ---")
+    print(f"  > ROI: Y[{y_min}:{y_max}], X[{x_min}:{x_max}]")
+
+    # C. Smart Slicing Logic (Exact copy of your template)
     try:
-        # Case 4D: (Time, Y, X, Channel) -> Your case (81, 894, 894, 3)
+        out = None
+        is_rgb = False # Flag we will detect
+
+        # Case 4D
         if image.ndim == 4:
-            out = image[sl_t, sl_y, sl_x, :]
-            
+            # Check if last dim is small (Channels) vs large (Spatial X)
+            if image.shape[-1] < 10: 
+                # (Time, Y, X, Channel) -> THIS IS YOUR CASE
+                print("  > Detecting (Time, Y, X, C) structure")
+                is_rgb = True # <--- We mark this!
+                
+                y_max_safe = min(image.shape[1], y_max)
+                x_max_safe = min(image.shape[2], x_max)
+                sl_y = slice(y_min, y_max_safe)
+                sl_x = slice(x_min, x_max_safe)
+                
+                out = image[sl_t, sl_y, sl_x, :]
+                
+            else:
+                # (Time, Z, Y, X)
+                print("  > Detecting (Time, Z, Y, X) structure")
+                y_max_safe = min(image.shape[2], y_max)
+                x_max_safe = min(image.shape[3], x_max)
+                sl_y = slice(y_min, y_max_safe)
+                sl_x = slice(x_min, x_max_safe)
+                
+                out = image[sl_t, :, sl_y, sl_x]
+
         # Case 3D: (Time, Y, X) or (Z, Y, X)
         elif image.ndim == 3:
-            out = image[sl_t, sl_y, sl_x]
-            
-        # Case 2D: (Y, X) - Ignore T input
+            # Added small heuristic for single RGB image (Y, X, C)
+            if image.shape[-1] < 10:
+                print("  > Detecting (Y, X, C) structure")
+                is_rgb = True
+                out = image[sl_y, sl_x, :]
+            else:
+                y_max_safe = min(image.shape[1], y_max)
+                x_max_safe = min(image.shape[2], x_max)
+                sl_y = slice(y_min, y_max_safe)
+                sl_x = slice(x_min, x_max_safe)
+                out = image[sl_t, sl_y, sl_x]
+
+        # Case 2D: (Y, X)
         elif image.ndim == 2:
-            print("  > 2D Image detected, ignoring Time crop.")
+            y_max_safe = min(image.shape[0], y_max)
+            x_max_safe = min(image.shape[1], x_max)
+            sl_y = slice(y_min, y_max_safe)
+            sl_x = slice(x_min, x_max_safe)
             out = image[sl_y, sl_x]
-            
+
         else:
-            print(f"  > Warning: Unsupported dimensions {image.ndim}. returning original.")
             out = image
 
-        print(f"  > New Shape: {out.shape}")
-        return out
+        # Safety Check
+        if out is None or out.size == 0:
+            raise ValueError(f"Resulting crop is empty! Shape: {out.shape}.")
 
+        print(f"  > Success. New Shape: {out.shape}")
+        
+        # --- 4. PACKING THE RESULT ---
+        new_meta = meta.copy()
+        new_meta["name"] = f"Crop {t_crop}"
+        
+        # FIX THE SLIDERS: If we detected (..., C), tell Napari it is RGB
+        if is_rgb:
+            new_meta["rgb"] = True
+            
+        return (out, new_meta)
     except Exception as e:
         print(f"Crop Failed: {e}")
         raise e
-    
 
-# --- INTERACTIVE CROP/SLICE --- #
+
+# HELPERS  
+
+def _parse_slice(s):
+    try:
+        if ":" in s:
+            p = s.split(":")
+            return slice(int(p[0]) if p[0] else None, int(p[1]) if p[1] else None)
+        return int(s)
+    except: return slice(None)
+
+
+
+
+    # --- INTERACTIVE CROP/SLICE --- #
 @register_node(
-    label="Interactive Crop",
+    label="Interactive Crop (Legacy)",
     category="Math",
     outputs=["cropped_image"],
     params_config={
