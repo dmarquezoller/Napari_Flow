@@ -1351,13 +1351,13 @@ class FlowEditor(QWidget):
                     # Heuristic: Is it Labels or Image?
                     import numpy as np
                     is_labels = False  
-                    if hasattr(layer_data, "dtype"):
-                        # Check if it's integer type
-                        if layer_data.dtype == bool or np.issubdtype(layer_data.dtype, np.integer):
-                            # ONLY make it a Label if it is NOT RGB
-                            # (Images can be integers too, e.g. uint8, uint16)
-                            if not napari_kwargs.get("rgb", False):
-                                is_labels = True
+                    if raw_meta.get("layer_type") == "labels":
+                        is_labels = True
+                    
+                    # 2. Fallback: Only assume Labels for Booleans (Binary Masks)
+                    # We STOP assuming Integers are labels, because Raw Microscopy data is often uint16.
+                    elif hasattr(layer_data, "dtype") and layer_data.dtype == bool:
+                        is_labels = True
 
                     if is_labels:
                         self.viewer.add_labels(layer_data, **napari_kwargs)
