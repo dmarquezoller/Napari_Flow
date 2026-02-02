@@ -1833,6 +1833,39 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat"
   },
+  "save_image_node": {
+    "label": "Save Image",
+    "category": "Outputs",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [],
+    "parameters": {
+      "folder": {
+        "type": "path",
+        "default": "",
+        "mode": "directory",
+        "label": "Save Folder"
+      },
+      "base_name": {
+        "type": "text",
+        "default": "output",
+        "label": "Filename Prefix",
+        "value": "crop_output"
+      },
+      "format": {
+        "type": "enum",
+        "default": ".tif",
+        "options": [
+          ".tif",
+          ".png",
+          ".jpg"
+        ],
+        "label": "Format"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.outputs.save_image_node"
+  },
   "save_table": {
     "label": "Save Table (CSV)",
     "category": "Outputs",
