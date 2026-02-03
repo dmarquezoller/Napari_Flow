@@ -4,7 +4,8 @@ from qtpy.QtWidgets import (
     QGraphicsDropShadowEffect, QToolBar, QInputDialog, QFileDialog, QVBoxLayout,
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
-    QFrame, QMessageBox, QTextEdit, QSplitter, QDialog, QTableWidget, QHeaderView, QAbstractItemView
+    QFrame, QMessageBox, QTextEdit, QSplitter, QDialog, QTableWidget, QHeaderView, QAbstractItemView,
+    QListWidget, QListWidgetItem
 )
 
 from qtpy.QtGui import (
@@ -249,6 +250,61 @@ class DynamicTableWidget(QWidget):
         self._update_dropdown_constraints()
         self.blockSignals(False)
         self._update_ui_state()
+
+
+class LoopConfigDialog(QDialog):
+    def __init__(self, nodes, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configure Loop Execution")
+        self.resize(400, 500)
+        self.selected_nodes = []
+        self.iterations = 1
+        
+        layout = QVBoxLayout()
+        
+        # Instructions
+        layout.addWidget(QLabel("Select nodes to include in the loop:"))
+        
+        # Node List (Multi-select)
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
+        
+        # Populate List (Preserve Topological Order visually if possible, 
+        # but for now, just listing them is fine)
+        self.node_map = {}
+        for node in nodes:
+            item = QListWidgetItem(f"{node.title} (ID: {node.uid[:4]})")
+            item.setData(Qt.UserRole, node.uid)
+            self.list_widget.addItem(item)
+            self.node_map[node.uid] = node
+            
+        layout.addWidget(self.list_widget)
+        
+        # Iteration Counter
+        form = QFormLayout()
+        self.spin_iter = QSpinBox()
+        self.spin_iter.setRange(1, 1000)
+        self.spin_iter.setValue(5)
+        form.addRow("Loop Iterations:", self.spin_iter)
+        layout.addLayout(form)
+        
+        # Buttons
+        btns = QHBoxLayout()
+        btn_run = QPushButton("Run Loop")
+        btn_run.clicked.connect(self.accept)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_run)
+        layout.addLayout(btns)
+        
+        self.setLayout(layout)
+
+    def get_config(self):
+        # Return list of Node UIDs and Iteration count
+        selected_items = self.list_widget.selectedItems()
+        uids = [item.data(Qt.UserRole) for item in selected_items]
+        return uids, self.spin_iter.value()
 
 # --- SOCKET -----------------------------------------------------
 class Socket(QGraphicsEllipseItem):
@@ -715,6 +771,23 @@ class FlowEditor(QWidget):
         # 4. Fit Scene Button (Below Properties)
         self.btn_fit = QPushButton("Fit to Scene")
         bottom_layout.addWidget(self.btn_fit)
+
+        # NEW LOOP BUTTON
+        self.btn_loop = QPushButton("Loop Run")
+        self.btn_loop.setStyleSheet("""
+            QPushButton {
+                background-color: #E67E22;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e49148; /* Slightly lighter on hover */
+            }
+            QPushButton:pressed {
+                background-color: #bf671a; /* Dark on press */
+            }
+        """)
+        self.btn_loop.clicked.connect(self.open_loop_dialog)
+        bottom_layout.addWidget(self.btn_loop)
 
         # RUN button
         self.btn_run = QPushButton("RUN PIPELINE")
@@ -1246,14 +1319,14 @@ class FlowEditor(QWidget):
         self.scene.removeItem(node)
     
     # --- Run Pipeline Method ---
-    def run_pipeline(self):
+    def run_pipeline(self, loop_config=None):
         # 1. Disable UI
         self.set_ui_enabled(False)
         self.console.clear()
         
         # 2. Setup Thread
         self.thread = QThread()
-        self.worker = ExecutionWorker(self.scene, self.viewer)
+        self.worker = ExecutionWorker(self.scene, self.viewer, loop_config=loop_config)
         self.worker.moveToThread(self.thread)
         
         # 3. Connect Signals
@@ -1709,3 +1782,20 @@ class FlowEditor(QWidget):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Could not save Zarr:\n{e}")
+
+    def open_loop_dialog(self):
+        # Get all nodes
+        nodes = [item for item in self.scene.items() if isinstance(item, Node)]
+        if not nodes: return
+        
+        # We should ideally sort them topologically first so the list is in order
+        # You can use the engine's static sorter or just list them raw
+        # For better UX, let's just pass them raw for now
+        
+        dlg = LoopConfigDialog(nodes, self)
+        if dlg.exec_():
+            loop_uids, iterations = dlg.get_config()
+            if not loop_uids: return
+            
+            # Start Execution with Loop Config
+            self.run_pipeline(loop_config={"nodes": loop_uids, "iterations": iterations})
