@@ -726,24 +726,86 @@ class FlowView(QGraphicsView):
         rect.adjust(-50, -50, 50, 50)
         self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
+class PlotDashboard(QWidget):
+    """A dedicated widget to display Matplotlib plots inside the UI. Auto-hides when empty."""
+    def __init__(self):
+        super().__init__()
+        # Start hidden!
+        self.setVisible(False)
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        
+        # --- Header (Title + Close Button) ---
+        header = QWidget()
+        header.setStyleSheet("background-color: #333; border-bottom: 1px solid #555;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(5, 2, 5, 2)
+        
+        self.title_label = QLabel("📊 Output Plot")
+        self.title_label.setStyleSheet("font-weight: bold; color: #ddd;")
+        
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setFlat(True)
+        self.close_btn.setStyleSheet("color: #aaa; font-weight: bold;")
+        self.close_btn.clicked.connect(self.hide_dashboard) # Connect to hide function
+        
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.close_btn)
+        self.layout.addWidget(header)
+
+        # --- Plot Canvas Area ---
+        self.canvas_container = QWidget()
+        self.container_layout = QVBoxLayout(self.canvas_container)
+        self.container_layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.addWidget(self.canvas_container)
+        
+        self.current_canvas = None
+        self.setMinimumHeight(250) 
+
+    def display(self, fig):
+        self.clear_canvas()
+        
+        # Create new canvas
+        self.current_canvas = FigureCanvas(fig) 
+        self.current_canvas.setStyleSheet("background-color: #222;") # Dark background
+        self.container_layout.addWidget(self.current_canvas)
+        self.current_canvas.draw()
+        
+        # Show widget and title
+        self.title_label.setText(f"📊 Output Plot")
+        self.setVisible(True) # <--- MAGIC: Expand the layout
+
+    def hide_dashboard(self):
+        self.clear_canvas()
+        self.setVisible(False) # <--- MAGIC: Collapse the layout
+        
+    def clear_canvas(self):
+        if self.current_canvas:
+            self.container_layout.removeWidget(self.current_canvas)
+            self.current_canvas.close()
+            self.current_canvas = None
+
 
 # --- MAIN WINDOW ------------------------------------------------
 class FlowEditor(QWidget):
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
 
-        # AUTO GENERATE JSON LIBRARY
+        # --- AUTO GENERATE JSON LIBRARY ---
         generate_library.generate()
 
         global NODE_LIBRARY
         json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node_library.json")
         try:
             with open(json_path, "r") as f:
-                NODE_LIBRARY.clear() # Clear old data
-                NODE_LIBRARY.update(json.load(f)) # Update with new data
+                NODE_LIBRARY.clear()
+                NODE_LIBRARY.update(json.load(f))
         except Exception as e:
             print(f"CRITICAL ERROR loading node library: {e}")
-
 
         self.viewer = viewer
         
@@ -751,7 +813,7 @@ class FlowEditor(QWidget):
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
 
-        # 2. Toolbar (Top Row)
+        # 2. Top Toolbar (Add, Remove, Save, Load, etc.)
         toolbar = QHBoxLayout()
         
         self.btn_add = QPushButton("Add Node")
@@ -786,106 +848,107 @@ class FlowEditor(QWidget):
 
         # 3. Node Properties Panel (Middle)
         self.props_group = QGroupBox("Node Properties")
-
-        # Inner Layout for the GroupBox
         group_layout = QVBoxLayout()
         self.props_group.setLayout(group_layout)
         
-        # The Scroll Area
         scroll = QScrollArea()
-        scroll.setWidgetResizable(True) # Important!
-        scroll.setFrameShape(QFrame.NoFrame) # remove ugly double border
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         
-        # The Container Widget that holds the Form
         scroll_content = QWidget()
-        self.props_layout = QFormLayout() # This is the layout we add rows to
+        self.props_layout = QFormLayout()
         self.props_layout.setContentsMargins(5, 5, 5, 5)
         scroll_content.setLayout(self.props_layout)
         
-        # Put container into scroll area
         scroll.setWidget(scroll_content)
         group_layout.addWidget(scroll)
 
+        # --- 4. Main Splitter ---
+        self.splitter = QSplitter(Qt.Vertical)
+        
+        # Part A: Properties (Top)
+        self.splitter.addWidget(self.props_group)
 
-        self. bottom_container = QWidget()
+        # Part B: Bottom Container (Buttons + Graph + Plot + Log)
+        self.bottom_container = QWidget()
         bottom_layout = QVBoxLayout(self.bottom_container)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(5)
 
-        action_layout = QHBoxLayout()
-        
-        # 4. Fit Scene Button (Below Properties)
-        self.btn_fit = QPushButton("Fit to Scene")
-        bottom_layout.addWidget(self.btn_fit)
+        # --- B1. Action Buttons (Stacked Vertically BELOW Properties, ABOVE Graph) ---
+        button_layout = QVBoxLayout() 
+        button_layout.setSpacing(5)
 
-        # NEW LOOP BUTTON
+        # Fit Button
+        self.btn_fit = QPushButton("Fit View")
+        button_layout.addWidget(self.btn_fit)
+
+        # Loop Button
         self.btn_loop = QPushButton("Loop Run")
         self.btn_loop.setStyleSheet("""
-            QPushButton {
-                background-color: #E67E22;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e49148; /* Slightly lighter on hover */
-            }
-            QPushButton:pressed {
-                background-color: #bf671a; /* Dark on press */
-            }
+            QPushButton { background-color: #E67E22; font-weight: bold; }
+            QPushButton:hover { background-color: #e49148; }
+            QPushButton:pressed { background-color: #bf671a; }
         """)
-        self.btn_loop.clicked.connect(self.open_loop_dialog)
-        bottom_layout.addWidget(self.btn_loop)
+        button_layout.addWidget(self.btn_loop)
 
-        # RUN button
+        # Run Button
         self.btn_run = QPushButton("RUN PIPELINE")
-        self.btn_run.setFixedHeight(35)
+        self.btn_run.setFixedHeight(40)
         self.btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_run.setStyleSheet("""
             QPushButton {
-                background-color: #2E7D32; /* Material Design Green */
-                color: white;
-                font-weight: bold;
-                font-size: 14px;
-                border-radius: 4px;
-                border: 1px solid #1B5E20;
+                background-color: #2E7D32; color: white; font-weight: bold;
+                font-size: 14px; border-radius: 4px; border: 1px solid #1B5E20;
             }
-            QPushButton:hover {
-                background-color: #388E3C; /* Slightly lighter on hover */
-            }
-            QPushButton:pressed {
-                background-color: #1B5E20; /* Dark on press */
-            }
+            QPushButton:hover { background-color: #388E3C; }
+            QPushButton:pressed { background-color: #1B5E20; }
         """)
+        button_layout.addWidget(self.btn_run)
+        
+        # Add buttons to the top of the bottom container
+        bottom_layout.addLayout(button_layout)
 
-        self.btn_run.clicked.connect(self.run_pipeline)
-        action_layout.addWidget(self.btn_run)
-
-        bottom_layout.addLayout(action_layout)
-
-        # 5. Graphics View (Bottom)
+        # --- B2. Inner Splitter (Graph / Plot / Log) ---
+        self.inner_splitter = QSplitter(Qt.Vertical)
+        
+        # 1. Graph View
         self.scene = FlowScene()
         self.view = FlowView(self.scene)
-        bottom_layout.addWidget(self.view)
-
-        # 6. Console (Bottom)
-        self.console_label = QLabel("Execution Log:")
-        bottom_layout.addWidget(self.console_label)
-
+        self.inner_splitter.addWidget(self.view)
+        
+        # 2. Plot Dashboard (Hidden by default)
+        self.plot_dashboard = PlotDashboard()
+        self.inner_splitter.addWidget(self.plot_dashboard)
+        
+        # 3. Console (Restored name 'self.console')
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setFixedHeight(100) # Small height like a terminal
+        self.console.setFixedHeight(100)
         self.console.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: Monospace;")
-        bottom_layout.addWidget(self.console)
+        self.console.setPlaceholderText("Execution log...")
+        self.inner_splitter.addWidget(self.console)
+        
+        # Set Ratios: Graph (70%), Plot (0%), Log (30%)
+        self.inner_splitter.setStretchFactor(0, 7) 
+        self.inner_splitter.setStretchFactor(1, 0)
+        self.inner_splitter.setStretchFactor(2, 3)
 
-        # Vertical Spacer
-        self.splitter = QSplitter(Qt.Vertical)
-        self.splitter.addWidget(self.props_group)
+        bottom_layout.addWidget(self.inner_splitter)
+        
+        # Add container to main splitter
         self.splitter.addWidget(self.bottom_container)
 
+        # Set Main Splitter Ratios: Props (30%), Bottom (70%)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 7)
 
         self.layout.addWidget(self.splitter)
-
+        
+        # --- CONNECTIONS ---
         self.btn_fit.clicked.connect(self.view.fit_scene)
+        self.btn_loop.clicked.connect(self.open_loop_dialog)
+        self.btn_run.clicked.connect(self.run_pipeline)
         self.scene.selectionChanged.connect(self.on_selection)
 
     # HELPER TO GET UNIQUE NODE TITLE
@@ -1408,46 +1471,43 @@ class FlowEditor(QWidget):
                 break
 
     def handle_execution_result(self, node_title, output_name, data):
-        # 1. Update Cache (Always save the raw data for downstream nodes!)
+        # 1. Update Cache
         node_obj = next((item for item in self.scene.items() 
                         if isinstance(item, Node) and item.title == node_title), None)
         if node_obj:
             node_obj.cached_results[output_name] = data
             node_obj.status = "green"
 
-        # --- A. UNPACK ENVELOPE ---
+        # --- A. UNPACK ---
         display_data = data
         display_meta = {}
-
         if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
             display_data = data[0]
             display_meta = data[1]
 
-        # --- A.5 PLOT CONVERTER (The Missing Link) ---
-        # Detects Matplotlib Figures and converts them to Images so Napari can show them
+        # --- B. PLOT DASHBOARD HANDLER ---
+        # If it is a plot, SHOW the dashboard
+        is_plot = False
         type_str = str(type(display_data))
         if "matplotlib" in type_str and "Figure" in type_str:
-            converted_img = figure_to_rgb_array(display_data)
-            if converted_img is not None:
-                display_data = converted_img
-                display_meta["rgb"] = True  # Tell Napari this is an RGB image
-            else:
-                print(f"⚠️ Could not render plot for {node_title}")
-                return
+            is_plot = True
+        elif hasattr(display_data, "canvas"): 
+            is_plot = True
 
-        # --- B. THE STRIPPER ---
-        # If the data is a Tuple/List, extract the image.
+        if is_plot:
+            self.plot_dashboard.display(display_data) # <--- Pop up the widget!
+            return
+
+        # --- C. NON-VISUAL FILTER ---
+        import pandas as pd
+        if isinstance(display_data, (pd.DataFrame, dict, str)):
+            return
+
+        # --- D. STRIPPER (Tuples) ---
         if isinstance(display_data, (tuple, list)):
             if len(display_data) > 0:
                 first_item = display_data[0]
-                if hasattr(first_item, "shape") and hasattr(first_item, "dtype"):
-                    display_data = first_item
-        
-        # --- C. THE BOUNCER ---
-        import pandas as pd
-        if isinstance(display_data, (pd.DataFrame, dict, str)):
-            print(f"ℹ️ Output '{output_name}' is non-visual. Skipping display.")
-            return
+                if hasattr(first_item, "shape"): display_data = first_item
 
         # --- D. DISPLAY HELPER ---
         def add_layer_to_viewer(layer_data, raw_meta):
