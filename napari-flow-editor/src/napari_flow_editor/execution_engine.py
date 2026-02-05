@@ -23,7 +23,7 @@ class ExecutionWorker(QObject):
 
     def run(self):
         try:
-            self.log_signal.emit("--- Starting Execution ---")
+            self.log_signal.emit("--- Starting Smart Execution ---")
             
             from .napari_plugin_v2 import Node, NODE_LIBRARY
             nodes = [item for item in self.scene.items() if isinstance(item, Node)]
@@ -35,72 +35,50 @@ class ExecutionWorker(QObject):
 
             sorted_nodes = self.topological_sort(nodes)
             
-            # --- LOOP CONFIG ---
-            loop_uids = set()
-            iterations = 1
-            if self.loop_config:
-                loop_uids = set(self.loop_config["nodes"])
-                iterations = self.loop_config["iterations"]
-                self.log_signal.emit(f"Loop detected ({iterations} iters) on {len(loop_uids)} nodes.")
-
-            # --- EXECUTION LOOP ---
-            for current_iter in range(iterations):
-                
-                if iterations > 1:
-                    self.log_signal.emit(f"=== Iteration {current_iter + 1}/{iterations} ===")
-
-                for node in sorted_nodes:
-                    # Skip non-loop nodes in subsequent iterations
-                    if current_iter > 0 and node.uid not in loop_uids:
-                        continue
-
-                    try:
-                        self.node_status_signal.emit(node.uid, "yellow")
-
-                        # 1. Check Cache (Standard Logic)
-                        current_signature = self.calculate_signature(node)
-                        is_loop_node = node.uid in loop_uids
+            for node in sorted_nodes:
+                try:
+                    # 1. Calculate Signature
+                    current_signature = self.calculate_signature(node)
+                    
+                    # 2. Check Cache (THE FIX)
+                    # We strictly check the signature. 
+                    # We do NOT check 'node.status' because the UI might have reset it to Gray.
+                    # We do NOT check 'cached_results' too strictly to avoid false negatives.
+                    if current_signature == node.last_signature:
+                        self.log_signal.emit(f"Skipping: {node.title} (Cached)")
                         
-                        if not is_loop_node and node.status == "green" and current_signature == node.last_signature:
-                            self.log_signal.emit(f"Skipping: {node.title} (Cached)")
-                            continue 
-                        
-                        # 2. EXECUTE (Using YOUR logic)
-                        results = self.execute_node_logic(node, NODE_LIBRARY)
-                        
-                        # 3. Update State
-                        node.cached_results = results
-                        node.last_signature = current_signature
+                        # IMPORTANT: Force the UI to turn Green. 
+                        # This fixes the issue where cached nodes looked "Pending/Gray".
                         self.node_status_signal.emit(node.uid, "green")
                         
-                        # Small pause for UI updates
-                        if iterations > 1: time.sleep(0.05)
-
-                    except Exception as e:
-                        # Print error to terminal
-                        print("\n" + "="*40)
-                        print(f"!!! CRASH IN NODE: {node.title} !!!")
-                        traceback.print_exc()
-                        print("="*40 + "\n")
-                        
-                        self.node_status_signal.emit(node.uid, "red")
-                        self.error_signal.emit(f"Error in {node.title}: {str(e)}")
-                        return 
-
-                # Reset visual state for loop nodes
-                if current_iter < iterations - 1:
-                    time.sleep(0.1)
-                    for node in sorted_nodes:
-                        if node.uid in loop_uids:
-                            self.node_status_signal.emit(node.uid, "grey")
+                        continue # SKIP EXECUTION (Keep existing results)
+                    
+                    # 3. Execution (If we get here, cache missed)
+                    self.node_status_signal.emit(node.uid, "yellow") # Turn Yellow
+                    
+                    # Run Logic
+                    results = self.execute_node_logic(node, NODE_LIBRARY)
+                    
+                    # 4. Update Cache
+                    node.cached_results = results
+                    node.last_signature = current_signature
+                    self.node_status_signal.emit(node.uid, "green") # Turn Green
+                    
+                except Exception as e:
+                    self.node_status_signal.emit(node.uid, "red")
+                    # Log the specific error for easier debugging
+                    print(f"Error in node {node.title}: {e}") 
+                    raise e 
 
             self.log_signal.emit("--- Execution Finished ---")
-            self.finished_signal.emit()
 
         except Exception as e:
+            import traceback
             full_error = traceback.format_exc()
             self.log_signal.emit(f"CRITICAL ERROR:\n{full_error}")
             self.error_signal.emit(str(e))
+        finally:
+            self.finished_signal.emit()
 
     def calculate_signature(self, node):
         try:

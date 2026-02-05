@@ -19,6 +19,8 @@ import dask.array as da
 import matplotlib.pyplot as plt
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
@@ -250,6 +252,49 @@ class DynamicTableWidget(QWidget):
         self._update_dropdown_constraints()
         self.blockSignals(False)
         self._update_ui_state()
+
+
+
+class PlotResultDialog(QDialog):
+    def __init__(self, fig, title="Plot Result", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(600, 500)
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        self.canvas = FigureCanvas(fig)
+        layout.addWidget(self.canvas)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        layout.addWidget(self.toolbar)
+
+def figure_to_rgb_array(fig):
+    try:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        import numpy as np
+        
+        # 1. Setup the "Memory Only" Canvas (No Popups)
+        canvas = FigureCanvasAgg(fig)
+        fig.canvas = canvas
+        
+        # 2. Render the plot
+        canvas.draw()
+        
+        # 3. Modern Matplotlib Way (Works on v3.8+)
+        # buffer_rgba() returns a memory view we can turn directly into a numpy array
+        rgba_image = np.asarray(canvas.buffer_rgba())
+        
+        # 4. Convert RGBA (4 channels) to RGB (3 channels) for simplicity
+        # Napari accepts RGBA, but RGB is safer for the logic we wrote earlier.
+        rgb_image = rgba_image[:, :, :3]
+        
+        return rgb_image
+
+    except Exception as e:
+        print(f"!!! PLOT CONVERSION FAILED !!!")
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 class LoopConfigDialog(QDialog):
@@ -1371,7 +1416,6 @@ class FlowEditor(QWidget):
             node_obj.status = "green"
 
         # --- A. UNPACK ENVELOPE ---
-        # Separates the Engine's wrapper: (Data, Metadata) -> Data, Metadata
         display_data = data
         display_meta = {}
 
@@ -1379,17 +1423,27 @@ class FlowEditor(QWidget):
             display_data = data[0]
             display_meta = data[1]
 
-        # --- B. THE STRIPPER (Fixes "Filter" crashes) ---
-        # If the data itself is a Tuple/List (e.g. (Mask, Stats)), extracting the image.
+        # --- A.5 PLOT CONVERTER (The Missing Link) ---
+        # Detects Matplotlib Figures and converts them to Images so Napari can show them
+        type_str = str(type(display_data))
+        if "matplotlib" in type_str and "Figure" in type_str:
+            converted_img = figure_to_rgb_array(display_data)
+            if converted_img is not None:
+                display_data = converted_img
+                display_meta["rgb"] = True  # Tell Napari this is an RGB image
+            else:
+                print(f"⚠️ Could not render plot for {node_title}")
+                return
+
+        # --- B. THE STRIPPER ---
+        # If the data is a Tuple/List, extract the image.
         if isinstance(display_data, (tuple, list)):
             if len(display_data) > 0:
                 first_item = display_data[0]
-                # If the first item is an image array, use it and discard the rest.
                 if hasattr(first_item, "shape") and hasattr(first_item, "dtype"):
                     display_data = first_item
         
-        # --- C. THE BOUNCER (Fixes "CSV" crashes) ---
-        # If the final extracted data is a Table or Dictionary, do not plot.
+        # --- C. THE BOUNCER ---
         import pandas as pd
         if isinstance(display_data, (pd.DataFrame, dict, str)):
             print(f"ℹ️ Output '{output_name}' is non-visual. Skipping display.")
@@ -1400,7 +1454,7 @@ class FlowEditor(QWidget):
             # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
             
-            # 2. Filter Metadata (Napari args vs. Custom User Data)
+            # 2. Filter Metadata
             valid_napari_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma", "rgb"}
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
@@ -1413,31 +1467,37 @@ class FlowEditor(QWidget):
 
             # 3. Create/Update Layer
             try:
+                # SAFETY CHECK: If it's still not an array (no shape), stop.
+                if not hasattr(layer_data, "shape"):
+                    return
+
                 if layer_name in self.viewer.layers:
                     layer = self.viewer.layers[layer_name]
-                    layer.data = layer_data
-                    layer.metadata.update(custom_metadata)
-                    if "rgb" in napari_kwargs:
-                        if hasattr(layer, "rgb"):
-                            layer.rgb = napari_kwargs["rgb"]
-                else:
-                    # Heuristic: Is it Labels or Image?
-                    import numpy as np
+                    
+                    # If shape changed (e.g. plot resized), we must recreate the layer
+                    if layer.data.shape != layer_data.shape:
+                        self.viewer.layers.remove(layer_name)
+                        # Fall through to 'else' to create new
+                    else:
+                        layer.data = layer_data
+                        layer.metadata.update(custom_metadata)
+                        return
+
+                # Create New Layer
+                if layer_name not in self.viewer.layers:
+                    # Heuristic: Labels vs Image
                     is_labels = False  
                     if raw_meta.get("layer_type") == "labels":
                         is_labels = True
-                    
-                    # 2. Fallback: Only assume Labels for Booleans (Binary Masks)
-                    # We STOP assuming Integers are labels, because Raw Microscopy data is often uint16.
                     elif hasattr(layer_data, "dtype") and layer_data.dtype == bool:
                         is_labels = True
-
+                    
                     if is_labels:
                         self.viewer.add_labels(layer_data, **napari_kwargs)
                     else:
                         self.viewer.add_image(layer_data, **napari_kwargs)
+
             except Exception as e:
-                # If something weird slips through (like a single number), we catch it here
                 print(f"❌ Error displaying layer '{layer_name}': {e}")
 
         # Execute Display
@@ -1673,31 +1733,8 @@ class FlowEditor(QWidget):
         # Convert to Pixmap and Scale
         pixmap = QPixmap.fromImage(q_img)
         return pixmap.scaled(350, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    
 
-    def show_plot_popup(self, title, figure):
-        """Opens a QDialog to display the matplotlib figure."""
-        
-        # Create a Dialog Window
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Result: {title}")
-        dialog.resize(600, 450)
-        
-        # Create Layout
-        layout = QVBoxLayout(dialog)
-        
-        # The 'Canvas' is the Qt Widget that draws the Figure
-        canvas = FigureCanvas(figure)
-        layout.addWidget(canvas)
-        
-        # Add 'Close' button? (Optional, X works fine)
-        # show() makes it non-blocking (you can keep working while it's open)
-        dialog.show() 
-
-        if not hasattr(self, 'plot_windows'):
-            self.plot_windows = []
-        
-        self.plot_windows.append(dialog)
-        dialog.finished.connect(lambda: self.plot_windows.remove(dialog) if dialog in self.plot_windows else None)
 
     def save_to_zarr(self):
         layer = self.viewer.layers.selection.active

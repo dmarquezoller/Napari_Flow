@@ -2302,6 +2302,42 @@
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.colocalization_scatter"
   },
+  "intensity_heatmap": {
+    "label": "Intensity Heatmap",
+    "category": "Plotting",
+    "inputs": [
+      "image_in"
+    ],
+    "outputs": [
+      "plot"
+    ],
+    "parameters": {
+      "colormap": {
+        "type": "enum",
+        "default": "inferno",
+        "options": [
+          "inferno",
+          "viridis",
+          "magma",
+          "plasma",
+          "jet"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.intensity_heatmap"
+  },
+  "ortho_projection_plot": {
+    "label": "Orthogonal Projections",
+    "category": "Plotting",
+    "inputs": [
+      "image_in"
+    ],
+    "outputs": [
+      "plot"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.ortho_projection_plot"
+  },
   "plot_histogram": {
     "label": "Plot Histogram",
     "category": "Plotting",
