@@ -1528,6 +1528,40 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.interactive_crop"
   },
+  "project_3d_to_2d": {
+    "label": "Project 3D to 2D",
+    "category": "Math",
+    "inputs": [
+      "image_in"
+    ],
+    "outputs": [
+      "projected_img"
+    ],
+    "parameters": {
+      "axis": {
+        "type": "enum",
+        "default": 0,
+        "options": [
+          "0",
+          "1",
+          "2"
+        ],
+        "label": "Projection Axis (0=Z, 1=Y, 2=X)"
+      },
+      "mode": {
+        "type": "enum",
+        "default": "Max",
+        "options": [
+          "Max",
+          "Mean",
+          "Sum",
+          "Std"
+        ],
+        "label": "Method"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.math.project_3d_to_2d"
+  },
   "filter_labels_by_csv": {
     "label": "Filter Labels by CSV",
     "category": "Measure",
@@ -2302,42 +2336,6 @@
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.colocalization_scatter"
   },
-  "intensity_heatmap": {
-    "label": "Intensity Heatmap",
-    "category": "Plotting",
-    "inputs": [
-      "image_in"
-    ],
-    "outputs": [
-      "plot"
-    ],
-    "parameters": {
-      "colormap": {
-        "type": "enum",
-        "default": "inferno",
-        "options": [
-          "inferno",
-          "viridis",
-          "magma",
-          "plasma",
-          "jet"
-        ]
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.visualisation.intensity_heatmap"
-  },
-  "ortho_projection_plot": {
-    "label": "Orthogonal Projections",
-    "category": "Plotting",
-    "inputs": [
-      "image_in"
-    ],
-    "outputs": [
-      "plot"
-    ],
-    "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.visualisation.ortho_projection_plot"
-  },
   "plot_histogram": {
     "label": "Plot Histogram",
     "category": "Plotting",
@@ -2349,5 +2347,38 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.plot_histogram"
+  },
+  "table_heatmap_plot": {
+    "label": "Table Heatmap",
+    "category": "Plotting",
+    "inputs": [
+      "table_in"
+    ],
+    "outputs": [
+      "plot"
+    ],
+    "parameters": {
+      "colormap": {
+        "type": "string",
+        "default": "viridis",
+        "choices": [
+          "viridis",
+          "plasma",
+          "inferno",
+          "magma",
+          "coolwarm",
+          "RdBu",
+          "seismic"
+        ],
+        "label": "Colormap"
+      },
+      "normalize": {
+        "type": "bool",
+        "default": true,
+        "value": true,
+        "label": "Normalize Columns (0-1)"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.table_heatmap_plot"
   }
 }

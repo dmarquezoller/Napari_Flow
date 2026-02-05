@@ -3,6 +3,7 @@ import matplotlib
 # Force Agg backend so it doesn't try to open a GUI window in a thread (which crashes)
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
+import pandas as pd
 import io
 from PIL import Image
 from .decorator import register_node
@@ -88,123 +89,95 @@ def colocalization_scatter(image_ch1, image_ch2):
     return fig
 
 
-# ORTHOGONAL PROJECTION
+
+# 
 
 @register_node(
-    label="Orthogonal Projections",
+    label="Table Heatmap",
     category="Plotting",
-    outputs=["plot"]
-)
-def ortho_projection_plot(image_in):
-    """
-    Creates a Maximum Intensity Projection (MIP) along 3 axes.
-    Ideal for visualizing 3D volumes (Z-Stacks).
-    """
-    if image_in is None:
-        return None
-
-    # 1. Validation: We need 3 dimensions
-    if image_in.ndim < 3:
-        fig = plt.figure(figsize=(5, 3))
-        plt.text(0.5, 0.5, f"Error: Input is {image_in.ndim}D.\nNeed 3D (Z, Y, X) input.", 
-                 ha='center', va='center', color='red')
-        return fig
-
-    # If > 3D (e.g. Time, Z, Y, X), take the first timepoint
-    data = image_in
-    while data.ndim > 3:
-        data = data[0]
-
-    # 2. Calculate Projections (Max Intensity)
-    # Axis 0 = Z, Axis 1 = Y, Axis 2 = X
-    proj_xy = np.max(data, axis=0) # Top-down
-    proj_xz = np.max(data, axis=1) # Side view
-    proj_yz = np.max(data, axis=2) # Front view
-
-    # 3. Setup Plot Layout (GridSpec is great for non-square layouts)
-    fig = plt.figure(figsize=(8, 8), dpi=100)
-    grid = plt.GridSpec(2, 2, width_ratios=[4, 1], height_ratios=[4, 1], wspace=0.05, hspace=0.05)
-
-    # Main View (XY)
-    ax_xy = fig.add_subplot(grid[0, 0])
-    ax_xy.imshow(proj_xy, cmap='gray', aspect='auto')
-    ax_xy.set_ylabel("Y Axis")
-    ax_xy.set_xticks([]) # Hide ticks for cleaner look
-
-    # Side View (YZ) - Rotated to match Y axis of main view
-    ax_yz = fig.add_subplot(grid[0, 1])
-    ax_yz.imshow(proj_yz.T, cmap='gray', aspect='auto') # Transpose to align Z vertically
-    ax_yz.set_xlabel("Z Axis")
-    ax_yz.set_yticks([])
-
-    # Bottom View (XZ)
-    ax_xz = fig.add_subplot(grid[1, 0])
-    ax_xz.imshow(proj_xz, cmap='gray', aspect='auto')
-    ax_xz.set_xlabel("X Axis")
-    ax_xz.set_ylabel("Z Axis")
-    
-    # Empty bottom-right corner
-    ax_empty = fig.add_subplot(grid[1, 1])
-    ax_empty.axis('off')
-    ax_empty.text(0.5, 0.5, "MIP\nView", ha='center', va='center', fontweight='bold')
-
-    plt.suptitle(f"Orthogonal MIP (Shape: {data.shape})", y=0.95)
-    
-    return fig
-
-
-# INTENSITY HEATMAP
-
-
-@register_node(
-    label="Intensity Heatmap",
-    category="Plotting",
-    outputs=["plot"],
+    outputs=["plot"],  # Outputs a Figure
     params_config={
-        "colormap": {"type": "enum", "options": ["inferno", "viridis", "magma", "plasma", "jet"]}
+        "colormap": {
+            "type": "enum", 
+            "choices": ["viridis", "plasma", "inferno", "magma", "coolwarm", "RdBu", "seismic"], 
+            "label": "Colormap"
+        },
+        "normalize": {
+            "type": "bool",
+            "value": True,
+            "label": "Normalize Columns (0-1)"
+        }
     }
 )
-def intensity_heatmap(image_in, colormap="inferno"):
+def table_heatmap_plot(table_in, colormap="viridis", normalize=True):
     """
-    Plots a heatmap of pixel intensities.
-    If 3D, extracts the middle slice.
+    Generates a heatmap figure from a Table/DataFrame.
+    Automatically selects only numeric columns.
     """
-    if image_in is None:
+    if table_in is None:
         return None
-
-    data = image_in
-    
-    # 1. Handle Dimensions: We need 2D for a heatmap
-    slice_info = "2D Image"
-    if data.ndim > 2:
-        # Take the middle Z-slice
-        mid_z = data.shape[0] // 2
-        data = data[mid_z]
-        slice_info = f"Middle Slice (Z={mid_z})"
         
-        # Handle 4D/5D if necessary (take first timepoint/channel)
-        while data.ndim > 2:
-            data = data[0]
+    # 1. Ensure Input is a DataFrame
+    # (Plugins might pass a dictionary or a list of dicts)
+    if not isinstance(table_in, pd.DataFrame):
+        try:
+            df = pd.DataFrame(table_in)
+        except Exception:
+            # Return an error figure if data is invalid
+            fig = plt.figure(figsize=(4, 2))
+            plt.text(0.5, 0.5, "Invalid Table Data", ha='center', va='center', color='red')
+            return fig
+    else:
+        df = table_in.copy()
 
-    # 2. Subsample if too large (rendering heatmaps of 4k images is slow)
-    if data.size > 1024 * 1024:
-        scale = int(np.sqrt(data.size / (1024*1024))) + 1
-        data = data[::scale, ::scale]
-        slice_info += f" (Subsampled {scale}x)"
+    # 2. Filter Numeric Data Only
+    # We drop columns like 'Label' or 'FileName' for the heatmap
+    df_num = df.select_dtypes(include=[np.number])
+    
+    if df_num.empty:
+        fig = plt.figure(figsize=(5, 3))
+        plt.text(0.5, 0.5, "Table has no numeric columns", ha='center', va='center')
+        return fig
 
-    # 3. Plot
-    fig = plt.figure(figsize=(7, 6), dpi=100)
-    ax = fig.add_subplot(111)
+    # 3. Normalize Data (Optional)
+    # Crucial if comparing "Area" (1000s) with "Circularity" (0.0-1.0)
+    data_values = df_num.values
+    if normalize:
+        # Min-Max Normalization per column
+        min_vals = np.nanmin(data_values, axis=0)
+        max_vals = np.nanmax(data_values, axis=0)
+        range_vals = max_vals - min_vals
+        
+        # Avoid division by zero for constant columns
+        range_vals[range_vals == 0] = 1 
+        
+        data_values = (data_values - min_vals) / range_vals
+
+    # 4. Create Plot
+    fig, ax = plt.subplots(figsize=(8, 6))
     
-    # Imshow with the chosen colormap
-    im = ax.imshow(data, cmap=colormap, interpolation='nearest')
+    # Draw Heatmap
+    im = ax.imshow(data_values, aspect='auto', cmap=colormap, interpolation='nearest')
     
-    # Add colorbar
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Pixel Intensity")
+    # 5. Styling
+    ax.set_title(f"Table Heatmap ({len(df)} rows)")
     
-    ax.set_title(f"Intensity Heatmap\n{slice_info}")
-    ax.axis('off') # Turn off axes for cleaner visual
+    # X-Axis: Column Names
+    ax.set_xticks(np.arange(len(df_num.columns)))
+    ax.set_xticklabels(df_num.columns, rotation=45, ha="right", fontsize=9)
+    
+    # Y-Axis: Row Indices (Hide if too many rows)
+    if len(df) < 50:
+        ax.set_yticks(np.arange(len(df)))
+        ax.set_yticklabels(df.index, fontsize=8)
+    else:
+        ax.set_ylabel("Row Index")
+    
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    if normalize:
+        cbar.set_label("Normalized Value (0-1)")
+    
     plt.tight_layout()
-
+    
     return fig

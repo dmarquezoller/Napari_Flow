@@ -352,3 +352,56 @@ def crop_image_interactive(image, roi_layer, t_crop=":"):
     except Exception as e:
         print(f"Crop Failed: {e}")
         raise e
+    
+
+
+
+
+
+# PROJECT #
+
+
+@register_node(
+    label="Project 3D to 2D",
+    category="Math",
+    outputs=["projected_img"],
+    params_config={
+        "axis": {
+            "type": "enum", 
+            "options": ["0", "1", "2"], 
+            "label": "Projection Axis (0=Z, 1=Y, 2=X)"
+        },
+        "mode": {
+            "type": "enum", 
+            "options": ["Max", "Mean", "Sum", "Std"], 
+            "label": "Method"
+        }
+    }
+)
+def project_3d_to_2d(image_in, axis=0, mode="Max"):
+    """
+    Flattens a 3D volume into a 2D image layer.
+    """
+    if image_in is None:
+        return None
+    
+    axis = int(axis)
+
+    # Safety: Check dimensions
+    if axis >= image_in.ndim:
+        print(f"⚠️ Axis {axis} is out of bounds for {image_in.ndim}D image.")
+        return None
+
+    # Perform Projection
+    if mode == 'Max':
+        res = np.max(image_in, axis=axis)
+    elif mode == 'Mean':
+        res = np.mean(image_in, axis=axis)
+    elif mode == 'Sum':
+        res = np.sum(image_in, axis=axis)
+    elif mode == 'Std':
+        res = np.std(image_in, axis=axis)
+    else:
+        res = np.max(image_in, axis=axis)
+        
+    return res
