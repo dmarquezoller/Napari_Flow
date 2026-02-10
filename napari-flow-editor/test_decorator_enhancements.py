@@ -6,6 +6,7 @@ This can run without Qt dependencies.
 import sys
 import os
 import importlib.util
+import types
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -65,9 +66,9 @@ try:
     spec = importlib.util.spec_from_file_location('examples_advanced', examples_path)
     examples_advanced = importlib.util.module_from_spec(spec)
     
-    # Make decorator available for the examples module
-    sys.modules['napari_flow_editor'] = type(sys)('napari_flow_editor')
-    sys.modules['napari_flow_editor.flow_nodes'] = type(sys)('flow_nodes')
+    # Make decorator available for the examples module using proper ModuleType
+    sys.modules['napari_flow_editor'] = types.ModuleType('napari_flow_editor')
+    sys.modules['napari_flow_editor.flow_nodes'] = types.ModuleType('flow_nodes')
     sys.modules['napari_flow_editor.flow_nodes.decorator'] = decorator_module
     
     spec.loader.exec_module(examples_advanced)

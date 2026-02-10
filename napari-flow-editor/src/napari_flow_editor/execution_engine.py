@@ -156,18 +156,12 @@ class ExecutionWorker(QObject):
                     
                     # Check dtype
                     if "dtype" in rules and hasattr(data, "dtype"):
-                        # Convert dtype to string for comparison
+                        # Normalize dtype to string for comparison
                         data_dtype_str = str(data.dtype)
                         allowed_dtypes = [str(d) for d in rules["dtype"]]
                         
-                        # Check if any allowed dtype matches
-                        dtype_match = False
-                        for allowed in allowed_dtypes:
-                            if allowed in data_dtype_str or data_dtype_str in allowed:
-                                dtype_match = True
-                                break
-                        
-                        if not dtype_match:
+                        # Use exact match to avoid false positives (e.g., "int8" matching "uint8")
+                        if data_dtype_str not in allowed_dtypes:
                             raise ValueError(
                                 f"❌ Validation failed for '{node.title}': input '{input_name}' dtype must be "
                                 f"one of {rules['dtype']} (got {data.dtype})"
@@ -188,9 +182,17 @@ class ExecutionWorker(QObject):
         output_meta = def_data.get("output_meta")
         if output_meta:
             # Check if the result is already an envelope (tuple with metadata)
-            if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict)):
-                # Wrap the result with metadata
-                result = (result, output_meta)
+            # Use a sentinel key to distinguish metadata envelopes from regular tuples
+            is_envelope = (
+                isinstance(result, tuple) and 
+                len(result) == 2 and 
+                isinstance(result[1], dict) and
+                result[1].get("__napari_meta__") is True
+            )
+            if not is_envelope:
+                # Wrap the result with metadata, adding sentinel key
+                meta_with_sentinel = {**output_meta, "__napari_meta__": True}
+                result = (result, meta_with_sentinel)
         
         # --- D. Format Results ---
         output_names = def_data.get("outputs", ["out"])

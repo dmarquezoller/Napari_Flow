@@ -17,6 +17,13 @@ except ImportError:
 
 import numpy as np
 
+# Import scipy at module level to avoid repeated import overhead
+try:
+    from scipy.ndimage import gaussian_filter
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 
 # Example 1: Node with doc and icon
 @register_node(
@@ -58,8 +65,9 @@ def example_threshold(image, threshold: float = 0.5):
 )
 def example_blur_validated(image, sigma: float = 1.0):
     """Applies a simple Gaussian blur using convolution."""
-    # Simple approximation - real implementation would use scipy.ndimage.gaussian_filter
-    from scipy.ndimage import gaussian_filter
+    if not HAS_SCIPY:
+        # Fallback: return original image if scipy not available
+        return image.astype(float)
     return gaussian_filter(image.astype(float), sigma=sigma)
 
 
@@ -158,16 +166,21 @@ def example_interactive_crop(image, roi_geometry=None):
             "ndim": [3]
         }
     },
-    doc="Splits a 3-channel image into separate channels. Input must be 3D (H, W, C).",
+    doc="Splits a 3-channel image into separate channels. Input must be 3D (H, W, C) with 3 channels. Note: declarative validation only checks ndim, not channel count.",
     icon="🎨"
 )
 def example_split_channels(image):
     """
     Splits a 3-channel image into separate channels.
     
+    Note: The decorator's validate_inputs only checks ndim=[3], not the actual
+    number of channels. This function includes runtime validation for the
+    specific shape requirement.
+    
     Returns:
         tuple: (channel_0, channel_1, channel_2)
     """
+    # Runtime validation for channel count (beyond what declarative validation provides)
     if image.ndim != 3 or image.shape[-1] != 3:
         # Return empty channels if not a 3-channel image
         dummy = np.zeros_like(image[..., 0] if image.ndim == 3 else image)

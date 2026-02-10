@@ -1028,11 +1028,17 @@ class FlowEditor(QWidget):
         Receives data from the worker and safely updates Napari.
         This runs on the MAIN THREAD.
         """
-        # NEW: Check if data is an envelope (data, metadata) tuple
+        # NEW: Check if data is an envelope (data, metadata) tuple with sentinel key
         metadata = {}
-        if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
+        is_envelope = (
+            isinstance(data, tuple) and 
+            len(data) == 2 and 
+            isinstance(data[1], dict) and 
+            data[1].get("__napari_meta__") is True
+        )
+        if is_envelope:
             actual_data = data[0]
-            metadata = data[1]
+            metadata = {k: v for k, v in data[1].items() if k != "__napari_meta__"}
         else:
             actual_data = data
         
