@@ -77,7 +77,7 @@ def generate():
 
                     # Register the node
                     node_key = name
-                    library[node_key] = {
+                    node_def = {
                         "label": meta["label"],
                         "category": meta["category"],
                         "inputs": inputs,
@@ -85,6 +85,24 @@ def generate():
                         "parameters": parameters,
                         "execution_path": f"{full_module_name}.{name}"
                     }
+                    
+                    # Add optional metadata fields only if present
+                    if "interactive" in meta:
+                        node_def["interactive"] = meta["interactive"]
+                    if "output_meta" in meta:
+                        node_def["output_meta"] = meta["output_meta"]
+                    if "validate_inputs" in meta:
+                        node_def["validate_inputs"] = meta["validate_inputs"]
+                    if "icon" in meta:
+                        node_def["icon"] = meta["icon"]
+                    
+                    # Handle doc field with fallback to function docstring
+                    if "doc" in meta:
+                        node_def["doc"] = meta["doc"]
+                    elif func.__doc__:
+                        node_def["doc"] = func.__doc__.strip()
+                    
+                    library[node_key] = node_def
                 except Exception as e:
                     print(f"Error processing node function '{name}': {e}")
 

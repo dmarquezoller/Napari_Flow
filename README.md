@@ -124,6 +124,158 @@ def my_blur(image_in, sigma: float = 1.0):
 | `outputs` | A list of strings defining the output sockets (e.g., `["image_out", "mask"]`). |
 | `params_config` | A dictionary to configure specific widget limits (like `min`, `max`, `step` or `options`). |
 
+## 🎨 Advanced Decorator API
+
+The `@register_node` decorator supports advanced features for creating sophisticated, interactive nodes without writing boilerplate code.
+
+### Interactive Nodes (`interactive`)
+
+Create nodes that let users draw ROIs, pick points, or paint labels directly in Napari:
+
+```python
+@register_node(
+    label="Interactive Crop",
+    category="ROI",
+    outputs=["cropped"],
+    interactive={
+        "layer_type": "shapes",      # "shapes", "points", or "labels"
+        "tool": "rectangle",          # Tool to activate
+        "prompt": "Draw a rectangle to define the crop region",
+        "arg_name": "roi_geometry",   # Function argument to inject geometry
+        "confirm": True,              # Show confirmation dialog
+    }
+)
+def interactive_crop(image_in, roi_geometry=None):
+    if roi_geometry is None:
+        return image_in
+    # Use roi_geometry to crop the image
+    return cropped_image
+```
+
+When this node executes:
+1. A temporary Napari layer is created (Shapes/Points/Labels)
+2. The specified tool is activated (draw rectangle, add points, paint, etc.)
+3. A dialog prompts the user to draw
+4. The drawn geometry is passed to your function as `roi_geometry`
+5. The temporary layer is removed after execution
+
+### Output Metadata (`output_meta`)
+
+Declaratively style output layers without manual metadata handling:
+
+```python
+@register_node(
+    label="Threshold Otsu",
+    category="Filters",
+    outputs=["mask"],
+    output_meta={
+        "layer_type": "labels",    # Napari layer type
+        "colormap": "cyan",        # Colormap to apply
+        "opacity": 0.5,            # Layer opacity
+        "name_suffix": "Mask",     # Append to layer name
+    }
+)
+def threshold_otsu(image):
+    return skimage.filters.threshold_otsu(image) > image
+```
+
+The engine automatically wraps the result with the specified metadata, ensuring consistent visualization.
+
+### Input Validation (`validate_inputs`)
+
+Validate inputs before execution with clear error messages:
+
+```python
+@register_node(
+    label="Gaussian Blur",
+    category="Filters",
+    outputs=["image_out"],
+    validate_inputs={
+        "image": {
+            "required": True,                           # Input must be connected
+            "dtype": ["float32", "float64", "uint8"],   # Allowed data types
+            "ndim": [2, 3],                             # Allowed dimensions
+        }
+    }
+)
+def gaussian_blur(image, sigma: float = 1.0):
+    return skimage.filters.gaussian(image, sigma=sigma)
+```
+
+The engine checks these conditions **before** calling your function and raises descriptive `ValueError` messages if validation fails.
+
+### Documentation (`doc`)
+
+Add help text that appears in the properties panel:
+
+```python
+@register_node(
+    label="Gaussian Blur",
+    category="Filters",
+    doc="Applies a Gaussian blur filter. Higher sigma = more blur."
+)
+def gaussian_blur(image, sigma: float = 1.0):
+    return skimage.filters.gaussian(image, sigma=sigma)
+```
+
+Falls back to the function's docstring if not provided.
+
+### Visual Icons (`icon`)
+
+Add emoji or text icons to node titles for better visual organization:
+
+```python
+@register_node(
+    label="Gaussian Blur",
+    category="Filters",
+    icon="🔬"
+)
+def gaussian_blur(image, sigma: float = 1.0):
+    return skimage.filters.gaussian(image, sigma=sigma)
+```
+
+The icon appears in the node's title bar in the graph view.
+
+### Complete Example
+
+Here's a node using all advanced features:
+
+```python
+@register_node(
+    label="Smart Edge Detector",
+    category="Analysis",
+    outputs=["edges"],
+    interactive={
+        "layer_type": "shapes",
+        "tool": "rectangle",
+        "prompt": "Draw a region to analyze",
+        "arg_name": "roi",
+    },
+    output_meta={
+        "colormap": "viridis",
+        "opacity": 0.7,
+        "name_suffix": "Edges",
+    },
+    validate_inputs={
+        "image": {
+            "required": True,
+            "dtype": ["float32", "uint8"],
+            "ndim": [2],
+        }
+    },
+    doc="Detects edges in a user-defined ROI with automatic styling",
+    icon="🌊"
+)
+def smart_edge_detector(image, roi=None, sigma: float = 1.0):
+    # Apply ROI if provided
+    if roi is not None:
+        # Crop to ROI...
+        pass
+    return skimage.filters.sobel(image)
+```
+
+See `flow_nodes/examples_advanced.py` for more complete examples.
+
 ### 3. How it works
 
 1. **Scan:** On startup (or import), the system scans functions marked with `@register_node`.

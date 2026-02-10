@@ -3,9 +3,28 @@ import dask.array as da
 import numpy as np
 from typing import Callable, Optional
 
-def register_node(label, category, outputs=None, params_config=None):
+def register_node(label, category, outputs=None, params_config=None,
+                  interactive=None, output_meta=None, validate_inputs=None,
+                  doc=None, icon=None):
     """
     Decorator to mark a function as a Flow Node.
+    
+    Args:
+        label: Display name for the node
+        category: Category for grouping in the UI
+        outputs: List of output socket names (default: ["out"])
+        params_config: Configuration dict for parameters
+        interactive: Dict describing Napari interactive layer requirements
+            - layer_type: "shapes", "points", or "labels"
+            - tool: Tool to activate (e.g., "rectangle", "add")
+            - prompt: User instruction text
+            - arg_name: Function argument name to inject geometry
+            - confirm: Whether to show confirmation dialog
+        output_meta: Dict with output layer metadata (layer_type, colormap, opacity, name_suffix)
+        validate_inputs: Dict of input validation rules
+            - {input_name: {required: bool, dtype: list, ndim: list}}
+        doc: Documentation/help text (falls back to func.__doc__)
+        icon: Emoji or string to show in node title
     """
     if outputs is None:
         outputs = ["out"]
@@ -20,6 +39,18 @@ def register_node(label, category, outputs=None, params_config=None):
             "outputs": outputs,
             "params_config": params_config,
         }
+        
+        # Add new optional fields only if provided
+        if interactive is not None:
+            func._node_meta["interactive"] = interactive
+        if output_meta is not None:
+            func._node_meta["output_meta"] = output_meta
+        if validate_inputs is not None:
+            func._node_meta["validate_inputs"] = validate_inputs
+        if doc is not None:
+            func._node_meta["doc"] = doc
+        if icon is not None:
+            func._node_meta["icon"] = icon
         
         @functools.wraps(func)
         def wrapper(*args, **kwargs):

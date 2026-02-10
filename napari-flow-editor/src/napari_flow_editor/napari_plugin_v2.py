@@ -251,10 +251,18 @@ class Node(QGraphicsRectItem):
         fix_rect = QRectF(rect.x(), rect.y() + 15, rect.width(), 10)
         painter.drawRect(fix_rect)
 
-        # E. Title Text
+        # E. Title Text (with optional icon)
         painter.setPen(Qt.GlobalColor.white)
         text_rect = QRectF(rect.x(), rect.y(), rect.width()-15, 25)
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.title)
+        
+        # Check if node has an icon in its definition
+        display_title = self.title
+        if self.node_type in NODE_LIBRARY:
+            definition = NODE_LIBRARY[self.node_type]
+            if "icon" in definition:
+                display_title = f"{definition['icon']} {self.title}"
+        
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, display_title)
 
         # F. Status Light
         status_colors = {
@@ -606,6 +614,15 @@ class FlowEditor(QWidget):
         # Display the node Title and ID (useful for debugging connections)
         id_label = QLabel(f"<span style='color:#888; font-size:10px;'>ID: {node.uid[:8]}...</span>")
         self.props_layout.addRow(QLabel(f"<b>{node.title}</b>"), id_label)
+        
+        # --- DOC/HELP TEXT ---
+        # Display documentation if available
+        if node.node_type in NODE_LIBRARY:
+            definition = NODE_LIBRARY[node.node_type]
+            if "doc" in definition:
+                doc_label = QLabel(f"<i style='color:#999; font-size:9px;'>{definition['doc']}</i>")
+                doc_label.setWordWrap(True)
+                self.props_layout.addRow(doc_label)
         
         # Spacer
         self.props_layout.addRow(QLabel("")) 
@@ -1058,6 +1075,9 @@ class FlowEditor(QWidget):
         self.thread.started.connect(self.worker.run)
         self.worker.node_status_signal.connect(self.update_node_status)
         
+        # INTERACTIVE MODE
+        self.worker.interactive_request_signal.connect(self.handle_interactive_request)
+        
         # LOGGING
         self.worker.log_signal.connect(self.append_log)
         
@@ -1180,6 +1200,70 @@ class FlowEditor(QWidget):
         # Execute Display
         add_layer_to_viewer(display_data, display_meta)
 
+    def handle_interactive_request(self, node_uid, interactive_config):
+        """
+        Handle interactive layer requests from nodes.
+        Creates a temporary layer and waits for user interaction.
+        
+        Args:
+            node_uid: Unique identifier of the requesting node
+            interactive_config: Dict with layer_type, tool, prompt, arg_name, confirm
+        """
+        try:
+            layer_type = interactive_config.get("layer_type", "shapes")
+            tool = interactive_config.get("tool", "rectangle")
+            prompt = interactive_config.get("prompt", "Draw on the image")
+            confirm = interactive_config.get("confirm", True)
+            
+            # Show instruction dialog
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setWindowTitle("Interactive Input Required")
+            msg.setText(prompt)
+            msg.setInformativeText(f"Use the {layer_type} tool to draw, then click OK when done.")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            
+            # Create temporary layer based on type
+            temp_layer_name = f"_interactive_{node_uid[:8]}"
+            
+            if layer_type == "shapes":
+                self.viewer.add_shapes(name=temp_layer_name, shape_type=tool)
+            elif layer_type == "points":
+                self.viewer.add_points(name=temp_layer_name)
+            elif layer_type == "labels":
+                # For labels, we need an image to paint on
+                if len(self.viewer.layers) > 0:
+                    ref_layer = self.viewer.layers[0]
+                    empty_labels = np.zeros(ref_layer.data.shape, dtype=np.uint8)
+                    self.viewer.add_labels(empty_labels, name=temp_layer_name)
+            
+            # Show dialog and wait for user
+            result = msg.exec_()
+            
+            if result == QMessageBox.StandardButton.Ok:
+                # Get the drawn geometry
+                if temp_layer_name in self.viewer.layers:
+                    temp_layer = self.viewer.layers[temp_layer_name]
+                    geometry_data = temp_layer.data
+                    
+                    # Store the response for the worker to access
+                    if hasattr(self, 'worker') and self.worker:
+                        self.worker.interactive_responses[node_uid] = geometry_data
+                    
+                    # Clean up temporary layer
+                    self.viewer.layers.remove(temp_layer_name)
+                else:
+                    self.append_log(f"⚠️ Interactive layer not found: {temp_layer_name}")
+            else:
+                # User cancelled
+                self.append_log(f"⚠️ Interactive input cancelled for node {node_uid[:8]}")
+                if temp_layer_name in self.viewer.layers:
+                    self.viewer.layers.remove(temp_layer_name)
+                    
+        except Exception as e:
+            self.append_log(f"❌ Error in interactive handler: {str(e)}")
+            import traceback
+            self.append_log(traceback.format_exc())
 
     def append_log(self, text):
         self.console.append(text)

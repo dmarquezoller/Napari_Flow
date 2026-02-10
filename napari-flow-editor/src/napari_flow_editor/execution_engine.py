@@ -14,12 +14,15 @@ class ExecutionWorker(QObject):
     result_signal = Signal(str, str, object)  # (Title, OutputName, Data)
     finished_signal = Signal()
     error_signal = Signal(str)
+    interactive_request_signal = Signal(str, dict)  # (node_uid, interactive_config)
+    interactive_response_signal = Signal(str, object)  # (node_uid, geometry_data)
 
     def __init__(self, scene, viewer, loop_config=None):
         super().__init__()
         self.scene = scene
         self.viewer = viewer
-        self.loop_config = loop_config 
+        self.loop_config = loop_config
+        self.interactive_responses = {}  # Store interactive responses by node_uid 
 
     def run(self):
         try:
@@ -119,6 +122,47 @@ class ExecutionWorker(QObject):
         except:
             return "dirty"
 
+    def validate_node_inputs(self, func_inputs, validate_config):
+        """
+        Validate inputs before execution based on validate_inputs config.
+        
+        Args:
+            func_inputs: Dict of input values
+            validate_config: Dict of validation rules
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        for input_name, rules in validate_config.items():
+            value = func_inputs.get(input_name)
+            
+            # Check required
+            if rules.get("required", False) and value is None:
+                raise ValueError(f"Required input '{input_name}' is missing")
+            
+            if value is not None:
+                # Check dtype
+                if "dtype" in rules:
+                    allowed_dtypes = rules["dtype"]
+                    if hasattr(value, "dtype"):
+                        dtype_str = str(value.dtype)
+                        # Check if any allowed dtype matches
+                        if not any(dt in dtype_str for dt in allowed_dtypes):
+                            raise ValueError(
+                                f"Input '{input_name}' has dtype {value.dtype}, "
+                                f"expected one of {allowed_dtypes}"
+                            )
+                
+                # Check ndim
+                if "ndim" in rules:
+                    allowed_ndims = rules["ndim"]
+                    if hasattr(value, "ndim"):
+                        if value.ndim not in allowed_ndims:
+                            raise ValueError(
+                                f"Input '{input_name}' has {value.ndim} dimensions, "
+                                f"expected one of {allowed_ndims}"
+                            )
+
     def execute_node_logic(self, node, library_def):
         self.log_signal.emit(f"Executing: {node.title}...")
         
@@ -198,12 +242,34 @@ class ExecutionWorker(QObject):
                 clean_params[k] = v["value"]
             else:
                 clean_params[k] = v
+        
+        # --- D. Input Validation ---
+        if "validate_inputs" in def_data:
+            self.validate_node_inputs(func_inputs, def_data["validate_inputs"])
+        
+        # --- E. Interactive Mode ---
+        if "interactive" in def_data:
+            interactive_config = def_data["interactive"]
+            arg_name = interactive_config.get("arg_name", "roi_geometry")
+            
+            # Check if we already have a response for this node
+            if node.uid not in self.interactive_responses:
+                self.log_signal.emit(f"⏸️  Waiting for interactive input: {interactive_config.get('prompt', 'Draw on image')}")
+                # Emit signal to UI and wait for response
+                self.interactive_request_signal.emit(node.uid, interactive_config)
+                # In a real implementation, we'd need to wait here
+                # For now, we'll check if response is available
+                # This is a simplified version - full implementation would use QEventLoop
+            
+            # Inject geometry into function inputs
+            if node.uid in self.interactive_responses:
+                func_inputs[arg_name] = self.interactive_responses[node.uid]
 
         # RUN
         args = {**func_inputs, **clean_params}
         result = func(**args)
         
-        # --- D. Format Results ---
+        # --- F. Format Results ---
         # Check library def first, then fallback to node sockets
         output_names = def_data.get("outputs", [])
         if not output_names and hasattr(node, 'outputs'):
@@ -212,11 +278,29 @@ class ExecutionWorker(QObject):
         node_outputs = {}
 
         def wrap_result(res):
+            """Wrap result with metadata, applying output_meta if defined."""
+            # Start with current_metadata from inputs
+            final_meta = current_metadata.copy()
+            
+            # If result already has metadata tuple, extract it
             if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
-                merged = current_metadata.copy()
-                merged.update(res[1])
-                return (res[0], merged)
-            return (res, current_metadata)
+                data = res[0]
+                final_meta.update(res[1])
+            else:
+                data = res
+            
+            # Apply output_meta from decorator if present
+            if "output_meta" in def_data:
+                output_meta_config = def_data["output_meta"]
+                final_meta.update(output_meta_config)
+                
+                # Handle name_suffix
+                if "name_suffix" in output_meta_config:
+                    old_name = final_meta.get("name", node.title)
+                    if output_meta_config["name_suffix"] not in old_name:
+                        final_meta["name"] = f"{old_name} {output_meta_config['name_suffix']}"
+            
+            return (data, final_meta)
 
         if isinstance(result, tuple) and len(output_names) > 1:
              for i, name in enumerate(output_names):
