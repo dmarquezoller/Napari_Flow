@@ -83,7 +83,8 @@ def generate():
                         "inputs": inputs,
                         "outputs": meta["outputs"],
                         "parameters": parameters,
-                        "execution_path": f"{full_module_name}.{name}"
+                        "execution_path": f"{full_module_name}.{name}",
+                        "interactive": meta.get("interactive", False)
                     }
                 except Exception as e:
                     print(f"Error processing node function '{name}': {e}")

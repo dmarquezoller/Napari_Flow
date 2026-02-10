@@ -3,9 +3,18 @@ import dask.array as da
 import numpy as np
 from typing import Callable, Optional
 
-def register_node(label, category, outputs=None, params_config=None):
+def register_node(label, category, outputs=None, params_config=None, interactive=False):
     """
     Decorator to mark a function as a Flow Node.
+    
+    Args:
+        label: Display name for the node
+        category: Category for grouping nodes
+        outputs: List of output socket names
+        params_config: Configuration for node parameters
+        interactive: If True, marks this node as requiring user interaction
+                    (e.g., drawing ROIs, clicking points). The execution engine
+                    can use this flag to emit appropriate log messages.
     """
     if outputs is None:
         outputs = ["out"]
@@ -19,6 +28,7 @@ def register_node(label, category, outputs=None, params_config=None):
             "category": category,
             "outputs": outputs,
             "params_config": params_config,
+            "interactive": interactive,
         }
         
         @functools.wraps(func)

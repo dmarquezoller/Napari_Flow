@@ -120,7 +120,14 @@ class ExecutionWorker(QObject):
             return "dirty"
 
     def execute_node_logic(self, node, library_def):
-        self.log_signal.emit(f"Executing: {node.title}...")
+        # Check if this is an interactive node and log appropriately
+        def_data = library_def.get(node.node_type, {})
+        is_interactive = def_data.get("interactive", False)
+        
+        if is_interactive:
+            self.log_signal.emit(f"⏸ {node.title} - Waiting for user input...")
+        else:
+            self.log_signal.emit(f"Executing: {node.title}...")
         
         current_metadata = {} 
         func_inputs = {}

@@ -1,10 +1,9 @@
 from .decorator import register_node
 from .deep_learning import _ensure_numpy
+from napari_flow_editor.interactive import interactive_worker
 import numpy as np
 import napari
-import queue
 import threading
-from qtpy.QtCore import QObject, Signal
 
 # --- ALREADY IMPLEMENTED --- #
 # - blend images              #          
@@ -32,73 +31,6 @@ def blend_images(image_a, image_b, alpha: float = 0.5):
 # --- CROP/SLICE IMAGE --- #
 
 # =============================================================================
-# 1. THE WORKER (Put this in workers.py if you want)
-# =============================================================================
-class CropGUIWorker(QObject):
-    run_on_main_signal = Signal(object, object)
-
-    def __init__(self):
-        super().__init__()
-        self.run_on_main_signal.connect(self._execute_slot)
-
-    def _execute_slot(self, func, result_queue):
-        try:
-            result = func()
-            result_queue.put((True, result))
-        except Exception as e:
-            result_queue.put((False, e))
-
-    def setup_interaction(self, layer_name):
-        """Creates the layer and returns an Event to wait on."""
-        def _setup():
-            viewer = napari.current_viewer()
-            if not viewer: raise ValueError("No Viewer")
-            
-            if layer_name in viewer.layers: viewer.layers.remove(layer_name)
-            
-            # Create the 'Prompt' layer
-            roi_layer = viewer.add_shapes(
-                name=layer_name, edge_color="#00ff00", face_color=[0,0,0,0], edge_width=3
-            )
-            roi_layer.mode = 'add_rectangle'
-            viewer.layers.selection.active = roi_layer
-
-            # Wait for drawing
-            done_event = threading.Event()
-            def on_data_change(e):
-                if len(roi_layer.data) > 0:
-                    done_event.set()
-                    roi_layer.events.data.disconnect(on_data_change)
-            roi_layer.events.data.connect(on_data_change)
-            return done_event
-
-        q = queue.Queue()
-        self.run_on_main_signal.emit(_setup, q)
-        success, event = q.get()
-        if not success: raise event
-        return event
-
-    def finish_interaction(self, layer_name):
-        """Gets data and deletes the layer."""
-        def _finish():
-            viewer = napari.current_viewer()
-            if not viewer or layer_name not in viewer.layers: return None
-            l = viewer.layers[layer_name]
-            data = [np.array(s) for s in l.data] # Copy data
-            viewer.layers.remove(layer_name)     # Cleanup
-            return data
-
-        q = queue.Queue()
-        self.run_on_main_signal.emit(_finish, q)
-        success, data = q.get()
-        if not success: raise data
-        return data
-
-# Initialize Worker
-crop_worker = CropGUIWorker()
-
-
-# =============================================================================
 # 2. THE NODE (Clean and Simple)
 # =============================================================================
 @register_node(
@@ -107,7 +39,8 @@ crop_worker = CropGUIWorker()
     outputs=["cropped_image"],
     params_config={
         "t_crop": {"type": "text", "label": "Time/Z Slice", "value": ":"}
-    }
+    },
+    interactive=True
 )
 def interactive_crop(image_input, t_crop=":"):
     # --- 1. UNPACK ---
@@ -125,13 +58,45 @@ def interactive_crop(image_input, t_crop=":"):
     LAYER_NAME = "---- DRAW CROP (Waiting...) ----"
     print(f">> Please draw a rectangle in the '{LAYER_NAME}' layer.")
     
-    # Pause and Wait
-    drawing_event = crop_worker.setup_interaction(LAYER_NAME)
-    drawing_event.wait() 
+    # Setup function to create the layer and return an event
+    def setup_crop_layer():
+        viewer = napari.current_viewer()
+        if not viewer:
+            raise ValueError("No Viewer")
+        
+        if LAYER_NAME in viewer.layers:
+            viewer.layers.remove(LAYER_NAME)
+        
+        # Create the 'Prompt' layer
+        roi_layer = viewer.add_shapes(
+            name=LAYER_NAME, edge_color="#00ff00", face_color=[0,0,0,0], edge_width=3
+        )
+        roi_layer.mode = 'add_rectangle'
+        viewer.layers.selection.active = roi_layer
+
+        # Wait for drawing
+        done_event = threading.Event()
+        def on_data_change(e):
+            if len(roi_layer.data) > 0:
+                done_event.set()
+                roi_layer.events.data.disconnect(on_data_change)
+        roi_layer.events.data.connect(on_data_change)
+        return done_event
     
-    # Get Shapes
-    shapes_data = crop_worker.finish_interaction(LAYER_NAME)
-    if not shapes_data: raise ValueError("No ROI data received.")
+    # Cleanup function to get data and delete the layer
+    def cleanup_crop_layer():
+        viewer = napari.current_viewer()
+        if not viewer or LAYER_NAME not in viewer.layers:
+            return None
+        l = viewer.layers[LAYER_NAME]
+        data = [np.array(s) for s in l.data]  # Copy data
+        viewer.layers.remove(LAYER_NAME)      # Cleanup
+        return data
+    
+    # Use the generic interactive worker
+    shapes_data = interactive_worker.wait_for_user_event(setup_crop_layer, cleanup_crop_layer)
+    if not shapes_data:
+        raise ValueError("No ROI data received.")
 
     # --- 3. YOUR TEMPLATE LOGIC STARTS HERE ---
     
