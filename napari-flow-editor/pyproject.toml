@@ -6,6 +6,12 @@ classifiers = [
 ]
 dependencies = ["napari"]
 
+[project.optional-dependencies]
+testing = [
+    "pytest>=7.0",
+    "pytest-qt>=4.0",
+]
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -18,3 +24,10 @@ where = ["src"]
 
 [project.entry-points."napari.manifest"]
 napari-flow-editor = "napari_flow_editor:napari.yaml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
