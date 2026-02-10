@@ -178,22 +178,6 @@ class ExecutionWorker(QObject):
         args = {**func_inputs, **func_params}
         result = func(**args)
         
-        # --- NEW: Output Metadata Wrapping ---
-        output_meta = def_data.get("output_meta")
-        if output_meta:
-            # Check if the result is already an envelope (tuple with metadata)
-            # Use a sentinel key to distinguish metadata envelopes from regular tuples
-            is_envelope = (
-                isinstance(result, tuple) and 
-                len(result) == 2 and 
-                isinstance(result[1], dict) and
-                result[1].get("__napari_meta__") is True
-            )
-            if not is_envelope:
-                # Wrap the result with metadata, adding sentinel key
-                meta_with_sentinel = {**output_meta, "__napari_meta__": True}
-                result = (result, meta_with_sentinel)
-        
         # --- D. Format Results ---
         output_names = def_data.get("outputs", ["out"])
         node_outputs = {}
@@ -202,7 +186,24 @@ class ExecutionWorker(QObject):
                 if i < len(result): node_outputs[name] = result[i]
         else:
              if output_names: node_outputs[output_names[0]] = result
-             
+        
+        # --- NEW: Output Metadata Wrapping ---
+        # Apply metadata to each output individually (after splitting tuple results)
+        output_meta = def_data.get("output_meta")
+        if output_meta:
+            meta_with_sentinel = {**output_meta, "__napari_meta__": True}
+            for out_name, out_data in node_outputs.items():
+                # Check if this output is already wrapped with metadata
+                is_envelope = (
+                    isinstance(out_data, tuple) and 
+                    len(out_data) == 2 and 
+                    isinstance(out_data[1], dict) and
+                    out_data[1].get("__napari_meta__") is True
+                )
+                if not is_envelope:
+                    # Wrap this individual output with metadata
+                    node_outputs[out_name] = (out_data, meta_with_sentinel)
+              
         # Emit to GUI for display
         for out_name, out_data in node_outputs.items():
             self.result_signal.emit(node.title, out_name, out_data)
