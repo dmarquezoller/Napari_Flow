@@ -1,290 +1,4 @@
 {
-  "refine_stardist_model": {
-    "label": "Refine StarDist Model",
-    "category": "Deep Learning",
-    "inputs": [
-      "image",
-      "labels"
-    ],
-    "outputs": [],
-    "parameters": {
-      "base_model_path": {
-        "type": "path",
-        "default": "",
-        "label": "Base Model Folder",
-        "mode": "directory"
-      },
-      "new_model_name": {
-        "type": "text",
-        "default": "refined_model_v1",
-        "label": "New Model Name",
-        "value": "refined_model_v1"
-      },
-      "epochs": {
-        "type": "string",
-        "default": 50,
-        "min": 1,
-        "max": 1000,
-        "value": 50,
-        "label": "Epochs"
-      },
-      "learning_rate": {
-        "type": "string",
-        "default": 0.0001,
-        "min": 1e-05,
-        "max": 0.01,
-        "value": 0.0001,
-        "step": 1e-05,
-        "label": "Learning Rate"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.refine_stardist_model"
-  },
-  "run_cellpose": {
-    "label": "Cellpose Segmentation",
-    "category": "Deep Learning",
-    "inputs": [
-      "image"
-    ],
-    "outputs": [
-      "mask_layer"
-    ],
-    "parameters": {
-      "model_type": {
-        "type": "enum",
-        "default": "nuclei",
-        "options": [
-          "nuclei",
-          "cyto2",
-          "cyto3",
-          "tissuenet",
-          "livecell"
-        ],
-        "value": "nuclei",
-        "label": "Standard Model"
-      },
-      "custom_path": {
-        "type": "path",
-        "default": "",
-        "mode": "file"
-      },
-      "diameter": {
-        "type": "float",
-        "default": 30.0,
-        "min": 0.0,
-        "max": 300.0,
-        "step": 1.0,
-        "value": 30.0
-      },
-      "flow_threshold": {
-        "type": "float",
-        "default": 0.4,
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.1,
-        "value": 0.4
-      },
-      "process_3d": {
-        "type": "bool",
-        "default": false,
-        "value": false,
-        "label": "Process as 3D Vol"
-      },
-      "use_gpu": {
-        "type": "bool",
-        "default": false,
-        "value": false,
-        "label": "Use GPU"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_cellpose"
-  },
-  "run_stardist": {
-    "label": "StarDist Segmentation",
-    "category": "Deep Learning",
-    "inputs": [
-      "image"
-    ],
-    "outputs": [
-      "mask_layer"
-    ],
-    "parameters": {
-      "model_type": {
-        "type": "enum",
-        "default": "2D_versatile_fluo",
-        "options": [
-          "2D_versatile_fluo",
-          "2D_versatile_he",
-          "3D_demo"
-        ],
-        "value": "2D_versatile_fluo",
-        "label": "Pretrained Model"
-      },
-      "custom_path": {
-        "type": "path",
-        "default": "",
-        "mode": "directory",
-        "label": "Custom Model Folder (Optional)"
-      },
-      "scale": {
-        "type": "float",
-        "default": 1.0,
-        "min": 0.1,
-        "max": 2.0,
-        "step": 0.1,
-        "value": 1.0,
-        "label": "Scale"
-      },
-      "prob_thresh": {
-        "type": "float",
-        "default": 0.5,
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.05,
-        "value": 0.5
-      },
-      "nms_thresh": {
-        "type": "float",
-        "default": 0.3,
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.05,
-        "value": 0.3
-      },
-      "norm_pmin": {
-        "type": "float",
-        "default": 1.0,
-        "min": 0.0,
-        "max": 100.0,
-        "step": 1.0,
-        "value": 1.0
-      },
-      "norm_pmax": {
-        "type": "float",
-        "default": 99.8,
-        "min": 0.0,
-        "max": 100.0,
-        "step": 1.0,
-        "value": 99.8
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_stardist"
-  },
-  "run_ultrack_node": {
-    "label": "Ultrack Tracking",
-    "category": "Deep Learning",
-    "inputs": [
-      "labels"
-    ],
-    "outputs": [
-      "detection_layer",
-      "edges_layer",
-      "tracks_layer"
-    ],
-    "parameters": {
-      "config_path": {
-        "type": "path",
-        "default": "",
-        "mode": "file",
-        "label": "Config File (Optional, .toml)",
-        "value": ""
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_ultrack_node"
-  },
-  "train_cellpose": {
-    "label": "Train Cellpose Model",
-    "category": "Deep Learning",
-    "inputs": [
-      "image",
-      "labels"
-    ],
-    "outputs": [
-      "model_path"
-    ],
-    "parameters": {
-      "base_model": {
-        "type": "enum",
-        "default": "nuclei",
-        "options": [
-          "nuclei",
-          "cyto2",
-          "tissuenet",
-          "livecell"
-        ],
-        "value": "nuclei",
-        "label": "Base Model (Start Point)"
-      },
-      "model_name": {
-        "type": "str",
-        "default": "my_custom_model",
-        "value": "my_custom_model",
-        "label": "New Model Name"
-      },
-      "epochs": {
-        "type": "int",
-        "default": 50,
-        "min": 10,
-        "max": 1000,
-        "step": 10,
-        "value": 50,
-        "label": "Epochs"
-      },
-      "learning_rate": {
-        "type": "float",
-        "default": 0.1,
-        "min": 0.001,
-        "max": 1.0,
-        "step": 0.001,
-        "value": 0.1,
-        "label": "Learning Rate"
-      },
-      "use_gpu": {
-        "type": "bool",
-        "default": false,
-        "value": false,
-        "label": "Use GPU"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.train_cellpose"
-  },
-  "train_stardist": {
-    "label": "Train StarDist Model",
-    "category": "Deep Learning",
-    "inputs": [
-      "image",
-      "labels"
-    ],
-    "outputs": [],
-    "parameters": {
-      "model_name": {
-        "type": "str",
-        "default": "my_custom_nuclei",
-        "value": "my_custom_nuclei",
-        "label": "New Model Name"
-      },
-      "epochs": {
-        "type": "string",
-        "default": 50,
-        "min": 10,
-        "max": 500,
-        "value": 50,
-        "label": "Epochs"
-      },
-      "patch_size": {
-        "type": "string",
-        "default": 256,
-        "options": [
-          128,
-          256,
-          512
-        ],
-        "value": 256,
-        "label": "Patch Size"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.deep_learning.train_stardist"
-  },
   "adjust_gamma": {
     "label": "Adjust Gamma",
     "category": "Exposure",
@@ -310,7 +24,8 @@
         "step": 0.1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_gamma"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_gamma",
+    "interactive": false
   },
   "adjust_log": {
     "label": "Adjust Log",
@@ -334,7 +49,8 @@
         "default": false
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_log"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_log",
+    "interactive": false
   },
   "adjust_sigmoid": {
     "label": "Adjust Sigmoid",
@@ -365,7 +81,8 @@
         "default": false
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_sigmoid"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_sigmoid",
+    "interactive": false
   },
   "cummulative_distribution": {
     "label": "Cummulative Distribution",
@@ -385,7 +102,8 @@
         "step": 1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.cummulative_distribution"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.cummulative_distribution",
+    "interactive": false
   },
   "equalize_adapthist": {
     "label": "Equalize Adaptive",
@@ -412,7 +130,8 @@
         "step": 0.1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.equalize_adapthist"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.equalize_adapthist",
+    "interactive": false
   },
   "equalize_histogram": {
     "label": "Equalize Histogram",
@@ -432,7 +151,8 @@
         "step": 1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.equalize_histogram"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.equalize_histogram",
+    "interactive": false
   },
   "rescale_intensity": {
     "label": "Rescale Intensity",
@@ -473,7 +193,8 @@
         "step": 0.1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.exposure.rescale_intensity"
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.rescale_intensity",
+    "interactive": false
   },
   "butterworth": {
     "label": "Butterworth",
@@ -499,7 +220,8 @@
         "max": 10
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.butterworth"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.butterworth",
+    "interactive": false
   },
   "correlate_sparse": {
     "label": "Correlate Sparse",
@@ -524,7 +246,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.correlate_sparse"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.correlate_sparse",
+    "interactive": false
   },
   "difference_of_gaussians": {
     "label": "Difference of Gaussians",
@@ -562,7 +285,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.difference_of_gaussians"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.difference_of_gaussians",
+    "interactive": false
   },
   "farid": {
     "label": "Farid",
@@ -586,7 +310,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.farid"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.farid",
+    "interactive": false
   },
   "farid_horizontal": {
     "label": "Farid Horizontal",
@@ -598,7 +323,8 @@
       "image_out"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.farid_horizontal"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.farid_horizontal",
+    "interactive": false
   },
   "farid_vertical": {
     "label": "Farid Vertical",
@@ -610,7 +336,8 @@
       "image_out"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.farid_vertical"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.farid_vertical",
+    "interactive": false
   },
   "filter_forward": {
     "label": "Filter Forward",
@@ -622,7 +349,8 @@
       "image_out"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.filter_forward"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.filter_forward",
+    "interactive": false
   },
   "filter_inverse": {
     "label": "Filter Inverse",
@@ -642,7 +370,8 @@
         "step": 0.1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.filter_inverse"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.filter_inverse",
+    "interactive": false
   },
   "frangi": {
     "label": "Frangi",
@@ -701,7 +430,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.frangi"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.frangi",
+    "interactive": false
   },
   "gabor": {
     "label": "Gabor",
@@ -739,7 +469,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.gabor"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.gabor",
+    "interactive": false
   },
   "gaussian_blur": {
     "label": "Gaussian Blur",
@@ -769,7 +500,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.gaussian_blur"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.gaussian_blur",
+    "interactive": false
   },
   "hessian": {
     "label": "Hessian (Ridge)",
@@ -809,7 +541,8 @@
         "default": true
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.hessian"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.hessian",
+    "interactive": false
   },
   "hysteresis_threshold": {
     "label": "Hysteresis Threshold",
@@ -836,7 +569,8 @@
         "step": 1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.hysteresis_threshold"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.hysteresis_threshold",
+    "interactive": false
   },
   "laplace": {
     "label": "Laplace",
@@ -856,7 +590,8 @@
         "step": 1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.laplace"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.laplace",
+    "interactive": false
   },
   "median_filter": {
     "label": "Median Filter",
@@ -875,7 +610,8 @@
         "max": 50
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.median_filter"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.median_filter",
+    "interactive": false
   },
   "meijering": {
     "label": "Meijering (Ridge)",
@@ -924,7 +660,8 @@
         "default": true
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.meijering"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.meijering",
+    "interactive": false
   },
   "prewitt_filter": {
     "label": "Prewitt Edge Det.",
@@ -936,7 +673,8 @@
       "edges"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.prewitt_filter"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.prewitt_filter",
+    "interactive": false
   },
   "rank_order": {
     "label": "Rank Order",
@@ -949,7 +687,8 @@
       "original_values"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.rank_order"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.rank_order",
+    "interactive": false
   },
   "roberts": {
     "label": "Roberts",
@@ -961,7 +700,8 @@
       "image_out"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.roberts"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.roberts",
+    "interactive": false
   },
   "sato": {
     "label": "Sato (Ridge)",
@@ -1001,7 +741,8 @@
         "default": true
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.sato"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.sato",
+    "interactive": false
   },
   "scharr": {
     "label": "Scharr",
@@ -1025,7 +766,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.scharr"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.scharr",
+    "interactive": false
   },
   "sobel_filter": {
     "label": "Sobel Edge Det.",
@@ -1037,7 +779,8 @@
       "edges"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_filter"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_filter",
+    "interactive": false
   },
   "sobel_split": {
     "label": "Sobel Split",
@@ -1050,7 +793,8 @@
       "vertical_edges"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_split"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_split",
+    "interactive": false
   },
   "threshold_isodata": {
     "label": "Threshold Isodata",
@@ -1069,7 +813,8 @@
         "max": 1024
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_isodata"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_isodata",
+    "interactive": false
   },
   "threshold_li": {
     "label": "Threshold Li",
@@ -1081,7 +826,8 @@
       "mask_out"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_li"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_li",
+    "interactive": false
   },
   "threshold_local": {
     "label": "Threshold Local",
@@ -1128,7 +874,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_local"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_local",
+    "interactive": false
   },
   "threshold_mean": {
     "label": "Threshold Mean",
@@ -1140,7 +887,8 @@
       "mask_out"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_mean"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_mean",
+    "interactive": false
   },
   "threshold_minimum": {
     "label": "Threshold Minimum",
@@ -1159,7 +907,8 @@
         "max": 1024
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_minimum"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_minimum",
+    "interactive": false
   },
   "threshold_niblack": {
     "label": "Threshold Niblack",
@@ -1186,7 +935,8 @@
         "step": 0.01
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_niblack"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_niblack",
+    "interactive": false
   },
   "threshold_otsu": {
     "label": "Threshold Otsu",
@@ -1205,7 +955,8 @@
         "max": 1024
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_otsu"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_otsu",
+    "interactive": false
   },
   "threshold_sauvola": {
     "label": "Threshold Sauvola",
@@ -1232,7 +983,8 @@
         "step": 0.01
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_sauvola"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_sauvola",
+    "interactive": false
   },
   "threshold_triangle": {
     "label": "Threshold Triangle",
@@ -1251,7 +1003,8 @@
         "max": 1024
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_triangle"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_triangle",
+    "interactive": false
   },
   "threshold_yen": {
     "label": "Threshold Yen",
@@ -1270,7 +1023,8 @@
         "max": 1024
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_yen"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_yen",
+    "interactive": false
   },
   "unsharp_mask": {
     "label": "Unsharp Mask (Sharpen)",
@@ -1297,7 +1051,8 @@
         "step": 0.1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.unsharp_mask"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.unsharp_mask",
+    "interactive": false
   },
   "wiener": {
     "label": "Wiener Deconvolution",
@@ -1322,360 +1077,30 @@
         "default": true
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.filters.wiener"
+    "execution_path": "napari_flow_editor.flow_nodes.filters.wiener",
+    "interactive": false
   },
-  "get_layer": {
-    "label": "Get Layer",
-    "category": "Input",
-    "inputs": [],
-    "outputs": [
-      "data_out"
-    ],
-    "parameters": {
-      "layer_name": {
-        "type": "enum",
-        "default": "",
-        "options": []
-      },
-      "axis_map": {
-        "type": "table",
-        "default": [
-          {
-            "d0": "Y",
-            "d1": "X",
-            "d2": "-",
-            "d3": "-",
-            "d4": "-"
-          }
-        ],
-        "label": "Dimensions (e.g. T, Z, Z, Y, X)",
-        "max_rows": 1,
-        "row_unique": true,
-        "allow_duplicates": [
-          "-"
-        ],
-        "columns": [
-          {
-            "name": "d0",
-            "label": "Dim 0",
-            "type": "enum",
-            "options": [
-              "-",
-              "T",
-              "Z",
-              "C",
-              "Y",
-              "X"
-            ]
-          },
-          {
-            "name": "d1",
-            "label": "Dim 1",
-            "type": "enum",
-            "options": [
-              "-",
-              "T",
-              "Z",
-              "C",
-              "Y",
-              "X"
-            ]
-          },
-          {
-            "name": "d2",
-            "label": "Dim 2",
-            "type": "enum",
-            "options": [
-              "-",
-              "T",
-              "Z",
-              "C",
-              "Y",
-              "X"
-            ]
-          },
-          {
-            "name": "d3",
-            "label": "Dim 3",
-            "type": "enum",
-            "options": [
-              "-",
-              "T",
-              "Z",
-              "C",
-              "Y",
-              "X"
-            ]
-          },
-          {
-            "name": "d4",
-            "label": "Dim 4",
-            "type": "enum",
-            "options": [
-              "-",
-              "T",
-              "Z",
-              "C",
-              "Y",
-              "X"
-            ]
-          }
-        ],
-        "value": [
-          {
-            "d0": "Y",
-            "d1": "X",
-            "d2": "-",
-            "d3": "-",
-            "d4": "-"
-          }
-        ]
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer"
-  },
-  "load_csv": {
-    "label": "Load CSV",
-    "category": "Input",
-    "inputs": [],
-    "outputs": [
-      "csv_data"
-    ],
-    "parameters": {
-      "file_path": {
-        "type": "path",
-        "default": "",
-        "label": "CSV File",
-        "mode": "file",
-        "filter": "*.csv"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.inputs.load_csv"
-  },
-  "open_ome_zarr": {
-    "label": "Open Ome-Zarr",
-    "category": "Input",
-    "inputs": [],
-    "outputs": [
-      "data"
-    ],
-    "parameters": {
-      "path": {
-        "type": "path",
-        "default": "",
-        "mode": "directory"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.inputs.open_ome_zarr"
-  },
-  "blend_images": {
-    "label": "Blend Images",
-    "category": "Math",
-    "inputs": [
-      "image_a",
-      "image_b"
-    ],
-    "outputs": [
-      "blended_image"
-    ],
-    "parameters": {
-      "alpha": {
-        "type": "float",
-        "default": 0.5,
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.1
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.math.blend_images"
-  },
-  "crop_image_interactive": {
-    "label": "Interactive Crop (Legacy)",
-    "category": "Math",
-    "inputs": [
-      "image",
-      "roi_layer"
-    ],
-    "outputs": [
-      "cropped_image"
-    ],
-    "parameters": {
-      "t_crop": {
-        "type": "text",
-        "default": ":",
-        "label": "Time/Z (Dim 0) [e.g. 0:10 or :]",
-        "value": ":"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.math.crop_image_interactive"
-  },
-  "interactive_crop": {
-    "label": "Interactive Crop",
-    "category": "Math",
+  "interactive_seed_points": {
+    "label": "Interactive Seed Points",
+    "category": "Interactive",
     "inputs": [
       "image_input"
     ],
     "outputs": [
-      "cropped_image"
+      "seed_coordinates"
     ],
     "parameters": {
-      "t_crop": {
-        "type": "text",
-        "default": ":",
-        "label": "Time/Z Slice",
-        "value": ":"
+      "point_size": {
+        "type": "float",
+        "default": 10,
+        "min": 1,
+        "max": 50,
+        "step": 1,
+        "label": "Point Size"
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.math.interactive_crop"
-  },
-  "project_3d_to_2d": {
-    "label": "Project 3D to 2D",
-    "category": "Math",
-    "inputs": [
-      "image_in"
-    ],
-    "outputs": [
-      "projected_img"
-    ],
-    "parameters": {
-      "axis": {
-        "type": "enum",
-        "default": 0,
-        "options": [
-          "0",
-          "1",
-          "2"
-        ],
-        "label": "Projection Axis (0=Z, 1=Y, 2=X)"
-      },
-      "mode": {
-        "type": "enum",
-        "default": "Max",
-        "options": [
-          "Max",
-          "Mean",
-          "Sum",
-          "Std"
-        ],
-        "label": "Method"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.math.project_3d_to_2d"
-  },
-  "filter_labels_by_csv": {
-    "label": "Filter Labels by CSV",
-    "category": "Measure",
-    "inputs": [
-      "labels_layer",
-      "csv_data"
-    ],
-    "outputs": [
-      "filtered_labels"
-    ],
-    "parameters": {
-      "filters": {
-        "type": "table",
-        "default": [
-          {
-            "col": "area",
-            "op": ">",
-            "val": 100
-          }
-        ],
-        "label": "Filter Rules",
-        "max_rows": 2,
-        "columns": [
-          {
-            "name": "col",
-            "label": "Filter Property",
-            "type": "enum",
-            "options": [
-              "area",
-              "mean_intensity",
-              "max_intensity",
-              "min_intensity",
-              "solidity",
-              "eccentricity",
-              "circularity",
-              "perimeter",
-              "major_axis_length",
-              "minor_axis_length",
-              "label"
-            ]
-          },
-          {
-            "name": "op",
-            "label": "Operation",
-            "type": "enum",
-            "options": [
-              ">",
-              "<",
-              ">=",
-              "<=",
-              "==",
-              "!="
-            ]
-          },
-          {
-            "name": "val",
-            "label": "Threshold",
-            "type": "float",
-            "value": 100.0
-          }
-        ],
-        "value": [
-          {
-            "col": "area",
-            "op": ">",
-            "val": 100
-          }
-        ]
-      },
-      "frame_column": {
-        "type": "string",
-        "default": "frame"
-      },
-      "id_column": {
-        "type": "string",
-        "default": "label"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.measure.filter_labels_by_csv"
-  },
-  "measure_labels": {
-    "label": "Region Properties",
-    "category": "Measure",
-    "inputs": [
-      "labels",
-      "image"
-    ],
-    "outputs": [
-      "measurements_table"
-    ],
-    "parameters": {
-      "properties": {
-        "type": "enum",
-        "default": "All",
-        "options": [
-          "Basic (Area, Perim)",
-          "Shape (Eccentricity, Solidity)",
-          "All"
-        ],
-        "value": "All",
-        "label": "Metrics to Calculate"
-      },
-      "mode": {
-        "type": "enum",
-        "default": "2D Slice-by-Slice (Time/Z)",
-        "options": [
-          "2D Slice-by-Slice (Time/Z)",
-          "3D Volumetric"
-        ],
-        "value": "2D Slice-by-Slice (Time/Z)",
-        "label": "Analysis Mode"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.measure.measure_labels"
+    "execution_path": "napari_flow_editor.flow_nodes.interactive_nodes.interactive_seed_points",
+    "interactive": true
   },
   "binary_closing": {
     "label": "Binary Closing (Fill Holes)",
@@ -1694,7 +1119,8 @@
         "max": 20
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_closing"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_closing",
+    "interactive": false
   },
   "binary_opening": {
     "label": "Binary Opening (Remove Noise)",
@@ -1713,7 +1139,8 @@
         "max": 20
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_opening"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_opening",
+    "interactive": false
   },
   "black_tophat": {
     "label": "Black Tophat (Dark Spots)",
@@ -1732,7 +1159,8 @@
         "max": 50
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.black_tophat"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.black_tophat",
+    "interactive": false
   },
   "convex_hull": {
     "label": "Convex Hull",
@@ -1744,7 +1172,8 @@
       "hull"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.convex_hull"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.convex_hull",
+    "interactive": false
   },
   "dilation": {
     "label": "Dilation",
@@ -1763,7 +1192,8 @@
         "max": 50
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation",
+    "interactive": false
   },
   "erosion": {
     "label": "Erosion (Shrink)",
@@ -1782,7 +1212,8 @@
         "max": 50
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.erosion"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.erosion",
+    "interactive": false
   },
   "label_objects": {
     "label": "Label Objects",
@@ -1794,7 +1225,8 @@
       "labels"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.label_objects"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.label_objects",
+    "interactive": false
   },
   "remove_small_holes": {
     "label": "Remove Small Holes",
@@ -1814,7 +1246,8 @@
         "step": 10
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_holes"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_holes",
+    "interactive": false
   },
   "remove_small_objects": {
     "label": "Remove Small Objects",
@@ -1834,7 +1267,8 @@
         "step": 10
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_objects"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_objects",
+    "interactive": false
   },
   "skeletonize": {
     "label": "Skeletonize",
@@ -1846,7 +1280,8 @@
       "skeleton"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.skeletonize"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.skeletonize",
+    "interactive": false
   },
   "white_tophat": {
     "label": "White Tophat (Bright Spots)",
@@ -1865,63 +1300,8 @@
         "max": 50
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat"
-  },
-  "save_image_node": {
-    "label": "Save Image",
-    "category": "Outputs",
-    "inputs": [
-      "image"
-    ],
-    "outputs": [],
-    "parameters": {
-      "folder": {
-        "type": "path",
-        "default": "",
-        "mode": "directory",
-        "label": "Save Folder"
-      },
-      "base_name": {
-        "type": "text",
-        "default": "output",
-        "label": "Filename Prefix",
-        "value": "crop_output"
-      },
-      "format": {
-        "type": "enum",
-        "default": ".tif",
-        "options": [
-          ".tif",
-          ".png",
-          ".jpg"
-        ],
-        "label": "Format"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.outputs.save_image_node"
-  },
-  "save_table": {
-    "label": "Save Table (CSV)",
-    "category": "Outputs",
-    "inputs": [
-      "table"
-    ],
-    "outputs": [],
-    "parameters": {
-      "folder": {
-        "type": "path",
-        "default": "",
-        "mode": "directory",
-        "label": "Save Folder"
-      },
-      "filename": {
-        "type": "text",
-        "default": "results.csv",
-        "value": "results.csv",
-        "label": "Filename"
-      }
-    },
-    "execution_path": "napari_flow_editor.flow_nodes.outputs.save_table"
+    "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat",
+    "interactive": false
   },
   "chan_vese": {
     "label": "Chan Vese (Active Contour)",
@@ -1962,7 +1342,8 @@
         "step": 10
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.chan_vese"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.chan_vese",
+    "interactive": false
   },
   "clear_border": {
     "label": "Clear Border",
@@ -1974,7 +1355,8 @@
       "cleaned_mask"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.clear_border"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.clear_border",
+    "interactive": false
   },
   "expand_labels": {
     "label": "Expand Labels",
@@ -1993,7 +1375,8 @@
         "max": 100
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.expand_labels"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.expand_labels",
+    "interactive": false
   },
   "felzenszwalb": {
     "label": "Felzenszwalb",
@@ -2024,7 +1407,8 @@
         "max": 1000
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.felzenszwalb"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.felzenszwalb",
+    "interactive": false
   },
   "find_boundaries": {
     "label": "Find Boundaries",
@@ -2047,7 +1431,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.find_boundaries"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.find_boundaries",
+    "interactive": false
   },
   "mark_boundaries": {
     "label": "Mark Boundaries (Overlay)",
@@ -2080,7 +1465,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.mark_boundaries"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.mark_boundaries",
+    "interactive": false
   },
   "quickshift": {
     "label": "Quickshift",
@@ -2112,7 +1498,8 @@
         "max": 100
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.quickshift"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.quickshift",
+    "interactive": false
   },
   "random_walker": {
     "label": "Random Walker",
@@ -2142,7 +1529,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.random_walker"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.random_walker",
+    "interactive": false
   },
   "slic": {
     "label": "SLIC (Superpixels)",
@@ -2175,7 +1563,8 @@
         "max": 5.0
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.slic"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.slic",
+    "interactive": false
   },
   "watershed": {
     "label": "Watershed",
@@ -2196,7 +1585,8 @@
         "step": 0.01
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.segmentation.watershed"
+    "execution_path": "napari_flow_editor.flow_nodes.segmentation.watershed",
+    "interactive": false
   },
   "downscale_local_mean": {
     "label": "Downscale (Binning)",
@@ -2216,7 +1606,8 @@
         "step": 1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.transform.downscale_local_mean"
+    "execution_path": "napari_flow_editor.flow_nodes.transform.downscale_local_mean",
+    "interactive": false
   },
   "rescale_image": {
     "label": "Rescale (Zoom)",
@@ -2236,7 +1627,8 @@
         "step": 0.1
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.transform.rescale_image"
+    "execution_path": "napari_flow_editor.flow_nodes.transform.rescale_image",
+    "interactive": false
   },
   "rotate_image": {
     "label": "Rotate",
@@ -2260,7 +1652,8 @@
         "default": true
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.transform.rotate_image"
+    "execution_path": "napari_flow_editor.flow_nodes.transform.rotate_image",
+    "interactive": false
   },
   "swirl": {
     "label": "Swirl",
@@ -2293,7 +1686,8 @@
         "max": 6.28
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.transform.swirl"
+    "execution_path": "napari_flow_editor.flow_nodes.transform.swirl",
+    "interactive": false
   },
   "warp_polar": {
     "label": "Warp Polar (Ring to Line)",
@@ -2321,7 +1715,8 @@
         ]
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.transform.warp_polar"
+    "execution_path": "napari_flow_editor.flow_nodes.transform.warp_polar",
+    "interactive": false
   },
   "colocalization_scatter": {
     "label": "Colocalization Scatter",
@@ -2334,7 +1729,8 @@
       "plot"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.visualisation.colocalization_scatter"
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.colocalization_scatter",
+    "interactive": false
   },
   "plot_histogram": {
     "label": "Plot Histogram",
@@ -2346,7 +1742,8 @@
       "plot"
     ],
     "parameters": {},
-    "execution_path": "napari_flow_editor.flow_nodes.visualisation.plot_histogram"
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.plot_histogram",
+    "interactive": false
   },
   "table_heatmap_plot": {
     "label": "Table Heatmap",
@@ -2379,6 +1776,7 @@
         "label": "Normalize Columns (0-1)"
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.visualisation.table_heatmap_plot"
+    "execution_path": "napari_flow_editor.flow_nodes.visualisation.table_heatmap_plot",
+    "interactive": false
   }
 }

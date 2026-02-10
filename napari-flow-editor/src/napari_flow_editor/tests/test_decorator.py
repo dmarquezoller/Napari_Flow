@@ -121,7 +121,7 @@ def test_multiple_outputs():
     def split_func(value):
         return value, value * 2, value * 3
     
-    assert test_func._node_meta['outputs'] == ["first", "second", "third"]
+    assert split_func._node_meta['outputs'] == ["first", "second", "third"]
     result = split_func(10)
     assert result == (10, 20, 30)
 
@@ -142,4 +142,4 @@ def test_complex_params_config():
     def threshold_func(image, threshold=0.5, method="otsu", invert=False):
         return image > threshold
     
-    assert test_func._node_meta['params_config'] == params
+    assert threshold_func._node_meta['params_config'] == params

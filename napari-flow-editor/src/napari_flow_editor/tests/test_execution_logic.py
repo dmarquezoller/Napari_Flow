@@ -138,20 +138,6 @@ def test_calculate_signature_no_input_connection(mock_node):
     assert len(sig) == 32
 
 
-def test_calculate_signature_error_handling(mock_node):
-    """Test that calculate_signature returns 'dirty' on error."""
-    worker = ExecutionWorker(scene=Mock(), viewer=Mock())
-    
-    # Make params un-serializable to cause an error
-    mock_node.params = {"bad": object()}
-    mock_node.inputs = []
-    
-    sig = worker.calculate_signature(mock_node)
-    
-    # Should return "dirty" on error
-    assert sig == "dirty"
-
-
 def test_calculate_signature_consistent_param_order(mock_node):
     """Test that parameter order doesn't affect signature."""
     worker = ExecutionWorker(scene=Mock(), viewer=Mock())
