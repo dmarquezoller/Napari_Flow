@@ -1,7 +1,17 @@
 import functools
 
 
-def register_node(label, category, outputs=None, params_config=None):
+def register_node(
+    label,
+    category,
+    outputs=None,
+    params_config=None,
+    interactive=None,
+    output_meta=None,
+    validate_inputs=None,
+    doc=None,
+    icon=None,
+):
     """
     Decorator to mark a function as a Flow Node.
     
@@ -11,6 +21,21 @@ def register_node(label, category, outputs=None, params_config=None):
         outputs (list): List of output names (e.g., ["image_out"]).
         params_config (dict): Extra info for inputs that type hints can't cover 
                               (min, max, step). e.g., {'sigma': {'min': 0.1, 'max': 10.0}}
+        interactive (dict): Configuration for napari interactivity. Keys:
+                           - layer_type: "shapes" | "points" | "labels"
+                           - tool: Which napari tool to activate (e.g., "rectangle")
+                           - prompt: User-facing instruction message
+                           - arg_name: Parameter name to receive geometry data
+                           - confirm: Whether to show OK/Cancel dialog (default True)
+        output_meta (dict): Declarative output metadata. Keys:
+                           - layer_type: "image" | "labels" | "plot"
+                           - colormap: Optional napari colormap
+                           - opacity: Optional napari opacity
+                           - name_suffix: Optional name override
+        validate_inputs (dict): Input validation rules. Format:
+                               {input_name: {"required": bool, "dtype": list, "ndim": list}}
+        doc (str): Tooltip/help text for the node. Falls back to function docstring if None.
+        icon (str): Visual icon (emoji or string) to display on the node.
     """
     if outputs is None:
         outputs = ["out"]
@@ -27,6 +52,11 @@ def register_node(label, category, outputs=None, params_config=None):
             "category": category,
             "outputs": outputs,
             "params_config": params_config,
+            "interactive": interactive,
+            "output_meta": output_meta,
+            "validate_inputs": validate_inputs,
+            "doc": doc,
+            "icon": icon,
             # We will store the import path later during generation
         }
         

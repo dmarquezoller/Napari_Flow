@@ -134,6 +134,45 @@ class ExecutionWorker(QObject):
              raise ValueError(f"Unknown node type: {node.node_type}")
         def_data = library_def[node.node_type]
         
+        # --- NEW: Input Validation ---
+        validate_rules = def_data.get("validate_inputs", {})
+        if validate_rules:
+            for input_name, rules in validate_rules.items():
+                data = func_inputs.get(input_name)
+                
+                # Check if required
+                if rules.get("required") and data is None:
+                    raise ValueError(f"❌ Validation failed for '{node.title}': input '{input_name}' is required but not connected")
+                
+                # Only validate further if data exists
+                if data is not None:
+                    # Check ndim
+                    if "ndim" in rules and hasattr(data, "ndim"):
+                        if data.ndim not in rules["ndim"]:
+                            raise ValueError(
+                                f"❌ Validation failed for '{node.title}': input '{input_name}' must be "
+                                f"{rules['ndim']}D (got {data.ndim}D)"
+                            )
+                    
+                    # Check dtype
+                    if "dtype" in rules and hasattr(data, "dtype"):
+                        # Convert dtype to string for comparison
+                        data_dtype_str = str(data.dtype)
+                        allowed_dtypes = [str(d) for d in rules["dtype"]]
+                        
+                        # Check if any allowed dtype matches
+                        dtype_match = False
+                        for allowed in allowed_dtypes:
+                            if allowed in data_dtype_str or data_dtype_str in allowed:
+                                dtype_match = True
+                                break
+                        
+                        if not dtype_match:
+                            raise ValueError(
+                                f"❌ Validation failed for '{node.title}': input '{input_name}' dtype must be "
+                                f"one of {rules['dtype']} (got {data.dtype})"
+                            )
+        
         if "executable" in def_data:
             func = def_data["executable"]
         else:
@@ -144,6 +183,14 @@ class ExecutionWorker(QObject):
 
         args = {**func_inputs, **func_params}
         result = func(**args)
+        
+        # --- NEW: Output Metadata Wrapping ---
+        output_meta = def_data.get("output_meta")
+        if output_meta:
+            # Check if the result is already an envelope (tuple with metadata)
+            if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict)):
+                # Wrap the result with metadata
+                result = (result, output_meta)
         
         # --- D. Format Results ---
         output_names = def_data.get("outputs", ["out"])

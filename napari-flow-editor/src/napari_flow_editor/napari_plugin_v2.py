@@ -246,8 +246,17 @@ class Node(QGraphicsRectItem):
 
         # E. Title Text
         painter.setPen(Qt.GlobalColor.white)
+        
+        # NEW: Prepend icon if available
+        title_text = self.title
+        if self.node_type in NODE_LIBRARY:
+            definition = NODE_LIBRARY[self.node_type]
+            icon = definition.get("icon")
+            if icon:
+                title_text = f"{icon} {self.title}"
+        
         text_rect = QRectF(rect.x(), rect.y(), rect.width()-15, 25)
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.title)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, title_text)
 
         # F. Status Light
         status_colors = {
@@ -579,6 +588,16 @@ class FlowEditor(QWidget):
         # Display the node Title and ID (useful for debugging connections)
         id_label = QLabel(f"<span style='color:#888; font-size:10px;'>ID: {node.uid[:8]}...</span>")
         self.props_layout.addRow(QLabel(f"<b>{node.title}</b>"), id_label)
+        
+        # NEW: Add documentation/help text if available
+        if node.node_type in NODE_LIBRARY:
+            definition = NODE_LIBRARY[node.node_type]
+            doc_text = definition.get("doc")
+            if doc_text:
+                doc_label = QLabel(doc_text)
+                doc_label.setWordWrap(True)
+                doc_label.setStyleSheet("color: #999; font-style: italic; font-size: 10px;")
+                self.props_layout.addRow(doc_label)
         
         # Spacer
         self.props_layout.addRow(QLabel("")) 
@@ -1009,24 +1028,56 @@ class FlowEditor(QWidget):
         Receives data from the worker and safely updates Napari.
         This runs on the MAIN THREAD.
         """
+        # NEW: Check if data is an envelope (data, metadata) tuple
+        metadata = {}
+        if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
+            actual_data = data[0]
+            metadata = data[1]
+        else:
+            actual_data = data
+        
         # CASE A: Result is a plot, not a layer
-        if isinstance(data, Figure):
-            self.show_plot_popup(node_title, data)
+        if isinstance(actual_data, Figure):
+            self.show_plot_popup(node_title, actual_data)
             return # Stop here, don't try to add it as a layer
         
         # CASE B: Result is a layer
-        if isinstance(data, np.ndarray):
-            layer_name = f"{node_title} ({output_name})"
+        if isinstance(actual_data, np.ndarray):
+            # Determine layer name
+            name_suffix = metadata.get("name_suffix", output_name)
+            layer_name = f"{node_title} ({name_suffix})"
+            
+            # Determine layer type from metadata or auto-detect
+            layer_type = metadata.get("layer_type")
+            if layer_type is None:
+                # Auto-detect based on dtype (existing behavior)
+                if actual_data.dtype == bool or np.issubdtype(actual_data.dtype, np.integer):
+                    layer_type = "labels"
+                else:
+                    layer_type = "image"
+            
+            # Build napari kwargs from metadata
+            napari_kwargs = {"name": layer_name}
+            if metadata.get("colormap"):
+                napari_kwargs["colormap"] = metadata["colormap"]
+            if metadata.get("opacity") is not None:
+                napari_kwargs["opacity"] = metadata["opacity"]
+            
             try:
                 # Update existing layer
-                self.viewer.layers[layer_name].data = data
+                self.viewer.layers[layer_name].data = actual_data
+                # Update metadata if provided
+                if metadata.get("colormap"):
+                    self.viewer.layers[layer_name].colormap = metadata["colormap"]
+                if metadata.get("opacity") is not None:
+                    self.viewer.layers[layer_name].opacity = metadata["opacity"]
                 self.viewer.layers[layer_name].refresh()
             except KeyError:
-                # Create new layer
-                if data.dtype == bool or np.issubdtype(data.dtype, np.integer):
-                    self.viewer.add_labels(data, name=layer_name)
+                # Create new layer based on type
+                if layer_type == "labels":
+                    self.viewer.add_labels(actual_data, **napari_kwargs)
                 else:
-                    self.viewer.add_image(data, name=layer_name)
+                    self.viewer.add_image(actual_data, **napari_kwargs)
         selected_items = self.scene.selectedItems()
         if selected_items:
             sel_node = selected_items[0]
@@ -1116,7 +1167,7 @@ class FlowEditor(QWidget):
                     # 3. Update the Global Library
                     # CRITICAL: We pass the 'executable' function object directly!
                     node_key = name
-                    NODE_LIBRARY[node_key] = {
+                    node_entry = {
                         "label": meta["label"],
                         "category": "Custom", # Force category or use meta['category']
                         "inputs": inputs,
@@ -1125,6 +1176,26 @@ class FlowEditor(QWidget):
                         "execution_path": "custom_loaded", 
                         "executable": func # <--- DIRECT REFERENCE
                     }
+                    
+                    # Add new metadata fields if they are not None
+                    if meta.get("interactive") is not None:
+                        node_entry["interactive"] = meta["interactive"]
+                    if meta.get("output_meta") is not None:
+                        node_entry["output_meta"] = meta["output_meta"]
+                    if meta.get("validate_inputs") is not None:
+                        node_entry["validate_inputs"] = meta["validate_inputs"]
+                    
+                    # Add doc field - fallback to function docstring if not specified
+                    doc_text = meta.get("doc")
+                    if doc_text is None and func.__doc__:
+                        doc_text = func.__doc__.strip()
+                    if doc_text:
+                        node_entry["doc"] = doc_text
+                    
+                    if meta.get("icon") is not None:
+                        node_entry["icon"] = meta["icon"]
+                    
+                    NODE_LIBRARY[node_key] = node_entry
                     count += 1
             
             if count > 0:

@@ -131,6 +131,175 @@ def my_blur(image_in, sigma: float = 1.0):
 3. **Cache:** If `Current_Signature == Last_Signature`, execution is skipped and cached results are used.
 4. **Thread:** The execution runs in a background `QThread` to keep the UI responsive, sending signals back to update the graph and Napari layers.
 
+## 🎨 Advanced Decorator API
+
+The `@register_node` decorator now supports advanced features for building sophisticated, interactive nodes with minimal boilerplate. These features are **100% optional** — all existing nodes work without changes.
+
+### 1. `doc` — Help Text & Tooltips
+
+Add documentation that appears in the properties panel when a node is selected.
+
+```python
+@register_node(
+    label="Gaussian Blur",
+    category="Filters",
+    outputs=["image_out"],
+    doc="Applies a Gaussian blur filter. Higher sigma = more blur. Works on 2D and 3D images."
+)
+def gaussian_blur(image, sigma: float = 1.0):
+    return skimage.filters.gaussian(image, sigma=sigma)
+```
+
+**Benefits:**
+- Users see helpful hints directly in the UI
+- Falls back to the function's docstring if `doc` is not specified
+
+### 2. `icon` — Visual Node Identity
+
+Add an emoji or character that displays next to the node title for easy visual identification.
+
+```python
+@register_node(
+    label="Gaussian Blur",
+    category="Filters",
+    outputs=["image_out"],
+    icon="🔬"
+)
+def gaussian_blur(image, sigma: float = 1.0):
+    return skimage.filters.gaussian(image, sigma=sigma)
+```
+
+**Benefits:**
+- Quickly distinguish node types at a glance
+- Makes complex pipelines easier to navigate
+
+### 3. `validate_inputs` — Declarative Input Validation
+
+Define validation rules that the engine checks **before** running your function.
+
+```python
+@register_node(
+    label="Gaussian Blur",
+    category="Filters",
+    outputs=["image_out"],
+    validate_inputs={
+        "image": {
+            "required": True,
+            "dtype": ["float32", "float64", "uint8", "uint16"],
+            "ndim": [2, 3]
+        }
+    }
+)
+def gaussian_blur(image, sigma: float = 1.0):
+    return skimage.filters.gaussian(image, sigma=sigma)
+```
+
+**Validation options:**
+- `required` (bool): Input must be connected
+- `dtype` (list): Allowed data types (e.g., `["float32", "uint8"]`)
+- `ndim` (list): Allowed dimensions (e.g., `[2, 3]` for 2D or 3D)
+
+**Benefits:**
+- Clear, descriptive error messages before execution
+- No need to write validation code in every node
+- Consistent error handling across all nodes
+
+### 4. `output_meta` — Declarative Output Metadata
+
+Specify how outputs should be displayed in Napari without manually constructing envelope tuples.
+
+```python
+@register_node(
+    label="Threshold Otsu",
+    category="Filters",
+    outputs=["mask"],
+    output_meta={
+        "layer_type": "labels",
+        "colormap": "viridis",
+        "opacity": 0.5,
+        "name_suffix": "Mask"
+    }
+)
+def threshold_otsu(image):
+    return image > skimage.filters.threshold_otsu(image)
+```
+
+**Metadata options:**
+- `layer_type`: `"image"` | `"labels"` | `"plot"`
+- `colormap`: Napari colormap name (e.g., `"viridis"`, `"cyan"`)
+- `opacity`: Layer opacity (0.0 to 1.0)
+- `name_suffix`: Custom output name (overrides default)
+
+**Benefits:**
+- The engine automatically wraps your result
+- No need to return `(data, metadata)` tuples manually
+- Consistent layer styling across pipelines
+
+### 5. `interactive` — Declarative Napari Interactivity (Planned)
+
+*Note: This feature shows the decorator syntax but requires additional UI thread coordination that will be implemented in a future update.*
+
+```python
+@register_node(
+    label="Interactive Crop",
+    category="ROI",
+    outputs=["cropped"],
+    interactive={
+        "layer_type": "shapes",
+        "tool": "rectangle",
+        "prompt": "Draw a rectangle to define the crop region",
+        "arg_name": "roi_geometry",
+        "confirm": True
+    }
+)
+def interactive_crop(image, roi_geometry=None):
+    if roi_geometry is None:
+        return image
+    # Crop using roi_geometry coordinates
+    # ...
+```
+
+**Interactive options:**
+- `layer_type`: `"shapes"` | `"points"` | `"labels"`
+- `tool`: Napari tool to activate (e.g., `"rectangle"`, `"polygon"`)
+- `prompt`: Instruction message for the user
+- `arg_name`: Parameter name to receive geometry data
+- `confirm`: Show OK/Cancel dialog (default `True`)
+
+**Benefits (when fully implemented):**
+- No manual layer creation or cleanup code
+- Consistent interactive workflows
+- Engine handles all UI coordination
+
+### Example: Combining Multiple Features
+
+```python
+@register_node(
+    label="Advanced Filter",
+    category="Custom",
+    outputs=["filtered"],
+    params_config={"strength": {"min": 0.0, "max": 10.0, "step": 0.1}},
+    validate_inputs={
+        "image": {
+            "required": True,
+            "dtype": ["float32", "uint8"],
+            "ndim": [2, 3]
+        }
+    },
+    output_meta={
+        "layer_type": "image",
+        "opacity": 0.8,
+        "colormap": "gray"
+    },
+    doc="Applies an advanced filter with strength control. Requires 2D or 3D float32/uint8 images.",
+    icon="⚡"
+)
+def advanced_filter(image, strength: float = 1.0):
+    return your_filter_function(image, strength)
+```
+
+See `flow_nodes/examples_advanced.py` for complete working examples.
+
 ## 📄 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
