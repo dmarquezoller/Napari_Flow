@@ -110,18 +110,24 @@ def test_loop_cache_clearing():
     
     # Track when cache is cleared
     cache_states = []
+    iteration_count = [0]  # Use list to allow modification in nested function
     
     def mock_execute(node, library):
         # Record cache state before execution
         cache_states.append({
-            "iteration": len([msg for msg in log_messages if "Loop Iteration" in msg]),
+            "iteration": iteration_count[0],
             "last_signature": node.last_signature,
             "has_cached_results": len(node.cached_results) > 0
         })
         return {}
     
     log_messages = []
-    worker.log_signal.connect(lambda msg: log_messages.append(msg))
+    def track_iteration(msg):
+        log_messages.append(msg)
+        if "Loop Iteration" in msg:
+            iteration_count[0] += 1
+    
+    worker.log_signal.connect(track_iteration)
     worker.execute_node_logic = mock_execute
     
     # Run
@@ -215,8 +221,7 @@ def test_mixed_loop_and_non_loop_nodes():
     # Run
     worker.run()
     
-    # After iteration 1, both should have signatures
-    # After iteration 2, node2's cache should have been cleared
+    # Verify: node2's cache should have been cleared between iterations
     # node1 should keep its signature (not in loop)
-    print(f"Node1 signatures: {node1_signatures}")
-    print(f"Node2 signatures: {node2_signatures}")
+    assert len(node1_signatures) > 0, "Node1 should have been processed"
+    assert len(node2_signatures) > 0, "Node2 should have been processed"
