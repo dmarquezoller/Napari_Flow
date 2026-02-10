@@ -107,8 +107,10 @@ def interactive_seed_points(image_input, point_size=10):
         # Unbind the Enter key
         try:
             viewer.bind_key('Enter', None)
-        except:
-            pass
+        except (KeyError, AttributeError) as e:
+            # KeyError: Key binding doesn't exist
+            # AttributeError: viewer or bind_key method not available
+            print(f"Warning: Could not unbind Enter key: {e}")
         
         # Remove the layer
         viewer.layers.remove(LAYER_NAME)
