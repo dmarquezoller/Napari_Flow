@@ -141,13 +141,14 @@ class ExecutionWorker(QObject):
                 raise ValueError(f"Required input '{input_name}' is missing")
             
             if value is not None:
-                # Check dtype
+                # Check dtype - use exact matching with normalized dtype strings
                 if "dtype" in rules:
                     allowed_dtypes = rules["dtype"]
                     if hasattr(value, "dtype"):
-                        dtype_str = str(value.dtype)
-                        # Check if any allowed dtype matches
-                        if not any(dt in dtype_str for dt in allowed_dtypes):
+                        # Normalize dtype to string (e.g., "float32", "uint8")
+                        actual_dtype = str(value.dtype)
+                        # Check if the actual dtype matches any allowed dtype
+                        if not any(actual_dtype == dt or actual_dtype.startswith(dt) for dt in allowed_dtypes):
                             raise ValueError(
                                 f"Input '{input_name}' has dtype {value.dtype}, "
                                 f"expected one of {allowed_dtypes}"
@@ -248,6 +249,9 @@ class ExecutionWorker(QObject):
             self.validate_node_inputs(func_inputs, def_data["validate_inputs"])
         
         # --- E. Interactive Mode ---
+        # NOTE: Interactive mode is partially implemented. The signal is emitted to the UI,
+        # but full synchronization (blocking execution until user input) requires QEventLoop
+        # or QWaitCondition. For now, this serves as the integration point for UI handlers.
         if "interactive" in def_data:
             interactive_config = def_data["interactive"]
             arg_name = interactive_config.get("arg_name", "roi_geometry")
@@ -255,13 +259,11 @@ class ExecutionWorker(QObject):
             # Check if we already have a response for this node
             if node.uid not in self.interactive_responses:
                 self.log_signal.emit(f"⏸️  Waiting for interactive input: {interactive_config.get('prompt', 'Draw on image')}")
-                # Emit signal to UI and wait for response
+                # Emit signal to UI for interactive layer creation
                 self.interactive_request_signal.emit(node.uid, interactive_config)
-                # In a real implementation, we'd need to wait here
-                # For now, we'll check if response is available
-                # This is a simplified version - full implementation would use QEventLoop
+                # TODO: Implement proper waiting mechanism with QEventLoop for production use
             
-            # Inject geometry into function inputs
+            # Inject geometry into function inputs if available
             if node.uid in self.interactive_responses:
                 func_inputs[arg_name] = self.interactive_responses[node.uid]
 

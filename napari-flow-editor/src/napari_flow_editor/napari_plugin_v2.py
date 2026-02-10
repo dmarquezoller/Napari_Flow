@@ -1231,11 +1231,19 @@ class FlowEditor(QWidget):
             elif layer_type == "points":
                 self.viewer.add_points(name=temp_layer_name)
             elif layer_type == "labels":
-                # For labels, we need an image to paint on
-                if len(self.viewer.layers) > 0:
-                    ref_layer = self.viewer.layers[0]
+                # For labels, we need an image to paint on - use first image layer
+                ref_layer = None
+                for layer in self.viewer.layers:
+                    if hasattr(layer, 'data') and hasattr(layer.data, 'shape'):
+                        ref_layer = layer
+                        break
+                
+                if ref_layer is not None:
                     empty_labels = np.zeros(ref_layer.data.shape, dtype=np.uint8)
                     self.viewer.add_labels(empty_labels, name=temp_layer_name)
+                else:
+                    self.append_log("⚠️ No image layer found for labels painting")
+                    return
             
             # Show dialog and wait for user
             result = msg.exec_()

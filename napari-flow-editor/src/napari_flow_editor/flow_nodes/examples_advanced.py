@@ -38,9 +38,18 @@ def interactive_crop(image_in, roi_geometry=None):
         return image_in
     
     # Extract bounding box from first rectangle
+    # Shapes layer returns rectangles as 4 corner points
     rect = roi_geometry[0]
+    if len(rect) < 3:
+        # Invalid rectangle, return original
+        return image_in
+    
     y_min, x_min = int(rect[0][0]), int(rect[0][1])
     y_max, x_max = int(rect[2][0]), int(rect[2][1])
+    
+    # Ensure bounds are valid
+    y_min, y_max = min(y_min, y_max), max(y_min, y_max)
+    x_min, x_max = min(x_min, x_max), max(x_min, x_max)
     
     # Crop the image
     cropped = image_in[y_min:y_max, x_min:x_max]
