@@ -118,6 +118,31 @@ class ExecutionWorker(QObject):
             return hashlib.md5(combined.encode('utf-8')).hexdigest()
         except:
             return "dirty"
+        
+
+    def resolve_input_node(self, node, func_params):
+        if node.node_type != "get_layer":
+            return None
+
+        target_name = func_params.get("layer_name")
+        if target_name not in self.viewer.layers:
+            raise ValueError(f"Layer '{target_name}' not found.")
+
+        layer = self.viewer.layers[target_name]
+
+        # Copy metadata
+        layer_meta = layer.metadata.copy() if hasattr(layer, "metadata") else {}
+
+        # Axis map -> axes string
+        axis_map = func_params.get("axis_map", [])
+        if axis_map:
+            row = axis_map[0]
+            axes = [row.get(f"d{i}") for i in range(5) if row.get(f"d{i}", "-") != "-"]
+            layer_meta["axes"] = "".join(axes)
+
+        layer_meta["source_layer"] = target_name
+
+        return {"data_out": (layer.data, layer_meta)}
 
     def execute_node_logic(self, node, library_def):
         self.log_signal.emit(f"Executing: {node.title}...")
@@ -153,29 +178,10 @@ class ExecutionWorker(QObject):
         
         # --- SPECIAL CASE: GET LAYER (RESTORED EXACTLY AS WAS) ---
         # This accesses self.viewer directly, just like your old code.
-        if hasattr(node, 'node_type') and node.node_type == "get_layer":
-            target_name = func_params.get("layer_name")
-            if target_name in self.viewer.layers:
-                layer = self.viewer.layers[target_name]
-                
-                # Copy metadata
-                layer_meta = layer.metadata.copy() if hasattr(layer, 'metadata') else {}
-                
-                # Axis Map Logic
-                axis_map = func_params.get("axis_map", [])
-                if axis_map:
-                    row = axis_map[0]
-                    axes = [row.get(f"d{i}") for i in range(5) if row.get(f"d{i}", "-") != "-"]
-                    layer_meta["axes"] = "".join(axes) # Ensure string
 
-                layer_meta["source_layer"] = target_name
-                
-                # Return the Envelope
-                return {"data_out": (layer.data, layer_meta)}
-            else:
-                 # If layer missing, we can try waiting or fail gracefully
-                 raise ValueError(f"Layer '{target_name}' not found.")
-
+        input_result = self.resolve_input_node(node, func_params)
+        if input_result is not None:
+            return input_result
         # --- C. Import & Run Normal Nodes ---
         def_data = library_def.get(node.node_type, {})
         
