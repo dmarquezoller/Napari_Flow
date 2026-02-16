@@ -107,9 +107,10 @@ crop_worker = CropGUIWorker()
     outputs=["cropped_image"],
     params_config={
         "t_crop": {"type": "text", "label": "Time/Z Slice", "value": ":"}
-    }
+    },
+    interactive=crop_worker
 )
-def interactive_crop(image_input, t_crop=":"):
+def interactive_crop(image_input, t_crop=":", interaction=None):
     # --- 1. UNPACK ---
     image = image_input
     meta = {}
@@ -122,16 +123,7 @@ def interactive_crop(image_input, t_crop=":"):
     if image is None: return None
 
     # --- 2. INTERACTION (Wait for Draw) ---
-    LAYER_NAME = "---- DRAW CROP (Waiting...) ----"
-    print(f">> Please draw a rectangle in the '{LAYER_NAME}' layer.")
-    
-    # Pause and Wait
-    drawing_event = crop_worker.setup_interaction(LAYER_NAME)
-    drawing_event.wait() 
-    
-    # Get Shapes
-    shapes_data = crop_worker.finish_interaction(LAYER_NAME)
-    if not shapes_data: raise ValueError("No ROI data received.")
+    shapes_data = interaction
 
     # --- 3. YOUR TEMPLATE LOGIC STARTS HERE ---
     

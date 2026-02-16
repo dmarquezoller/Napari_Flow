@@ -1524,6 +1524,10 @@
         "default": ":",
         "label": "Time/Z Slice",
         "value": ":"
+      },
+      "interaction": {
+        "type": "string",
+        "default": null
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.interactive_crop"
