@@ -3,7 +3,7 @@ import dask.array as da
 import numpy as np
 from typing import Callable, Optional
 
-def register_node(label, category, outputs=None, params_config=None):
+def register_node(label, category, outputs=None, params_config=None, interactive=None):
     """
     Decorator to mark a function as a Flow Node.
     """
@@ -19,10 +19,25 @@ def register_node(label, category, outputs=None, params_config=None):
             "category": category,
             "outputs": outputs,
             "params_config": params_config,
+            "interactive": bool(interactive),
         }
-        
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            if interactive:
+                layer_name = getattr(interactive, "layer_name", "---- DRAW CROP (Waiting...) ----")
+                if hasattr(interactive, "setup_interaction"):
+                    print(f">> Please draw a rectangle in the '{layer_name}' layer.")
+                    drawing_event = interactive.setup_interaction(layer_name)
+                    drawing_event.wait()
+                    shapes_data = interactive.finish_interaction(layer_name)
+                else:
+                    shapes_data = interactive.setup(*args, **kwargs)
+                    if hasattr(interactive, "finish"):
+                        shapes_data = interactive.finish(shapes_data)
+
+                kwargs["interaction"] = shapes_data
+
             return func(*args, **kwargs)
         return wrapper
     return decorator
@@ -33,7 +48,7 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
     def decorator(node_func):
         @functools.wraps(node_func)
         def wrapper(*args, **kwargs):
-            
+
             # --- CONTEXT ---
             context = {
                 "meta": {},
@@ -51,7 +66,7 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
                 raw = item
                 # A. OME-Zarr Layer List
                 if isinstance(item, list) and len(item) > 0 and isinstance(item[0], tuple):
-                    target = item[0]
+                    target = item[0];
                     # Find 'image' if possible, else take first
                     for layer in item:
                         if len(layer) >= 3 and layer[2] == 'image': target = layer; break
@@ -60,7 +75,7 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
                         context["meta"] = target[1].copy() if len(target) > 1 else {}
                         context["type"] = target[2] if len(target) > 2 else "image"
                         context["has_wrapper"] = True
-                
+
                 # B. Napari Layer Tuple
                 elif isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], dict):
                     raw = item[0]
@@ -73,7 +88,7 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
                     first = raw[0]
                     if isinstance(first, (da.Array, np.ndarray)) or hasattr(first, 'shape'):
                         context["is_pyramid"] = True
-                        return raw 
+                        return raw
 
                 return raw
 
@@ -97,7 +112,7 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
                 elif kwargs_in:
                     for v in kwargs_in.values():
                         if isinstance(v, (da.Array, np.ndarray)): check_obj = v; break
-                
+
                 is_dask = isinstance(check_obj, da.Array)
                 if is_dask and dask_func: return dask_func(*args_in, **kwargs_in)
                 else: return node_func(*args_in, **kwargs_in)
@@ -123,15 +138,15 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
 
             # --- 4. RE-WRAP & SANITIZE ---
             if context["has_wrapper"] and result is not None:
-                
+
                 # Check data type (Handle Pyramids too)
                 check_res = result[0] if isinstance(result, list) else result
-                
+
                 # --- AUTO-CORRECT TYPE ---
                 if hasattr(check_res, 'dtype') and check_res.dtype.kind == 'f':
                     # It's a Float -> Must be an Image
                     context["type"] = 'image'
-                    
+
                     # --- SANITIZE METADATA ---
                     # Only keep Geometry. Discard "Labels" metadata (color_dict, etc)
                     safe_keys = {'scale', 'translate', 'rotate', 'shear', 'affine', 'opacity', 'blending', 'visible', 'metadata', 'name'}
@@ -147,12 +162,12 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
                         c_min, c_max = float(computed_chunk.min()), float(computed_chunk.max())
                     else:
                         c_min, c_max = float(sample.min()), float(sample.max())
-                    
+
                     # 2. Avoid flat contrast (0,0)
                     if c_max == c_min: c_max += 0.0001
-                        
+
                     context["meta"]["contrast_limits"] = [c_min, c_max]
-                
+
                 except Exception:
                     # Fallback: Let Napari guess
                     context["meta"].pop("contrast_limits", None)
@@ -161,7 +176,7 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
                 old_name = context["meta"].get("name", "Layer")
                 if "(Processed)" not in old_name:
                     context["meta"]["name"] = f"{old_name} (Processed)"
-                
+
 
                 return (result, context["meta"], context["type"])
 
