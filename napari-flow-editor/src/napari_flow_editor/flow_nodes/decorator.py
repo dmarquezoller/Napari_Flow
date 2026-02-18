@@ -184,3 +184,56 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
 
         return wrapper
     return decorator
+
+
+def dispatch(
+    *,
+    default: Callable,
+    args: tuple = (),
+    kwargs: Optional[dict] = None,
+    dask_func: Optional[Callable] = None,
+    cuda_func: Optional[Callable] = None,
+):
+    """
+    Dispatch execution based on:
+      - data type (Dask array vs in-memory)
+      - CUDA availability (only used for in-memory arrays for now)
+
+    Priority:
+      1) If input is Dask -> use dask_func (if provided), else safe fallback map_blocks(default)
+      2) Else (in-memory) -> if cuda_func provided and CUDA available -> run cuda_func
+      3) Else -> run default
+    """
+    if kwargs is None:
+        kwargs = {}
+
+    if not args:
+        # Nothing to dispatch on; just run default
+        return default(**kwargs)
+
+    x0 = args[0]
+
+    # 1) Dask path (we do NOT do CUDA-for-dask yet)
+    if isinstance(x0, da.Array):
+        if dask_func is not None:
+            return dask_func(*args, **kwargs)
+
+        # Fallback: map per block (no overlap -> may cause border artifacts for some ops)
+        return x0.map_blocks(lambda b: default(b, *args[1:], **kwargs), dtype=x0.dtype)
+
+    # 2) CUDA path for in-memory arrays
+    if cuda_func is not None:
+        try:
+            import cupy as cp  # type: ignore
+
+            # Convert input to cupy, run, convert result back to numpy
+            x_gpu = x0 if isinstance(x0, cp.ndarray) else cp.asarray(x0)
+            res_gpu = cuda_func(x_gpu, *args[1:], **kwargs)
+            return res_gpu if isinstance(res_gpu, np.ndarray) else cp.asnumpy(res_gpu)
+
+        except Exception:
+            # Any failure -> fallback to CPU default
+            pass
+
+    # 3) CPU default
+    return default(*args, **kwargs)

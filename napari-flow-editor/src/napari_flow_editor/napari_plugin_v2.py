@@ -1089,6 +1089,7 @@ class FlowEditor(QWidget):
 
     def handle_execution_result(self, node_title, output_name, data):
         # 1. Update Cache
+
         node_obj = next((item for item in self.scene.items() 
                         if isinstance(item, Node) and item.title == node_title), None)
         if node_obj:
@@ -1101,6 +1102,7 @@ class FlowEditor(QWidget):
         if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
             display_data = data[0]
             display_meta = data[1]
+
 
         # --- B. PLOT DASHBOARD HANDLER ---
         # If it is a plot, SHOW the dashboard
@@ -1120,65 +1122,109 @@ class FlowEditor(QWidget):
         if isinstance(display_data, (pd.DataFrame, dict, str)):
             return
 
-        # --- D. STRIPPER (Tuples) ---
-        if isinstance(display_data, (tuple, list)):
-            if len(display_data) > 0:
-                first_item = display_data[0]
-                if hasattr(first_item, "shape"): display_data = first_item
-
         # --- D. DISPLAY HELPER ---
         def add_layer_to_viewer(layer_data, raw_meta):
             # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
-            
+
             # 2. Filter Metadata
-            valid_napari_args = {"name", "opacity", "blending", "visible", "multiscale", "colormap", "contrast_limits", "gamma", "rgb"}
+            valid_napari_args = {
+                "name", "opacity", "blending", "visible", "multiscale",
+                "colormap", "contrast_limits", "gamma", "rgb"
+            }
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
 
             for k, v in raw_meta.items():
-                if k in valid_napari_args: napari_kwargs[k] = v
-                else: custom_metadata[k] = v
-            
+                if k in valid_napari_args:
+                    napari_kwargs[k] = v
+                else:
+                    custom_metadata[k] = v
+
             napari_kwargs["metadata"] = custom_metadata
 
             # 3. Create/Update Layer
             try:
-                # SAFETY CHECK: If it's still not an array (no shape), stop.
+                # Allow multiscale pyramids: list of arrays
                 if not hasattr(layer_data, "shape"):
-                    return
+                    if not (isinstance(layer_data, list) and len(layer_data) > 0):
+                        print("⚠️ Not displayable layer_data:", type(layer_data))
+                        return
+                    napari_kwargs["multiscale"] = True
 
+                # If already exists, update
                 if layer_name in self.viewer.layers:
                     layer = self.viewer.layers[layer_name]
-                    
-                    # If shape changed (e.g. plot resized), we must recreate the layer
-                    if layer.data.shape != layer_data.shape:
+
+                    # If shape changed, recreate
+                    if hasattr(layer_data, "shape") and layer.data.shape != layer_data.shape:
                         self.viewer.layers.remove(layer_name)
-                        # Fall through to 'else' to create new
                     else:
                         layer.data = layer_data
                         layer.metadata.update(custom_metadata)
                         return
 
-                # Create New Layer
-                if layer_name not in self.viewer.layers:
-                    # Heuristic: Labels vs Image
-                    is_labels = False  
-                    if raw_meta.get("layer_type") == "labels":
-                        is_labels = True
-                    elif hasattr(layer_data, "dtype") and layer_data.dtype == bool:
-                        is_labels = True
-                    
-                    if is_labels:
-                        self.viewer.add_labels(layer_data, **napari_kwargs)
-                    else:
-                        self.viewer.add_image(layer_data, **napari_kwargs)
+                # Create new
+                if isinstance(layer_data, list):
+                    bad = [type(x) for x in layer_data if not (hasattr(x, "shape") and hasattr(x, "dtype") and hasattr(x, "ndim"))]
+                    if bad:
+                        raise TypeError(f"Multiscale list contains non-array-like items: {bad}")
+                    napari_kwargs["multiscale"] = True
+
+                layer_type = raw_meta.get("layer_type", None)
+
+                print("🟢 ADDING:", layer_name, "layer_type=", layer_type,
+                      "data_type=", type(layer_data), "multiscale=", napari_kwargs.get("multiscale"))
+
+                if layer_type == "labels":
+                    self.viewer.add_labels(layer_data, **napari_kwargs)
+                else:
+                    self.viewer.add_image(layer_data, **napari_kwargs)
 
             except Exception as e:
-                print(f"❌ Error displaying layer '{layer_name}': {e}")
+                import traceback
+                print(f"❌ Error displaying layer '{layer_name}': {repr(e)}")
+                traceback.print_exc()
 
-        # Execute Display
+        # --- E. HANDLE NAPARI READER OUTPUTS (LayerDataTuple) ---
+        def is_layer_data_tuple(x):
+            return (
+                isinstance(x, tuple)
+                and len(x) == 3
+                and isinstance(x[1], dict)
+                and isinstance(x[2], str)
+            )
+
+        def merge_meta(base, extra):
+            m = dict(base) if isinstance(base, dict) else {}
+            if isinstance(extra, dict):
+                m.update(extra)
+            return m
+
+        # Guard: if a node still returns (layers, plugin_impl), keep only layers
+        if isinstance(display_data, tuple) and len(display_data) == 2 and isinstance(display_data[0], list):
+            display_data = display_data[0]
+
+        # Case 1: list of LayerDataTuples -> add all layers and stop
+        if isinstance(display_data, list) and len(display_data) and isinstance(display_data[0], tuple) and len(display_data[0]) == 3:
+            for data, meta, layer_type in display_data:
+                meta = dict(meta)
+                meta["layer_type"] = layer_type
+                add_layer_to_viewer(data, meta)
+            return
+        # Case 2: single LayerDataTuple -> add it and stop
+        if is_layer_data_tuple(display_data):
+            ld, lm, lt = display_data
+            lm2 = merge_meta(display_meta, lm)
+            lm2.setdefault("layer_type", lt)
+            add_layer_to_viewer(ld, lm2)
+            return
+
+        # Default: treat as a normal (array, meta) output
         add_layer_to_viewer(display_data, display_meta)
+
+
+
 
 
     def append_log(self, text):

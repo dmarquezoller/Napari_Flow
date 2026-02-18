@@ -7,6 +7,7 @@ import napari
 from ome_zarr.reader import Reader
 from ome_zarr.io import parse_url
 from napari.plugins.io import read_data_with_plugins
+import os
 
 @register_node(
     label="Get Layer",
@@ -36,16 +37,7 @@ def get_layer(layer_name: str = "", axis_map: list = [{"d0": "Y", "d1": "X", "d2
     return layer_name
 
 
-# flow_nodes/inputs.py
-from .decorator import register_node
-import os
-# Import the internal Napari reader function
-from napari.plugins.io import read_data_with_plugins
 
-# flow_nodes/inputs.py
-from .decorator import register_node
-import os
-from napari.plugins.io import read_data_with_plugins
 
 @register_node(
     label="Open Ome-Zarr",
@@ -56,29 +48,34 @@ from napari.plugins.io import read_data_with_plugins
     }
 )
 def open_ome_zarr(path: str = ""):
-    """
-    Uses the official napari-ome-zarr plugin logic to read the file.
-    Returns a LIST of LayerDataTuples: [(data, meta, layer_type), ...]
-    """
+    import os
     if not path or not os.path.exists(path):
-        return None
+        raise ValueError("Path does not exist")
 
-    print(f"🔌 Invoking native napari-ome-zarr plugin for: {path}")
-
-    # 1. READ: We use the internal function that 'viewer.open()' uses.
-    # CRITICAL: We pass [path] as a list, otherwise it crashes.
+    # 1) Ask napari-ome-zarr for a reader that matches this path
     try:
-        layers = read_data_with_plugins([path], plugin="napari-ome-zarr")
+        from napari_ome_zarr import napari_get_reader
     except Exception as e:
-        print(f"Plugin Read Error: {e}")
-        return None
+        raise RuntimeError(
+            "napari-ome-zarr is not installed in this environment."
+        ) from e
+
+    reader = napari_get_reader(path)
+    if reader is None:
+        raise ValueError("napari-ome-zarr did not return a reader for this path.")
+
+    # 2) Call the reader: this is the plugin’s real output contract
+    layers = reader(path)
 
     if not layers:
-        raise ValueError("The plugin could not read this file.")
+        raise ValueError("Reader returned no layers")
 
-    # 2. RETURN: We pass the exact list of layers (images, labels, etc.) 
-    # to the Main Thread.
+    # At this point, layers should be a list of (data, meta, layer_type)
+    # Return exactly that; your UI can iterate and add each.
     return layers
+
+
+
 
 # LOAD CSV NODE #
 

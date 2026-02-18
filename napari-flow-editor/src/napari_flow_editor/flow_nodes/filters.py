@@ -1,4 +1,4 @@
-from .decorator import register_node, smart_compute
+from .decorator import register_node, dispatch, smart_compute
 import skimage.filters
 import numpy as np
 
@@ -198,6 +198,7 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
 # --- GAUSSIAN BLUR ---
 def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
     depth = int(sigma * 4) + 1
+    print("DASK IN USE")
     return image.map_overlap(
         skimage.filters.gaussian,
         depth=depth,
@@ -218,10 +219,15 @@ def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
     }
 )
 # You connect the backends here 👇
-@smart_compute(dask_func=dask_gaussian_blur) 
 def gaussian_blur(image, sigma: float = 1.0, mode: str = 'nearest'):
-    """Standard Numpy Implementation"""
-    return skimage.filters.gaussian(image, sigma=sigma, mode=mode)
+    """Gaussian blur with backend dispatch (CPU / Dask / GPU)."""
+    return dispatch(
+        default=skimage.filters.gaussian,
+        dask_func=dask_gaussian_blur,
+        cuda_func=None,  # plug in a CUDA version later (e.g. cucim/cupy)
+        args=(image,),
+        kwargs={"sigma": sigma, "mode": mode},
+    )
 
 
 

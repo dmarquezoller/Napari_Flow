@@ -103,7 +103,7 @@ class ExecutionWorker(QObject):
 
     def calculate_signature(self, node):
         try:
-            param_str = json.dumps(node.params, sort_keys=True, default=str)
+            param_str = json.dumps(getattr(node, "parameters", {}), sort_keys=True, default=str)
             input_sigs = []
             for socket in node.inputs:
                 if socket.connected_edges:
@@ -208,6 +208,7 @@ class ExecutionWorker(QObject):
         # RUN
         args = {**func_inputs, **clean_params}
         result = func(**args)
+
         
         # --- D. Format Results ---
         # Check library def first, then fallback to node sockets
@@ -217,15 +218,44 @@ class ExecutionWorker(QObject):
 
         node_outputs = {}
 
+
+        def is_layer_data_tuple(x):
+            # (data, meta, layer_type)
+            return (
+                isinstance(x, tuple)
+                and len(x) == 3
+                and isinstance(x[1], dict)
+                and isinstance(x[2], str)
+            )
+
+        def normalize_layer_data_tuple(ldt):
+            """Merge engine-collected metadata into napari LayerDataTuple meta."""
+            data, meta, layer_type = ldt
+            merged = {}
+            merged.update(current_metadata)
+            merged.update(meta or {})
+            return (data, merged, layer_type)
+
         def wrap_result(res):
+            # 1) If node returned a single LayerDataTuple: keep it as LayerDataTuple
+            if is_layer_data_tuple(res):
+                return normalize_layer_data_tuple(res)
+
+            # 2) If node returned multiple layers: keep list of LayerDataTuples
+            if isinstance(res, list) and len(res) > 0 and is_layer_data_tuple(res[0]):
+                return [normalize_layer_data_tuple(x) for x in res]
+
+            # 3) Your (data, meta) envelope: merge meta
             if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
                 merged = current_metadata.copy()
                 merged.update(res[1])
                 return (res[0], merged)
+
+            # 4) Default: wrap as (data, meta)
             return (res, current_metadata)
 
-        if isinstance(result, tuple) and len(output_names) > 1:
-             for i, name in enumerate(output_names):
+        if isinstance(result, tuple) and len(output_names) > 1 and not is_layer_data_tuple(result):
+            for i, name in enumerate(output_names):
                 if i < len(result): node_outputs[name] = wrap_result(result[i])
         elif isinstance(result, dict):
              for k, v in result.items():
