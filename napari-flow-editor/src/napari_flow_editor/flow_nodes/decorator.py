@@ -187,53 +187,167 @@ def smart_compute(dask_func: Optional[Callable] = None, cuda_func: Optional[Call
 
 
 def dispatch(
-    *,
     default: Callable,
-    args: tuple = (),
-    kwargs: Optional[dict] = None,
     dask_func: Optional[Callable] = None,
     cuda_func: Optional[Callable] = None,
+    args=(),
+    kwargs=None,
+    pyramid_strategy: str = "per_level",  # "per_level" | "from_level0"
 ):
     """
-    Dispatch execution based on:
-      - data type (Dask array vs in-memory)
-      - CUDA availability (only used for in-memory arrays for now)
+    Choose backend (cuda > dask > default) and handle pyramids.
 
-    Priority:
-      1) If input is Dask -> use dask_func (if provided), else safe fallback map_blocks(default)
-      2) Else (in-memory) -> if cuda_func provided and CUDA available -> run cuda_func
-      3) Else -> run default
+    - If any input is a pyramid (list of arrays), we support:
+        * per_level: run the operation independently on each level
+        * from_level0: compute only on level0, downsample to other levels
+
+    This expects image-like arrays (numpy/dask). If you pass napari LayerDataTuples
+    or (data, meta) wrappers, it will unwrap them.
     """
+    import numpy as np
+    import dask.array as da
+
     if kwargs is None:
         kwargs = {}
 
-    if not args:
-        # Nothing to dispatch on; just run default
-        return default(**kwargs)
+    # ---------- Unwrap helpers ----------
+    def unwrap(x):
+        # list of LayerDataTuples -> pick first image layer
+        if isinstance(x, list) and len(x) > 0 and isinstance(x[0], tuple):
+            target = x[0]
+            for layer in x:
+                if len(layer) >= 3 and str(layer[2]) == "image":
+                    target = layer
+                    break
+            return target[0]
+        # (data, meta) envelope
+        if isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], dict):
+            return x[0]
+        return x
 
-    x0 = args[0]
+    uargs = [unwrap(a) for a in args]
+    ukwargs = {k: unwrap(v) for k, v in kwargs.items()}
 
-    # 1) Dask path (we do NOT do CUDA-for-dask yet)
-    if isinstance(x0, da.Array):
-        if dask_func is not None:
-            return dask_func(*args, **kwargs)
+    # ---------- Find pyramid location ----------
+    pyramid_loc = None  # ("arg", idx) or ("kwarg", key)
+    for i, a in enumerate(uargs):
+        if isinstance(a, list) and len(a) > 0:
+            pyramid_loc = ("arg", i)
+            break
+    if pyramid_loc is None:
+        for k, v in ukwargs.items():
+            if isinstance(v, list) and len(v) > 0:
+                pyramid_loc = ("kwarg", k)
+                break
 
-        # Fallback: map per block (no overlap -> may cause border artifacts for some ops)
-        return x0.map_blocks(lambda b: default(b, *args[1:], **kwargs), dtype=x0.dtype)
+    # ---------- Backend selection ----------
+    def pick_backend(sample):
+        # CUDA placeholder (optional later)
+        if cuda_func is not None:
+            try:
+                import cupy as cp  # type: ignore
+                if isinstance(sample, cp.ndarray):
+                    return cuda_func
+            except Exception:
+                pass
 
-    # 2) CUDA path for in-memory arrays
-    if cuda_func is not None:
-        try:
-            import cupy as cp  # type: ignore
+        if dask_func is not None and isinstance(sample, da.Array):
+            return dask_func
 
-            # Convert input to cupy, run, convert result back to numpy
-            x_gpu = x0 if isinstance(x0, cp.ndarray) else cp.asarray(x0)
-            res_gpu = cuda_func(x_gpu, *args[1:], **kwargs)
-            return res_gpu if isinstance(res_gpu, np.ndarray) else cp.asnumpy(res_gpu)
+        return default
 
-        except Exception:
-            # Any failure -> fallback to CPU default
-            pass
+    def execute_once(args_in, kwargs_in):
+        sample = None
+        # pick the first array-like argument we see
+        for v in list(args_in) + list(kwargs_in.values()):
+            if isinstance(v, (da.Array, np.ndarray)) or hasattr(v, "shape"):
+                sample = v
+                break
+        func = pick_backend(sample)
+        return func(*args_in, **kwargs_in)
 
-    # 3) CPU default
-    return default(*args, **kwargs)
+    # ---------- Downsample helper for from_level0 ----------
+    def downsample_to_shape(arr0, target_shape):
+        """
+        Downsample arr0 to match target_shape on the last two dims (Y,X).
+        Uses dask.coarsen(mean) when possible.
+        """
+        import numpy as np
+        import dask.array as da
+
+        if not (hasattr(arr0, "shape") and len(arr0.shape) >= 2):
+            raise ValueError("downsample_to_shape expects an array with >=2 dims")
+
+        y0, x0 = arr0.shape[-2], arr0.shape[-1]
+        yt, xt = target_shape[-2], target_shape[-1]
+
+        # if shapes already match
+        if y0 == yt and x0 == xt:
+            return arr0
+
+        # compute integer factors if possible
+        fy = int(y0 // yt) if yt else 1
+        fx = int(x0 // xt) if xt else 1
+        if fy < 1: fy = 1
+        if fx < 1: fx = 1
+
+        # Dask path (lazy)
+        if isinstance(arr0, da.Array):
+            factors = {arr0.ndim - 2: fy, arr0.ndim - 1: fx}
+            out = da.coarsen(np.mean, arr0, factors, trim_excess=True)
+            # If trim_excess gave slightly different shape, crop to exact target
+            slicer = [slice(None)] * out.ndim
+            slicer[-2] = slice(0, yt)
+            slicer[-1] = slice(0, xt)
+            return out[tuple(slicer)]
+
+        # Numpy fallback (eager) — keep simple
+        # (You’re mostly on dask for OME-Zarr, so this rarely runs.)
+        from skimage.transform import resize
+        out = resize(arr0, (*arr0.shape[:-2], yt, xt), preserve_range=True, anti_aliasing=True)
+        return out.astype(arr0.dtype, copy=False)
+
+    # ---------- Pyramid execution ----------
+    if pyramid_loc is None:
+        return execute_once(uargs, ukwargs)
+
+    loc_type, loc_key = pyramid_loc
+    pyramid = uargs[loc_key] if loc_type == "arg" else ukwargs[loc_key]
+    if not isinstance(pyramid, list) or len(pyramid) == 0:
+        return execute_once(uargs, ukwargs)
+
+    if pyramid_strategy not in ("per_level", "from_level0"):
+        raise ValueError(f"Unknown pyramid_strategy={pyramid_strategy!r}")
+
+    if pyramid_strategy == "per_level":
+        out_levels = []
+        for level in pyramid:
+            a2 = list(uargs)
+            k2 = dict(ukwargs)
+            if loc_type == "arg":
+                a2[loc_key] = level
+            else:
+                k2[loc_key] = level
+            out_levels.append(execute_once(a2, k2))
+        return out_levels
+
+    # pyramid_strategy == "from_level0"
+    # 1) compute on highest-res level only
+    level0 = pyramid[0]
+    a2 = list(uargs)
+    k2 = dict(ukwargs)
+    if loc_type == "arg":
+        a2[loc_key] = level0
+    else:
+        k2[loc_key] = level0
+
+    out0 = execute_once(a2, k2)
+
+    # 2) downsample out0 to each target level shape
+    out_levels = [out0]
+    for lvl in pyramid[1:]:
+        if not hasattr(lvl, "shape"):
+            raise ValueError(f"Pyramid level has no shape: {type(lvl)}")
+        out_levels.append(downsample_to_shape(out0, lvl.shape))
+
+    return out_levels

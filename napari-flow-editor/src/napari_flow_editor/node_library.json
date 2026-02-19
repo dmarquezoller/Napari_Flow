@@ -1468,6 +1468,32 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.open_ome_zarr"
   },
+  "select_layer": {
+    "label": "Select Layer",
+    "category": "Input",
+    "inputs": [
+      "layers"
+    ],
+    "outputs": [
+      "image_out"
+    ],
+    "parameters": {
+      "layer_name": {
+        "type": "text",
+        "default": "",
+        "label": "Layer name (exact preferred)"
+      },
+      "layer_type": {
+        "type": "enum",
+        "default": "image",
+        "options": [
+          "image",
+          "labels"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.select_layer"
+  },
   "blend_images": {
     "label": "Blend Images",
     "category": "Math",

@@ -176,7 +176,7 @@ def _ensure_dataframe(data):
             ],
             "value": [{"col": "area", "op": ">", "val": 100}]
         },
-        "frame_col": {"type": "text", "value": "frame"},
+        "frame_col": {"type": "text", "value": "Frame"},
         "id_col": {"type": "text", "value": "label"}
     }
 )

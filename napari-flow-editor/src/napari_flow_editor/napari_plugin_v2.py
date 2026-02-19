@@ -1088,6 +1088,18 @@ class FlowEditor(QWidget):
                 break
 
     def handle_execution_result(self, node_title, output_name, data):
+
+        # DEBUG
+
+        if node_title == "Gaussian Blur":
+            print(f"\n🟦 UI GOT GAUSS | output_name={output_name!r} type(data)={type(data)}")
+            if isinstance(data, tuple):
+                print("   tuple len:", len(data), "types:", [type(x) for x in data])
+                if len(data) == 2 and isinstance(data[1], dict):
+                    print("   meta name:", data[1].get("name"), "multiscale:", data[1].get("multiscale"))
+
+        ###
+
         # 1. Update Cache
 
         node_obj = next((item for item in self.scene.items() 
@@ -1126,11 +1138,16 @@ class FlowEditor(QWidget):
         def add_layer_to_viewer(layer_data, raw_meta):
             # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
+            #DEBUG
+            if node_title == "Gaussian Blur":
+                print("🟩 UI ADD GAUSS layer_name =", layer_name, "layer_type=", raw_meta.get("layer_type"))
+            ####
 
             # 2. Filter Metadata
             valid_napari_args = {
                 "name", "opacity", "blending", "visible", "multiscale",
-                "colormap", "contrast_limits", "gamma", "rgb"
+                "colormap", "contrast_limits", "gamma", "rgb",
+                "scale", "translate", "rotate", "shear", "affine",
             }
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
@@ -1145,27 +1162,48 @@ class FlowEditor(QWidget):
 
             # 3. Create/Update Layer
             try:
+                is_multiscale = isinstance(layer_data, list) and len(layer_data) > 0 and hasattr(layer_data[0], "shape")
+
                 # Allow multiscale pyramids: list of arrays
                 if not hasattr(layer_data, "shape"):
-                    if not (isinstance(layer_data, list) and len(layer_data) > 0):
+                    if not is_multiscale:
                         print("⚠️ Not displayable layer_data:", type(layer_data))
                         return
                     napari_kwargs["multiscale"] = True
 
-                # If already exists, update
+                # If already exists, try to update in-place
                 if layer_name in self.viewer.layers:
                     layer = self.viewer.layers[layer_name]
+                    need_recreate = False
 
-                    # If shape changed, recreate
-                    if hasattr(layer_data, "shape") and layer.data.shape != layer_data.shape:
-                        self.viewer.layers.remove(layer_name)
+                    if is_multiscale:
+                        # For multiscale: compare level0 shapes
+                        existing_data = layer.data
+                        existing_is_multi = isinstance(existing_data, list) and len(existing_data) > 0
+                        if existing_is_multi:
+                            if existing_data[0].shape != layer_data[0].shape:
+                                need_recreate = True
+                            else:
+                                layer.data = layer_data
+                                layer.metadata.update(custom_metadata)
+                                return
+                        else:
+                            # Existing is single array, new is multiscale → recreate
+                            need_recreate = True
                     else:
-                        layer.data = layer_data
-                        layer.metadata.update(custom_metadata)
-                        return
+                        # Single array path
+                        if hasattr(layer_data, "shape") and hasattr(layer.data, "shape") and layer.data.shape != layer_data.shape:
+                            need_recreate = True
+                        else:
+                            layer.data = layer_data
+                            layer.metadata.update(custom_metadata)
+                            return
+
+                    if need_recreate:
+                        self.viewer.layers.remove(layer_name)
 
                 # Create new
-                if isinstance(layer_data, list):
+                if is_multiscale:
                     bad = [type(x) for x in layer_data if not (hasattr(x, "shape") and hasattr(x, "dtype") and hasattr(x, "ndim"))]
                     if bad:
                         raise TypeError(f"Multiscale list contains non-array-like items: {bad}")

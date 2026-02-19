@@ -196,16 +196,22 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
 
 
 # --- GAUSSIAN BLUR ---
-def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
+def dask_gaussian_blur(image, sigma=1.0, mode='nearest', preserve_range=True):
     depth = int(sigma * 4) + 1
-    print("DASK IN USE")
+    # skimage.gaussian returns float64 regardless of input dtype,
+    # so we must declare dtype=np.float64 for map_overlap to avoid
+    # silent truncation (e.g. float→uint16 = all zeros = black image).
+    # preserve_range=True keeps the original value range (important for
+    # scientific imaging: a uint16 image with values 0-65535 stays in
+    # that range as float64, rather than being normalised to 0-1).
     return image.map_overlap(
         skimage.filters.gaussian,
         depth=depth,
         boundary=mode,
-        dtype=image.dtype,
+        dtype=np.float64,
         sigma=sigma,
-        mode=mode
+        mode=mode,
+        preserve_range=preserve_range,
     )
 
 # --- BACKEND 2: NUMPY (The Main Node) ---
@@ -218,16 +224,25 @@ def dask_gaussian_blur(image, sigma=1.0, mode='nearest'):
         "mode": {"options": ["nearest", "reflect", "wrap", "constant"]}
     }
 )
-# You connect the backends here 👇
-def gaussian_blur(image, sigma: float = 1.0, mode: str = 'nearest'):
-    """Gaussian blur with backend dispatch (CPU / Dask / GPU)."""
-    return dispatch(
+def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
+    out = dispatch(
         default=skimage.filters.gaussian,
         dask_func=dask_gaussian_blur,
-        cuda_func=None,  # plug in a CUDA version later (e.g. cucim/cupy)
+        cuda_func=None,
         args=(image,),
-        kwargs={"sigma": sigma, "mode": mode},
+        kwargs={"sigma": sigma, "mode": mode, "preserve_range": True},
+        # per_level: apply the blur independently to each pyramid level.
+        # This keeps every level as a lazy dask array backed by its own zarr
+        # resolution group, so napari can stream the right level on zoom.
+        # "from_level0" would chain all levels off the full-res computation,
+        # making the coarse levels impossibly expensive to render.
+        pyramid_strategy="per_level",
     )
+
+    # IMPORTANT: avoid overwriting the source layer
+    return (out)
+
+
 
 
 

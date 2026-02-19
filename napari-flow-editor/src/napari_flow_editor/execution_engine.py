@@ -159,7 +159,12 @@ class ExecutionWorker(QObject):
                 
                 if source_socket_name in source_node.cached_results:
                     data_package = source_node.cached_results[source_socket_name]
-                    
+                    print("🔎 INPUT from", source_node.title, "socket", source_socket_name, "->", type(data_package))
+                    if isinstance(data_package, list):
+                        print("   list len:", len(data_package), "first:", type(data_package[0]), "tuplelen:", len(data_package[0]) if isinstance(data_package[0], tuple) else None)
+                    elif isinstance(data_package, tuple):
+                        print("   tuple len:", len(data_package), "types:", [type(x) for x in data_package])
+
                     # Unpack (Data, Meta) Envelope
                     if isinstance(data_package, tuple) and len(data_package) == 2 and isinstance(data_package[1], dict):
                         data_only = data_package[0]
@@ -236,6 +241,37 @@ class ExecutionWorker(QObject):
             merged.update(meta or {})
             return (data, merged, layer_type)
 
+        # Determine if this node is a passthrough/input node that should NOT rename
+        node_category = def_data.get("category", "").lower()
+        is_input_node = node_category in ("input",)
+
+        def _ensure_processed_name(meta):
+            """
+            If the metadata still carries the original source layer name,
+            append '(Processed)' so we never overwrite the input layer.
+            Skip renaming for Input-category nodes (e.g. Select Layer) that
+            are just passing data through.
+            """
+            if is_input_node:
+                return meta
+            name = meta.get("name", "")
+            if name and "(Processed)" not in name:
+                meta["name"] = f"{name} (Processed)"
+            return meta
+
+        def _sanitize_inherited_meta(meta):
+            """
+            Remove metadata keys that are only valid for the *source* layer
+            and would be wrong for a processed result (e.g. contrast_limits
+            computed on different data, or multiscales descriptors).
+            Let napari auto-detect these for the new layer.
+            We keep colormap so the processed output preserves the source
+            channel's color (e.g. green, magenta tint from OME-Zarr).
+            """
+            for key in ("contrast_limits", "multiscales"):
+                meta.pop(key, None)
+            return meta
+
         def wrap_result(res):
             # 1) If node returned a single LayerDataTuple: keep it as LayerDataTuple
             if is_layer_data_tuple(res):
@@ -249,10 +285,24 @@ class ExecutionWorker(QObject):
             if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
                 merged = current_metadata.copy()
                 merged.update(res[1])
+                # If the node's own meta explicitly provides a "name", respect it.
+                # Otherwise ensure we don't overwrite the source layer.
+                if "name" not in res[1]:
+                    _ensure_processed_name(merged)
+                # Strip stale contrast_limits from inherited metadata; node's own
+                # meta (res[1]) takes precedence if it supplies new ones.
+                if "contrast_limits" not in res[1]:
+                    _sanitize_inherited_meta(merged)
                 return (res[0], merged)
 
             # 4) Default: wrap as (data, meta)
-            return (res, current_metadata)
+            # This is the path taken when a node (e.g. gaussian_blur via dispatch)
+            # returns raw data (array or list of arrays) without its own metadata.
+            # We must rename so the output doesn't clobber the input layer.
+            meta = current_metadata.copy()
+            _ensure_processed_name(meta)
+            _sanitize_inherited_meta(meta)
+            return (res, meta)
 
         if isinstance(result, tuple) and len(output_names) > 1 and not is_layer_data_tuple(result):
             for i, name in enumerate(output_names):
@@ -275,6 +325,16 @@ class ExecutionWorker(QObject):
 
         # Emit Results
         for out_name, out_data in node_outputs.items():
+            if node.title == "Gaussian Blur":
+                # DEBUG
+                print("🧪 GAUSS EMIT out_name=", out_name, "type(out_data)=", type(out_data))
+                if isinstance(out_data, tuple):
+                    print("   tuple len=", len(out_data), "types=", [type(x) for x in out_data])
+                    if len(out_data) == 2 and isinstance(out_data[1], dict):
+                        print("   meta name=", out_data[1].get("name"), "multiscale=", out_data[1].get("multiscale"))
+                if isinstance(out_data, list):
+                    print("   list len=", len(out_data), "first type=", type(out_data[0]) if out_data else None)
+                ####
             self.result_signal.emit(node.title, out_name, out_data)
             
         return node_outputs
