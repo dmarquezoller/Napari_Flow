@@ -193,19 +193,5 @@ def select_layer(layers, layer_name: str = "", layer_type: str = "image"):
     data = chosen["data"]
     meta = chosen["meta"]
 
-    # --- TEST PRINT: what this node will output ---
-    print("\n✅ SELECT_LAYER OUTPUT")
-    print("  selected name:", chosen["name"])
-    print("  selected type:", chosen["type"])
-    print("  data type:", type(data))
-    print("  is multiscale list:", isinstance(data, list))
-    if isinstance(data, list) and len(data) > 0:
-        print("  levels:", len(data))
-        print("  level0 type:", type(data[0]))
-        print("  level0 is dask:", isinstance(data[0], da.Array))
-    else:
-        print("  is dask:", isinstance(data, da.Array))
-    print("  meta keys (sample):", list(meta.keys())[:15])
-
     return (data, meta)
 

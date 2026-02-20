@@ -1550,13 +1550,22 @@
         "default": ":",
         "label": "Time/Z Slice",
         "value": ":"
-      },
-      "interaction": {
-        "type": "string",
-        "default": null
       }
     },
-    "execution_path": "napari_flow_editor.flow_nodes.math.interactive_crop"
+    "execution_path": "napari_flow_editor.flow_nodes.math.interactive_crop",
+    "interactive": {
+      "layer_type": "shapes",
+      "mode": "add_rectangle",
+      "edge_color": "#00ff00",
+      "face_color": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "edge_width": 3,
+      "prompt": "Draw a rectangle on the image, then click Run."
+    }
   },
   "project_3d_to_2d": {
     "label": "Project 3D to 2D",

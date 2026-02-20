@@ -57,6 +57,12 @@ def generate():
                     
                     # Extract Parameters and Inputs from signature
                     for param_name, param in sig.parameters.items():
+                        # Skip the ``interaction`` kwarg – it is injected by the
+                        # engine at runtime for interactive nodes and must NOT
+                        # appear as a user-facing parameter in the library.
+                        if param_name == "interaction":
+                            continue
+
                         if param.default == inspect.Parameter.empty:
                             inputs.append(param_name)
                         else:
@@ -77,7 +83,7 @@ def generate():
 
                     # Register the node
                     node_key = name
-                    library[node_key] = {
+                    entry = {
                         "label": meta["label"],
                         "category": meta["category"],
                         "inputs": inputs,
@@ -85,6 +91,13 @@ def generate():
                         "parameters": parameters,
                         "execution_path": f"{full_module_name}.{name}"
                     }
+
+                    # Persist interactive config so the engine knows at runtime
+                    interactive_cfg = meta.get("interactive")
+                    if interactive_cfg:
+                        entry["interactive"] = interactive_cfg
+
+                    library[node_key] = entry
                 except Exception as e:
                     print(f"Error processing node function '{name}': {e}")
 

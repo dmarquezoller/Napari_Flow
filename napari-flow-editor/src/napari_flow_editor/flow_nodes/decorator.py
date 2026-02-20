@@ -6,11 +6,33 @@ from typing import Callable, Optional
 def register_node(label, category, outputs=None, params_config=None, interactive=None):
     """
     Decorator to mark a function as a Flow Node.
+
+    ``interactive`` accepts:
+      - ``True``  → shorthand for ``{"layer_type": "shapes"}``
+      - a dict    → full config, e.g.
+            ``{"layer_type": "shapes", "mode": "add_rectangle",
+               "edge_color": "#00ff00", "prompt": "Draw a rectangle, then click Run"}``
+      - ``None`` / ``False`` → non-interactive node (default)
+
+    When an interactive node is executed the engine will:
+      1. Create a temporary napari layer (shapes by default).
+      2. Open a dialog with a **Run** button.
+      3. Block until the user clicks Run.
+      4. Pass the drawn data to the node function via the ``interaction`` kwarg.
     """
     if outputs is None:
         outputs = ["out"]
     if params_config is None:
         params_config = {}
+
+    # --- Normalise interactive config ---------------------------------
+    if interactive is True:
+        interactive_config = {"layer_type": "shapes"}
+    elif isinstance(interactive, dict):
+        interactive_config = interactive.copy()
+        interactive_config.setdefault("layer_type", "shapes")
+    else:
+        interactive_config = None
 
     def decorator(func):
         func._is_flow_node = True
@@ -19,25 +41,16 @@ def register_node(label, category, outputs=None, params_config=None, interactive
             "category": category,
             "outputs": outputs,
             "params_config": params_config,
-            "interactive": bool(interactive),
+            # Store the full config (or None); the engine / generate_library
+            # will serialise this into the JSON library.
+            "interactive": interactive_config,
         }
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            if interactive:
-                layer_name = getattr(interactive, "layer_name", "---- DRAW CROP (Waiting...) ----")
-                if hasattr(interactive, "setup_interaction"):
-                    print(f">> Please draw a rectangle in the '{layer_name}' layer.")
-                    drawing_event = interactive.setup_interaction(layer_name)
-                    drawing_event.wait()
-                    shapes_data = interactive.finish_interaction(layer_name)
-                else:
-                    shapes_data = interactive.setup(*args, **kwargs)
-                    if hasattr(interactive, "finish"):
-                        shapes_data = interactive.finish(shapes_data)
-
-                kwargs["interaction"] = shapes_data
-
+            # The actual interaction is now driven by the execution engine,
+            # which injects the ``interaction`` kwarg before calling us.
+            # Nothing to do here — just forward the call.
             return func(*args, **kwargs)
         return wrapper
     return decorator

@@ -1063,6 +1063,11 @@ class FlowEditor(QWidget):
         
         # RESULTS (Critical Fix: GUI updates happen here in Main Thread)
         self.worker.result_signal.connect(self.handle_execution_result)
+
+        # INTERACTIVE NODES – dialog on the main thread
+        self.worker.interaction_request_signal.connect(
+            self.handle_interaction_request
+        )
         
         # CLEANUP
         self.worker.finished_signal.connect(self.thread.quit)
@@ -1086,6 +1091,138 @@ class FlowEditor(QWidget):
                 item.status = status
                 item.update() # Force repaint of the dot
                 break
+
+    # -----------------------------------------------------------------
+    # INTERACTIVE NODE DIALOG
+    # -----------------------------------------------------------------
+    def handle_interaction_request(self, node_uid, config):
+        """
+        Called on the **main thread** when an interactive node needs user input.
+
+        ``config`` example::
+
+            {
+                "layer_type": "shapes",
+                "mode": "add_rectangle",
+                "edge_color": "#00ff00",
+                "face_color": [0, 0, 0, 0],
+                "edge_width": 3,
+                "prompt": "Draw a rectangle on the image, then click Run.",
+            }
+
+        Flow:
+          1. Create a temporary napari layer with the requested settings.
+          2. Show a small dialog with the prompt text and a **Run** / **Cancel** button.
+          3. When Run is clicked, collect the drawn data, remove the temp layer,
+             and call ``worker.provide_interaction_result(data)``.
+        """
+        layer_type = config.get("layer_type", "shapes")
+        layer_name = f"__interactive_{node_uid[:8]}__"
+        prompt = config.get("prompt", "Draw on the layer, then click Run.")
+
+        # --- 1. Create temporary layer ---
+        try:
+            if layer_name in self.viewer.layers:
+                self.viewer.layers.remove(layer_name)
+
+            if layer_type == "shapes":
+                layer_kwargs = {"name": layer_name}
+                for key in ("edge_color", "face_color", "edge_width"):
+                    if key in config:
+                        layer_kwargs[key] = config[key]
+                roi_layer = self.viewer.add_shapes(**layer_kwargs)
+                mode = config.get("mode", "add_rectangle")
+                roi_layer.mode = mode
+                self.viewer.layers.selection.active = roi_layer
+            else:
+                # Future extensibility: points, labels, etc.
+                roi_layer = self.viewer.add_shapes(name=layer_name)
+                roi_layer.mode = "add_rectangle"
+                self.viewer.layers.selection.active = roi_layer
+        except Exception as exc:
+            print(f"❌ Failed to create interactive layer: {exc}")
+            self.worker.provide_interaction_result(None)
+            return
+
+        # --- 2. Build dialog ---
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Interactive Node")
+        dialog.setMinimumWidth(320)
+        dlg_layout = QVBoxLayout(dialog)
+
+        # Prompt label
+        lbl = QLabel(prompt)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("font-size: 13px; padding: 8px;")
+        dlg_layout.addWidget(lbl)
+
+        # Button row
+        btn_layout = QHBoxLayout()
+        btn_run = QPushButton("▶  Run")
+        btn_run.setStyleSheet(
+            "QPushButton { background-color: #2E7D32; color: white; "
+            "font-weight: bold; font-size: 13px; padding: 6px 20px; "
+            "border-radius: 4px; }"
+            "QPushButton:hover { background-color: #388E3C; }"
+        )
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet(
+            "QPushButton { background-color: #555; color: white; "
+            "font-size: 13px; padding: 6px 20px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #777; }"
+        )
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_run)
+        dlg_layout.addLayout(btn_layout)
+
+        # --- 3. Connect buttons ---
+        # Guard against double-fire (Cancel button also emits rejected)
+        _resolved = {"done": False}
+
+        def _cleanup_layer():
+            try:
+                if layer_name in self.viewer.layers:
+                    self.viewer.layers.remove(layer_name)
+            except Exception:
+                pass
+
+        def _on_run():
+            if _resolved["done"]:
+                return
+            _resolved["done"] = True
+            try:
+                data = [np.array(s) for s in roi_layer.data] if len(roi_layer.data) > 0 else None
+            except Exception:
+                data = None
+            _cleanup_layer()
+            dialog.accept()
+            self.worker.provide_interaction_result(data)
+
+        def _on_cancel():
+            if _resolved["done"]:
+                return
+            _resolved["done"] = True
+            _cleanup_layer()
+            dialog.reject()
+            self.worker.provide_interaction_result(None)
+
+        def _on_rejected():
+            # Fired by the X button OR by _on_cancel's dialog.reject().
+            # The guard ensures we only call provide_interaction_result once.
+            if _resolved["done"]:
+                return
+            _resolved["done"] = True
+            _cleanup_layer()
+            self.worker.provide_interaction_result(None)
+
+        btn_run.clicked.connect(_on_run)
+        btn_cancel.clicked.connect(_on_cancel)
+        dialog.rejected.connect(_on_rejected)
+
+        # Show non-modal so the user can still interact with the napari canvas
+        dialog.setModal(False)
+        dialog.show()
 
     def handle_execution_result(self, node_title, output_name, data):
 
@@ -1329,6 +1466,9 @@ class FlowEditor(QWidget):
                     parameters = {}
                     
                     for param_name, param in sig.parameters.items():
+                        # Skip engine-injected interaction kwarg
+                        if param_name == "interaction":
+                            continue
                         if param.default == inspect.Parameter.empty:
                             inputs.append(param_name)
                         else:
@@ -1347,7 +1487,7 @@ class FlowEditor(QWidget):
                     # 3. Update the Global Library
                     # CRITICAL: We pass the 'executable' function object directly!
                     node_key = name
-                    NODE_LIBRARY[node_key] = {
+                    entry = {
                         "label": meta["label"],
                         "category": "Custom", # Force category or use meta['category']
                         "inputs": inputs,
@@ -1356,6 +1496,11 @@ class FlowEditor(QWidget):
                         "execution_path": "custom_loaded", 
                         "executable": func # <--- DIRECT REFERENCE
                     }
+                    # Persist interactive config if present
+                    interactive_cfg = meta.get("interactive")
+                    if interactive_cfg:
+                        entry["interactive"] = interactive_cfg
+                    NODE_LIBRARY[node_key] = entry
                     count += 1
             
             if count > 0:

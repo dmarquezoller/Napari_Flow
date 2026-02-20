@@ -5,6 +5,7 @@ import json
 import hashlib
 import sys
 import time
+import threading
 from qtpy.QtCore import QObject, Signal
 
 class ExecutionWorker(QObject):
@@ -15,11 +16,42 @@ class ExecutionWorker(QObject):
     finished_signal = Signal()
     error_signal = Signal(str)
 
+    # Interactive node signals  (engine ⇄ main-thread dialog)
+    interaction_request_signal = Signal(str, dict)   # (node_uid, interactive_config)
+    # The main thread calls ``provide_interaction_result`` which sets the
+    # threading.Event so the worker thread can continue.
+
     def __init__(self, scene, viewer, loop_config=None):
         super().__init__()
         self.scene = scene
         self.viewer = viewer
         self.loop_config = loop_config 
+
+        # Interaction synchronisation primitives
+        self._interaction_event = threading.Event()
+        self._interaction_result = None   # set by main thread
+
+    # Called from the **main thread** (via signal/slot) to unblock the worker.
+    def provide_interaction_result(self, data):
+        """
+        The main-thread dialog calls this once the user clicks Run (or Cancel).
+        ``data`` is either the drawn shapes list, or ``None`` for cancel.
+        """
+        self._interaction_result = data
+        self._interaction_event.set()
+
+    def _request_interaction(self, node_uid, interactive_config):
+        """
+        Emit a signal to the main thread requesting user interaction,
+        then block until the main thread calls ``provide_interaction_result``.
+        Returns the interaction data (e.g. list of shape arrays) or None.
+        """
+        self._interaction_event.clear()
+        self._interaction_result = None
+        self.interaction_request_signal.emit(node_uid, interactive_config)
+        # Block worker thread until the user finishes drawing + clicks Run
+        self._interaction_event.wait()
+        return self._interaction_result
 
     def run(self):
         try:
@@ -209,6 +241,21 @@ class ExecutionWorker(QObject):
                 clean_params[k] = v["value"]
             else:
                 clean_params[k] = v
+
+        # --- INTERACTIVE NODE HANDLING ---
+        # If the node's library entry has an ``interactive`` config, request
+        # user interaction from the main thread before running the function.
+        interactive_config = def_data.get("interactive")
+        if interactive_config:
+            self.log_signal.emit(
+                f"⏳ Waiting for user interaction on '{node.title}'..."
+            )
+            interaction_data = self._request_interaction(node.uid, interactive_config)
+            if interaction_data is None:
+                raise RuntimeError(
+                    f"Interaction cancelled for '{node.title}'."
+                )
+            clean_params["interaction"] = interaction_data
 
         # RUN
         args = {**func_inputs, **clean_params}
