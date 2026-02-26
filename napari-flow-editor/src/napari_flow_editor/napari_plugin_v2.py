@@ -207,6 +207,7 @@ class Node(QGraphicsRectItem):
     def __init__(self, x, y, node_type="generic", title=None, uuid_str=None, scene=None):
         # 1. Setup Data
         self.node_type = node_type
+        self.category = "Uncategorized"
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
 
@@ -222,6 +223,7 @@ class Node(QGraphicsRectItem):
         if node_type in NODE_LIBRARY:
             definition = NODE_LIBRARY[node_type]
             self.title = title if title else definition["label"]
+            self.category = definition.get("category", "Uncategorized")
             inputs_data = definition.get("inputs", ["in"])
             outputs_data = definition.get("outputs", ["out"])
             
@@ -281,26 +283,38 @@ class Node(QGraphicsRectItem):
 
     def paint(self, painter, option, widget):
         rect = self.rect()
+        is_control_flow = self.category == "Control Flow"
 
         # A. Shadow
         painter.fillRect(rect.adjusted(4, 4, 4, 4), QColor(0, 0, 0, 60))
         
         # B. Main Body Gradient
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        gradient.setColorAt(0, QColor("#3F4242"))
-        gradient.setColorAt(1, QColor("#2F3232")) 
+        if is_control_flow:
+            gradient.setColorAt(0, QColor("#33404f"))
+            gradient.setColorAt(1, QColor("#242f3b"))
+        else:
+            gradient.setColorAt(0, QColor("#3F4242"))
+            gradient.setColorAt(1, QColor("#2F3232"))
         painter.setBrush(QBrush(gradient))
         
         # C. Selection Border
-        border_color = QColor("#ff9900") if self.isSelected() else QColor("#727272")
+        if self.isSelected():
+            border_color = QColor("#ff9900")
+        else:
+            border_color = QColor("#7f9fbe") if is_control_flow else QColor("#727272")
         painter.setPen(QPen(border_color, 2))
         painter.drawRoundedRect(rect, 12, 12)
 
         # D. Title Header
         title_rect = QRectF(rect.x(), rect.y(), rect.width(), 25)
         title_grad = QLinearGradient(title_rect.topLeft(), title_rect.bottomRight())
-        title_grad.setColorAt(0, QColor("#666"))
-        title_grad.setColorAt(1, QColor("#444"))
+        if is_control_flow:
+            title_grad.setColorAt(0, QColor("#5a748f"))
+            title_grad.setColorAt(1, QColor("#415469"))
+        else:
+            title_grad.setColorAt(0, QColor("#666"))
+            title_grad.setColorAt(1, QColor("#444"))
         painter.setBrush(QBrush(title_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(title_rect, 12, 12)
@@ -522,6 +536,19 @@ class FlowEditor(QWidget):
         self.btn_add = QPushButton("Add Node")
         self.btn_add.clicked.connect(self.open_add_menu)
         toolbar.addWidget(self.btn_add)
+
+        self.btn_add_control = QPushButton("Add Control")
+        self.btn_add_control.clicked.connect(self.open_control_menu)
+        self.btn_add_control.setStyleSheet("""
+            QPushButton {
+                background-color: #4f6780;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #5d7a99; }
+            QPushButton:pressed { background-color: #405469; }
+        """)
+        toolbar.addWidget(self.btn_add_control)
 
         self.btn_remove = QPushButton("Remove Node")
         self.btn_remove.clicked.connect(self.open_remove_menu)
@@ -1079,7 +1106,14 @@ class FlowEditor(QWidget):
     # --- Add Node Method ---
     # 1. The UI Logic (Dropdown)
     def open_add_menu(self):
-        """Shows a categorized dropdown menu to add nodes."""
+        """Shows a categorized dropdown menu to add data-processing nodes."""
+        self._open_add_menu(include_control=False)
+
+    def open_control_menu(self):
+        """Shows a dropdown menu with only control-flow nodes."""
+        self._open_add_menu(include_control=True, control_only=True)
+
+    def _open_add_menu(self, include_control=True, control_only=False):
         menu = QMenu(self)
         
         # Dictionary to hold reference to created submenus
@@ -1092,6 +1126,12 @@ class FlowEditor(QWidget):
         for key, data in sorted_items:
             label = data["label"]
             category = data.get("category", "Uncategorized") # Default if missing
+            is_control = category == "Control Flow"
+
+            if control_only and not is_control:
+                continue
+            if not control_only and not include_control and is_control:
+                continue
 
             # 1. Create the Submenu if it doesn't exist yet
             if category not in submenus:
@@ -1103,6 +1143,10 @@ class FlowEditor(QWidget):
             # 3. Connect the action using a lambda to capture the specific 'key'
             # We use checked=False (default for triggered) to ignore the boolean arg
             action.triggered.connect(lambda checked=False, k=key: self.add_node(k))
+
+        if not submenus:
+            action = menu.addAction("No nodes available")
+            action.setEnabled(False)
 
         # Show the menu at the mouse cursor position
         menu.exec_(QCursor.pos())
@@ -1545,6 +1589,7 @@ class FlowEditor(QWidget):
         """Locks/Unlocks buttons during execution."""
         self.btn_run.setEnabled(enabled)
         self.btn_add.setEnabled(enabled)
+        self.btn_add_control.setEnabled(enabled)
         self.btn_remove.setEnabled(enabled)
         self.btn_load.setEnabled(enabled)
         self.btn_save.setEnabled(enabled)
