@@ -40,16 +40,30 @@ class Socket(QGraphicsEllipseItem):
         self.node = node
         self.name = name # e.g. "image_in"
         self.connected_edges = []
-        
-        # Calculate Y position to distribute sockets evenly
+
+        # --- Determine whether this is a logic (control-flow) socket ---
+        self.is_logic = socket_type in ("logic_in", "logic_out")
+
         h = node.rect().height()
-        y = (h / (total_sockets + 1)) * (index + 1)
-        
-        x = 0 if socket_type == "input" else node.rect().width()
-        
-        self.local_offset = QPointF(x, y)
-        
-        color = QColor("#ffb347") if socket_type == "output" else QColor("#77dd77")
+        w = node.rect().width()
+
+        if self.is_logic:
+            # Logic sockets sit at the bottom corners, shifted slightly inward
+            # and downward so they don't overlap with data sockets
+            if socket_type == "logic_in":
+                self.local_offset = QPointF(14, h - 2)        # bottom-left
+            else:  # logic_out
+                self.local_offset = QPointF(w - 14, h - 2)    # bottom-right
+            color = QColor("#8888cc")  # muted blue-purple
+            self.setToolTip(f"Logic: {socket_type}")
+        else:
+            # Data sockets — original layout (left/right sides, evenly spaced)
+            y = (h / (total_sockets + 1)) * (index + 1)
+            x = 0 if socket_type == "input" else w
+            self.local_offset = QPointF(x, y)
+            color = QColor("#ffb347") if socket_type == "output" else QColor("#77dd77")
+            self.setToolTip(f"Data: {name}")
+
         self.setBrush(QBrush(color))
         self.setPen(QPen(Qt.GlobalColor.black, 1))
         self.setZValue(3)
@@ -64,6 +78,10 @@ class Socket(QGraphicsEllipseItem):
         return self.sceneBoundingRect().center()
 
     def can_accept_connection(self):
+        # Logic-in sockets accept multiple connections (fan-in)
+        if self.is_logic:
+            return True
+        # Data-input sockets accept at most one connection
         return not (self.socket_type == "input" and len(self.connected_edges) >= 1)
 
 
@@ -76,8 +94,16 @@ class Connection(QGraphicsPathItem):
         self.scene_ref = scene
         self.dragging = False
         self.hovered = False
+        self.is_logic = getattr(start_socket, "is_logic", False)
         self.setZValue(1)
-        self.setPen(QPen(QColor("#444"), 2))
+
+        # Logic edges: dashed blue-purple line; Data edges: solid grey
+        if self.is_logic:
+            pen = QPen(QColor("#8888cc"), 2, Qt.PenStyle.DashLine)
+        else:
+            pen = QPen(QColor("#444"), 2)
+        self.setPen(pen)
+
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self.setAcceptHoverEvents(True)
         self.update_path(self.start_socket.center_pos(), self.start_socket.center_pos())
@@ -88,11 +114,17 @@ class Connection(QGraphicsPathItem):
         return stroker.createStroke(self.path())
 
     def hoverEnterEvent(self, event):
-        self.setPen(QPen(QColor("#0078d7"), 3))
+        if self.is_logic:
+            self.setPen(QPen(QColor("#aaaaff"), 3, Qt.PenStyle.DashLine))
+        else:
+            self.setPen(QPen(QColor("#0078d7"), 3))
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        self.setPen(QPen(QColor("#444"), 2))
+        if self.is_logic:
+            self.setPen(QPen(QColor("#8888cc"), 2, Qt.PenStyle.DashLine))
+        else:
+            self.setPen(QPen(QColor("#444"), 2))
         super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -111,14 +143,28 @@ class Connection(QGraphicsPathItem):
     def mouseReleaseEvent(self, event):
         if self.dragging:
             event.accept()
-            target = self.scene_ref.find_nearby_socket(event.scenePos())
-            if (
-                target
-                and target.socket_type == "input"
-                and target.can_accept_connection()
-                and not self.scene_ref.are_already_connected(self.start_socket, target)
-                and not self.scene_ref.creates_cycle(self.start_socket.node, target.node)
-            ):
+            target = self.scene_ref.find_nearby_socket(
+                event.scenePos(), prefer_logic=self.is_logic
+            )
+            if self.is_logic:
+                # Logic edges: logic_out → logic_in, skip cycle check
+                valid = (
+                    target
+                    and target.socket_type == "logic_in"
+                    and target.can_accept_connection()
+                    and not self.scene_ref.are_already_connected(self.start_socket, target)
+                )
+            else:
+                # Data edges: output → input, enforce DAG
+                valid = (
+                    target
+                    and target.socket_type == "input"
+                    and target.can_accept_connection()
+                    and not self.scene_ref.are_already_connected(self.start_socket, target)
+                    and not self.scene_ref.creates_cycle(self.start_socket.node, target.node)
+                )
+
+            if valid:
                 self.finalize(target)
             else:
                 self.scene_ref.removeItem(self)
@@ -200,7 +246,7 @@ class Node(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setZValue(2)
 
-        # 4. Generate Sockets dynamically
+        # 4. Generate Data Sockets dynamically
         self.inputs = []
         for i, name in enumerate(inputs_data):
             self.inputs.append(Socket(self, "input", name, i, len(inputs_data)))
@@ -209,14 +255,22 @@ class Node(QGraphicsRectItem):
         for i, name in enumerate(outputs_data):
             self.outputs.append(Socket(self, "output", name, i, len(outputs_data)))
 
+        # 5. Generate Logic (control-flow) Sockets — every node gets one pair
+        self.logic_inputs = [Socket(self, "logic_in", "logic_in", 0, 1)]
+        self.logic_outputs = [Socket(self, "logic_out", "logic_out", 0, 1)]
+
         if scene:
-            for s in self.inputs + self.outputs:
+            all_sockets = self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
+            for s in all_sockets:
                 scene.addItem(s)
 
-    # ... (keep itemChange and paint methods same as before) ...
+    # Helper to iterate ALL sockets (data + logic)
+    def all_sockets(self):
+        return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
+
     def itemChange(self, change, value):
         if change in (QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged, QGraphicsItem.GraphicsItemChange.ItemPositionChange):
-            for s in self.inputs + self.outputs:
+            for s in self.all_sockets():
                 s.update_position()
                 for e in s.connected_edges:
                     e.update_positions()
@@ -297,12 +351,27 @@ class FlowScene(QGraphicsScene):
         super().__init__()
         self.current_connection = None
 
-    def find_nearby_socket(self, pos, radius=10):
+    def find_nearby_socket(self, pos, radius=15, prefer_logic=None):
+        """
+        Find the nearest socket within *radius* of *pos*.
+
+        If ``prefer_logic`` is True, logic sockets are preferred over data
+        sockets (and vice versa when False).  When None the first match wins.
+        """
         area = QRectF(pos.x() - radius, pos.y() - radius, radius * 2, radius * 2)
+        best = None
+        best_dist = float("inf")
         for item in self.items(area):
-            if isinstance(item, Socket):
-                return item
-        return None
+            if not isinstance(item, Socket):
+                continue
+            d = (item.center_pos() - pos).manhattanLength()
+            # Apply preference bias: subtract a large value for the preferred kind
+            if prefer_logic is not None and item.is_logic == prefer_logic:
+                d -= 1000
+            if d < best_dist:
+                best_dist = d
+                best = item
+        return best
 
     def are_already_connected(self, a, b):
         for e in a.connected_edges:
@@ -330,7 +399,7 @@ class FlowScene(QGraphicsScene):
 
     def mousePressEvent(self, event):
         item = self.itemAt(event.scenePos(), self.views()[0].transform())
-        if isinstance(item, Socket) and item.socket_type == "output":
+        if isinstance(item, Socket) and item.socket_type in ("output", "logic_out"):
             event.accept()
             self.current_connection = Connection(item, self)
             self.addItem(self.current_connection)
@@ -347,14 +416,28 @@ class FlowScene(QGraphicsScene):
     def mouseReleaseEvent(self, event):
         if self.current_connection:
             pos = event.scenePos()
-            target = self.find_nearby_socket(pos)
-            valid = (
-                target
-                and target.socket_type == "input"
-                and target.can_accept_connection()
-                and not self.are_already_connected(self.current_connection.start_socket, target)
-                and not self.creates_cycle(self.current_connection.start_socket.node, target.node)
-            )
+            start_sock = self.current_connection.start_socket
+            is_logic = getattr(start_sock, "is_logic", False)
+            target = self.find_nearby_socket(pos, prefer_logic=is_logic)
+
+            if is_logic:
+                # Logic edges: logic_out → logic_in, no cycle check
+                valid = (
+                    target
+                    and target.socket_type == "logic_in"
+                    and target.can_accept_connection()
+                    and not self.are_already_connected(start_sock, target)
+                )
+            else:
+                # Data edges: output → input, enforce DAG
+                valid = (
+                    target
+                    and target.socket_type == "input"
+                    and target.can_accept_connection()
+                    and not self.are_already_connected(start_sock, target)
+                    and not self.creates_cycle(start_sock.node, target.node)
+                )
+
             if valid:
                 self.current_connection.finalize(target)
             else:
@@ -777,6 +860,23 @@ class FlowEditor(QWidget):
                 status_lbl = QLabel(status_text)
                 status_lbl.setStyleSheet(style)
                 self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
+
+        # C. Logic (control-flow) connections — always shown
+        logic_in_count = sum(len(s.connected_edges) for s in node.logic_inputs)
+        logic_out_count = sum(len(s.connected_edges) for s in node.logic_outputs)
+        self.props_layout.addRow(QLabel("<b>Logic Flow:</b>"))
+
+        li_text = f"{logic_in_count} link(s)" if logic_in_count else "Empty"
+        li_style = "color: #8888cc;" if logic_in_count else "color: #888;"
+        li_lbl = QLabel(li_text)
+        li_lbl.setStyleSheet(li_style)
+        self.props_layout.addRow("  ⟵ logic_in", li_lbl)
+
+        lo_text = f"{logic_out_count} link(s)" if logic_out_count else "Empty"
+        lo_style = "color: #8888cc;" if logic_out_count else "color: #888;"
+        lo_lbl = QLabel(lo_text)
+        lo_lbl.setStyleSheet(lo_style)
+        self.props_layout.addRow("  ⟶ logic_out", lo_lbl)
         
         self.props_layout.addRow(QLabel("")) 
 
@@ -853,7 +953,7 @@ class FlowEditor(QWidget):
 
         for item in self.scene.items():
             if isinstance(item, Node):
-                # Map connections
+                # Map data connections
                 input_connections = {}
                 for socket in item.inputs:
                     if socket.connected_edges:
@@ -863,13 +963,24 @@ class FlowEditor(QWidget):
                             connection_str = f"{src_node.uid}.{edge.start_socket.name}"
                             input_connections[socket.name] = connection_str
 
+                # Map logic connections (logic_in ← logic_out of other nodes)
+                logic_connections = []
+                for socket in item.logic_inputs:
+                    for edge in socket.connected_edges:
+                        if edge.start_socket:
+                            src_node = edge.start_socket.node
+                            logic_connections.append(
+                                f"{src_node.uid}.{edge.start_socket.name}"
+                            )
+
                 node_data = {
                     "id": item.uid,
                     "type": item.node_type,
                     "label": item.title,
                     "position": {"x": item.pos().x(), "y": item.pos().y()},
                     "parameters": item.parameters,
-                    "input_connections": input_connections
+                    "input_connections": input_connections,
+                    "logic_connections": logic_connections,
                 }
                 pipeline["nodes"].append(node_data)
 
@@ -940,6 +1051,22 @@ class FlowEditor(QWidget):
                     src_socket = next((s for s in src_node.outputs if s.name == src_sock_name), None)
                     tgt_socket = next((s for s in target_node.inputs if s.name == tgt_sock_name), None)
                     
+                    if src_socket and tgt_socket:
+                        conn = Connection(src_socket, self.scene)
+                        conn.finalize(tgt_socket)
+                        self.scene.addItem(conn)
+
+            # Reconnect Logic edges
+            for src_string in n_data.get("logic_connections", []):
+                if "." not in src_string:
+                    continue
+                src_uid, src_sock_name = src_string.split(".", 1)
+                src_node = node_map.get(src_uid)
+                if src_node:
+                    src_socket = next(
+                        (s for s in src_node.logic_outputs if s.name == src_sock_name), None
+                    )
+                    tgt_socket = target_node.logic_inputs[0] if target_node.logic_inputs else None
                     if src_socket and tgt_socket:
                         conn = Connection(src_socket, self.scene)
                         conn.finalize(tgt_socket)
@@ -1031,13 +1158,17 @@ class FlowEditor(QWidget):
     def delete_node(self, node):
         """Helper function to safely remove a specific node, its edges, AND its sockets."""
         
-        # Iterate over all sockets (both inputs and outputs)
-        for socket in node.inputs + node.outputs:
+        # Iterate over ALL sockets (data + logic)
+        for socket in node.all_sockets():
             # 1. Remove all edges connected to this socket
             for edge in list(socket.connected_edges):
+                # Also clean the other end's edge list
+                other = edge.end_socket if edge.start_socket is socket else edge.start_socket
+                if other and edge in other.connected_edges:
+                    other.connected_edges.remove(edge)
                 self.scene.removeItem(edge)
             
-            # 2. Remove the socket itself from the scene (This was missing)
+            # 2. Remove the socket itself from the scene
             self.scene.removeItem(socket)
         
         # 3. Finally, remove the node body

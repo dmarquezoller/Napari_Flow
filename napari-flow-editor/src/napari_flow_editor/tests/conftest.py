@@ -14,9 +14,11 @@ class FakeViewer:
 
 
 class FakeSocket:
-    def __init__(self, name):
+    def __init__(self, name, is_logic=False):
         self.name = name
         self.connected_edges = []
+        self.is_logic = is_logic
+        self.socket_type = ("logic_in" if is_logic else "input")  # default; tests can override
 
 
 class FakeEdge:
@@ -33,8 +35,13 @@ class FakeNode:
         self.parameters = self.params.copy()
         self.inputs = inputs or []
         self.outputs = outputs or []
+        self.logic_inputs = []
+        self.logic_outputs = []
         self.cached_results = {}
         self.last_signature = None
+
+    def all_sockets(self):
+        return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
 
 
 @pytest.fixture
