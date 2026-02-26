@@ -3,7 +3,23 @@ import dask.array as da
 import numpy as np
 from typing import Callable, Optional
 
-def register_node(label, category, outputs=None, params_config=None, interactive=None):
+def _normalize_logic_config(logic):
+    # Backward-compatible defaults: every node has both logic sockets and
+    # logic sockets accept multiple links unless explicitly constrained.
+    cfg = {
+        "in": True,
+        "out": True,
+        "allow_multi_in": True,
+        "allow_multi_out": True,
+    }
+    if isinstance(logic, dict):
+        cfg.update(logic)
+    elif logic is False:
+        cfg["in"] = False
+        cfg["out"] = False
+    return cfg
+
+def register_node(label, category, outputs=None, params_config=None, interactive=None, logic=None):
     """
     Decorator to mark a function as a Flow Node.
 
@@ -24,6 +40,7 @@ def register_node(label, category, outputs=None, params_config=None, interactive
         outputs = ["out"]
     if params_config is None:
         params_config = {}
+    logic_config = _normalize_logic_config(logic)
 
     # --- Normalise interactive config ---------------------------------
     if interactive is True:
@@ -44,6 +61,7 @@ def register_node(label, category, outputs=None, params_config=None, interactive
             # Store the full config (or None); the engine / generate_library
             # will serialise this into the JSON library.
             "interactive": interactive_config,
+            "logic": logic_config,
         }
 
         @functools.wraps(func)

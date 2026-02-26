@@ -96,6 +96,9 @@ def generate():
                     interactive_cfg = meta.get("interactive")
                     if interactive_cfg:
                         entry["interactive"] = interactive_cfg
+                    logic_cfg = meta.get("logic")
+                    if logic_cfg:
+                        entry["logic"] = logic_cfg
 
                     library[node_key] = entry
                 except Exception as e:

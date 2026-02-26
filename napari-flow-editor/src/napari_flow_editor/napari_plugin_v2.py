@@ -27,19 +27,33 @@ from .execution_engine import ExecutionWorker
 from .script_generator import ScriptGenerator
 from .widgets.dynamic_table import DynamicTableWidget
 from .widgets.plot_widgets import PlotResultDialog, figure_to_rgb_array, PlotDashboard
-from .widgets.loop_dialog import LoopConfigDialog
 
 
 NODE_LIBRARY = {}
 
+def _normalize_logic_config(logic_cfg):
+    cfg = {
+        "in": True,
+        "out": True,
+        "allow_multi_in": True,
+        "allow_multi_out": True,
+    }
+    if isinstance(logic_cfg, dict):
+        cfg.update(logic_cfg)
+    elif logic_cfg is False:
+        cfg["in"] = False
+        cfg["out"] = False
+    return cfg
+
 # --- SOCKET -----------------------------------------------------
 class Socket(QGraphicsEllipseItem):
-    def __init__(self, node, socket_type, name, index, total_sockets):
+    def __init__(self, node, socket_type, name, index, total_sockets, max_connections=None):
         super().__init__(-6, -6, 12, 12)
         self.socket_type = socket_type
         self.node = node
         self.name = name # e.g. "image_in"
         self.connected_edges = []
+        self.max_connections = max_connections
 
         # --- Determine whether this is a logic (control-flow) socket ---
         self.is_logic = socket_type in ("logic_in", "logic_out")
@@ -48,16 +62,26 @@ class Socket(QGraphicsEllipseItem):
         w = node.rect().width()
 
         if self.is_logic:
-            # Logic sockets sit at the bottom corners, shifted slightly inward
-            # and downward so they don't overlap with data sockets
-            is_loop_node = getattr(node, "node_type", "") == "loop_control"
-            if socket_type == "logic_in":
-                # Loop node is intentionally reversed: logic_in on right.
-                self.local_offset = QPointF(w - 14, h - 2) if is_loop_node else QPointF(14, h - 2)
-            else:  # logic_out
-                # Loop node is intentionally reversed: logic_out on left.
-                self.local_offset = QPointF(14, h - 2) if is_loop_node else QPointF(w - 14, h - 2)
-            color = QColor("#8888cc")  # muted blue-purple
+            is_control_flow = getattr(node, "category", "") == "Control Flow"
+            # Control nodes: middle sockets, inverted direction.
+            if is_control_flow:
+                side = "right" if socket_type == "logic_in" else "left"
+                logic_position = "middle"
+            # Other nodes: bottom sockets, forward direction.
+            else:
+                side = "left" if socket_type == "logic_in" else "right"
+                logic_position = "bottom"
+            x = 0 if side == "left" else w
+            y = (h / (total_sockets + 1)) * (index + 1)
+
+            if logic_position == "middle":
+                self.local_offset = QPointF(x, y)
+            else:
+                # Legacy bottom-corner style
+                bx = 14 if side == "left" else (w - 14)
+                self.local_offset = QPointF(bx, h - 2)
+            # Distinct control colors: input=blue, output=lavender.
+            color = QColor("#5FA8D3") if socket_type == "logic_in" else QColor("#B08EC6")
             self.setToolTip(f"Logic: {socket_type}")
         else:
             # Data sockets — original layout (left/right sides, evenly spaced)
@@ -81,11 +105,9 @@ class Socket(QGraphicsEllipseItem):
         return self.sceneBoundingRect().center()
 
     def can_accept_connection(self):
-        # Logic-in sockets accept multiple connections (fan-in)
-        if self.is_logic:
+        if self.max_connections is None:
             return True
-        # Data-input sockets accept at most one connection
-        return not (self.socket_type == "input" and len(self.connected_edges) >= 1)
+        return len(self.connected_edges) < self.max_connections
 
 
 # --- CONNECTION -------------------------------------------------
@@ -118,7 +140,7 @@ class Connection(QGraphicsPathItem):
 
     def hoverEnterEvent(self, event):
         if self.is_logic:
-            self.setPen(QPen(QColor("#aaaaff"), 3, Qt.PenStyle.DashLine))
+            self.setPen(QPen(QColor("#C6C6FF"), 3, Qt.PenStyle.DashLine))
         else:
             self.setPen(QPen(QColor("#0078d7"), 3))
         super().hoverEnterEvent(event)
@@ -210,6 +232,7 @@ class Node(QGraphicsRectItem):
         self.category = "Uncategorized"
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
+        self.logic_config = _normalize_logic_config(None)
 
         # --- State variables ---
         self.status = "gray"
@@ -224,6 +247,7 @@ class Node(QGraphicsRectItem):
             definition = NODE_LIBRARY[node_type]
             self.title = title if title else definition["label"]
             self.category = definition.get("category", "Uncategorized")
+            self.logic_config = _normalize_logic_config(definition.get("logic"))
             inputs_data = definition.get("inputs", ["in"])
             outputs_data = definition.get("outputs", ["out"])
             
@@ -254,15 +278,29 @@ class Node(QGraphicsRectItem):
         # 4. Generate Data Sockets dynamically
         self.inputs = []
         for i, name in enumerate(inputs_data):
-            self.inputs.append(Socket(self, "input", name, i, len(inputs_data)))
+            self.inputs.append(Socket(self, "input", name, i, len(inputs_data), max_connections=1))
 
         self.outputs = []
         for i, name in enumerate(outputs_data):
-            self.outputs.append(Socket(self, "output", name, i, len(outputs_data)))
+            self.outputs.append(Socket(self, "output", name, i, len(outputs_data), max_connections=None))
 
-        # 5. Generate Logic (control-flow) Sockets — every node gets one pair
-        self.logic_inputs = [Socket(self, "logic_in", "logic_in", 0, 1)]
-        self.logic_outputs = [Socket(self, "logic_out", "logic_out", 0, 1)]
+        # 5. Generate Logic sockets from node definition.
+        logic_in_enabled = bool(self.logic_config.get("in", True))
+        logic_out_enabled = bool(self.logic_config.get("out", True))
+        logic_in_max = None if self.logic_config.get("allow_multi_in", True) else 1
+        logic_out_max = None if self.logic_config.get("allow_multi_out", True) else 1
+
+        self.logic_inputs = []
+        if logic_in_enabled:
+            self.logic_inputs.append(
+                Socket(self, "logic_in", "logic_in", 0, 1, max_connections=logic_in_max)
+            )
+
+        self.logic_outputs = []
+        if logic_out_enabled:
+            self.logic_outputs.append(
+                Socket(self, "logic_out", "logic_out", 0, 1, max_connections=logic_out_max)
+            )
 
         if scene:
             all_sockets = self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
@@ -327,20 +365,21 @@ class Node(QGraphicsRectItem):
         text_rect = QRectF(rect.x(), rect.y(), rect.width()-15, 25)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.title)
 
-        # F. Status Light
-        status_colors = {
-            "gray": QColor("#777777"),   # Dirty/Stale (grey)
-            "yellow": QColor("#FFD700"), # Running (yellow)
-            "green": QColor("#32CD32"),  # Cached/Done (green)
-            "red": QColor("#FF4500")     # Error (red)
-        }
-        light_color = status_colors.get(self.status, QColor("#777777"))
-        
-        painter.setBrush(QBrush(light_color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        # Draw small circle in top-right
-        dot_rect = QRectF(rect.x() + rect.width() - 18, rect.y() + 7, 10, 10)
-        painter.drawEllipse(dot_rect)
+        # F. Status Light (hidden on Control Flow nodes)
+        if not is_control_flow:
+            status_colors = {
+                "gray": QColor("#777777"),   # Dirty/Stale (grey)
+                "yellow": QColor("#FFD700"), # Running (yellow)
+                "green": QColor("#32CD32"),  # Cached/Done (green)
+                "red": QColor("#FF4500")     # Error (red)
+            }
+            light_color = status_colors.get(self.status, QColor("#777777"))
+            
+            painter.setBrush(QBrush(light_color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            # Draw small circle in top-right
+            dot_rect = QRectF(rect.x() + rect.width() - 18, rect.y() + 7, 10, 10)
+            painter.drawEllipse(dot_rect)
         
         # G. Parameters Text
         font = painter.font()
@@ -416,7 +455,11 @@ class FlowScene(QGraphicsScene):
 
     def mousePressEvent(self, event):
         item = self.itemAt(event.scenePos(), self.views()[0].transform())
-        if isinstance(item, Socket) and item.socket_type in ("output", "logic_out"):
+        if (
+            isinstance(item, Socket)
+            and item.socket_type in ("output", "logic_out")
+            and item.can_accept_connection()
+        ):
             event.accept()
             self.current_connection = Connection(item, self)
             self.addItem(self.current_connection)
@@ -525,6 +568,7 @@ class FlowEditor(QWidget):
             print(f"CRITICAL ERROR loading node library: {e}")
 
         self.viewer = viewer
+        self._active_interaction_dialog = None
         
         # 1. Main Layout
         self.layout = QVBoxLayout()
@@ -613,14 +657,20 @@ class FlowEditor(QWidget):
         self.btn_fit = QPushButton("Fit View")
         button_layout.addWidget(self.btn_fit)
 
-        # Loop Button
-        self.btn_loop = QPushButton("Loop Run")
-        self.btn_loop.setStyleSheet("""
-            QPushButton { background-color: #E67E22; font-weight: bold; }
-            QPushButton:hover { background-color: #e49148; }
-            QPushButton:pressed { background-color: #bf671a; }
+        # Loop stop control (used by "Until confirm" mode)
+        self.btn_stop_loop = QPushButton("Stop Loop")
+        self.btn_stop_loop.setStyleSheet("""
+            QPushButton {
+                background-color: #B23A3A;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #c94a4a; }
+            QPushButton:pressed { background-color: #8f2d2d; }
         """)
-        button_layout.addWidget(self.btn_loop)
+        self.btn_stop_loop.setVisible(False)
+        self.btn_stop_loop.setEnabled(False)
+        button_layout.addWidget(self.btn_stop_loop)
 
         # Run Button
         self.btn_run = QPushButton("RUN PIPELINE")
@@ -677,7 +727,7 @@ class FlowEditor(QWidget):
         
         # --- CONNECTIONS ---
         self.btn_fit.clicked.connect(self.view.fit_scene)
-        self.btn_loop.clicked.connect(self.open_loop_dialog)
+        self.btn_stop_loop.clicked.connect(self.on_stop_loop_clicked)
         self.btn_run.clicked.connect(self.run_pipeline)
         self.scene.selectionChanged.connect(self.on_selection)
 
@@ -1222,14 +1272,14 @@ class FlowEditor(QWidget):
         self.scene.removeItem(node)
     
     # --- Run Pipeline Method ---
-    def run_pipeline(self, loop_config=None):
+    def run_pipeline(self):
         # 1. Disable UI
         self.set_ui_enabled(False)
         self.console.clear()
         
         # 2. Setup Thread
         self.thread = QThread()
-        self.worker = ExecutionWorker(self.scene, self.viewer, loop_config=loop_config)
+        self.worker = ExecutionWorker(self.scene, self.viewer)
         self.worker.moveToThread(self.thread)
         
         # 3. Connect Signals
@@ -1246,6 +1296,9 @@ class FlowEditor(QWidget):
         self.worker.interaction_request_signal.connect(
             self.handle_interaction_request
         )
+        self.worker.loop_control_state_signal.connect(
+            self.handle_loop_control_state
+        )
         
         # CLEANUP
         self.worker.finished_signal.connect(self.thread.quit)
@@ -1257,6 +1310,30 @@ class FlowEditor(QWidget):
         
         # 4. Start
         self.thread.start()
+
+    def on_stop_loop_clicked(self):
+        """Signal the worker to stop the active 'Until confirm' loop."""
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.request_loop_stop()
+            self.btn_stop_loop.setEnabled(False)
+            self.btn_stop_loop.setText("Stopping...")
+        # If an interactive dialog is currently open, close it immediately.
+        if self._active_interaction_dialog is not None:
+            try:
+                self._active_interaction_dialog.reject()
+            except Exception:
+                pass
+
+    def handle_loop_control_state(self, active, loop_node_uid):
+        """Show/hide the loop stop button while an 'Until confirm' loop is active."""
+        if active:
+            self.btn_stop_loop.setVisible(True)
+            self.btn_stop_loop.setEnabled(True)
+            self.btn_stop_loop.setText("Stop Loop")
+        else:
+            self.btn_stop_loop.setVisible(False)
+            self.btn_stop_loop.setEnabled(False)
+            self.btn_stop_loop.setText("Stop Loop")
 
     def update_node_status(self, node_uid, status):
         """
@@ -1324,6 +1401,7 @@ class FlowEditor(QWidget):
 
         # --- 2. Build dialog ---
         dialog = QDialog(self)
+        self._active_interaction_dialog = dialog
         dialog.setWindowTitle("Interactive Node")
         dialog.setMinimumWidth(320)
         dlg_layout = QVBoxLayout(dialog)
@@ -1374,6 +1452,7 @@ class FlowEditor(QWidget):
             except Exception:
                 data = None
             _cleanup_layer()
+            self._active_interaction_dialog = None
             dialog.accept()
             self.worker.provide_interaction_result(data)
 
@@ -1382,6 +1461,7 @@ class FlowEditor(QWidget):
                 return
             _resolved["done"] = True
             _cleanup_layer()
+            self._active_interaction_dialog = None
             dialog.reject()
             self.worker.provide_interaction_result(None)
 
@@ -1392,6 +1472,7 @@ class FlowEditor(QWidget):
                 return
             _resolved["done"] = True
             _cleanup_layer()
+            self._active_interaction_dialog = None
             self.worker.provide_interaction_result(None)
 
         btn_run.clicked.connect(_on_run)
@@ -1594,6 +1675,10 @@ class FlowEditor(QWidget):
         self.btn_load.setEnabled(enabled)
         self.btn_save.setEnabled(enabled)
         self.btn_import.setEnabled(enabled)
+        if enabled:
+            self.btn_stop_loop.setVisible(False)
+            self.btn_stop_loop.setEnabled(False)
+            self.btn_stop_loop.setText("Stop Loop")
         
         if enabled:
             self.btn_run.setText("RUN PIPELINE")
@@ -1679,6 +1764,9 @@ class FlowEditor(QWidget):
                     interactive_cfg = meta.get("interactive")
                     if interactive_cfg:
                         entry["interactive"] = interactive_cfg
+                    logic_cfg = meta.get("logic")
+                    if logic_cfg:
+                        entry["logic"] = logic_cfg
                     NODE_LIBRARY[node_key] = entry
                     count += 1
             
@@ -1904,20 +1992,3 @@ class FlowEditor(QWidget):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Could not save Zarr:\n{e}")
-
-    def open_loop_dialog(self):
-        # Get all nodes
-        nodes = [item for item in self.scene.items() if isinstance(item, Node)]
-        if not nodes: return
-        
-        # We should ideally sort them topologically first so the list is in order
-        # You can use the engine's static sorter or just list them raw
-        # For better UX, let's just pass them raw for now
-        
-        dlg = LoopConfigDialog(nodes, self)
-        if dlg.exec_():
-            loop_uids, iterations = dlg.get_config()
-            if not loop_uids: return
-            
-            # Start Execution with Loop Config
-            self.run_pipeline(loop_config={"nodes": loop_uids, "iterations": iterations})

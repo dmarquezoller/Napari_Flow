@@ -5,6 +5,13 @@ from .decorator import register_node
     label="Loop",
     category="Control Flow",
     outputs=[],
+    logic={
+        "in": True,
+        "out": True,
+        # Loop uses single feedback links by design (for now).
+        "allow_multi_in": False,
+        "allow_multi_out": False,
+    },
     params_config={
         "mode": {"options": ["N times", "Until confirm"]},
         "iterations": {"min": 1, "max": 100, "step": 1},

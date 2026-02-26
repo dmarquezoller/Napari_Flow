@@ -18,18 +18,21 @@ class ExecutionWorker(QObject):
 
     # Interactive node signals  (engine ⇄ main-thread dialog)
     interaction_request_signal = Signal(str, dict)   # (node_uid, interactive_config)
+    # Loop control signal (engine ⇄ main-thread UI stop button)
+    loop_control_state_signal = Signal(bool, str)    # (active, loop_node_uid)
     # The main thread calls ``provide_interaction_result`` which sets the
     # threading.Event so the worker thread can continue.
 
-    def __init__(self, scene, viewer, loop_config=None):
+    def __init__(self, scene, viewer):
         super().__init__()
         self.scene = scene
         self.viewer = viewer
-        self.loop_config = loop_config 
 
         # Interaction synchronisation primitives
         self._interaction_event = threading.Event()
         self._interaction_result = None   # set by main thread
+        self._loop_stop_requested = False
+        self._stop_sentinel = object()
 
     # Called from the **main thread** (via signal/slot) to unblock the worker.
     def provide_interaction_result(self, data):
@@ -53,6 +56,176 @@ class ExecutionWorker(QObject):
         self._interaction_event.wait()
         return self._interaction_result
 
+    def request_loop_stop(self):
+        """Called from the main thread to stop an active 'Until confirm' loop."""
+        self._loop_stop_requested = True
+        # If worker is blocked waiting for an interactive node,
+        # unblock it immediately so the loop can stop now.
+        self._interaction_result = self._stop_sentinel
+        self._interaction_event.set()
+
+    def _reset_node_cache(self, node):
+        node.last_signature = None
+        node.cached_results = {}
+
+    def _execute_single_node(self, node, library_def):
+        try:
+            current_signature = self.calculate_signature(node)
+            if current_signature == node.last_signature:
+                self.log_signal.emit(f"Skipping: {node.title} (Cached)")
+                self.node_status_signal.emit(node.uid, "green")
+                return
+
+            self.node_status_signal.emit(node.uid, "yellow")
+            results = self.execute_node_logic(node, library_def)
+            node.cached_results = results
+            node.last_signature = current_signature
+            self.node_status_signal.emit(node.uid, "green")
+        except InterruptedError:
+            # Expected path when a loop stop interrupts interactive waiting.
+            self.node_status_signal.emit(node.uid, "green")
+            raise
+        except Exception:
+            self.node_status_signal.emit(node.uid, "red")
+            raise
+
+    def _build_loop_group(self, loop_node, sorted_nodes):
+        start_nodes = []
+        end_nodes = []
+
+        for socket in getattr(loop_node, "logic_outputs", []):
+            for edge in socket.connected_edges:
+                if edge.end_socket:
+                    n = edge.end_socket.node
+                    if n is not loop_node:
+                        start_nodes.append(n)
+
+        for socket in getattr(loop_node, "logic_inputs", []):
+            for edge in socket.connected_edges:
+                if edge.start_socket:
+                    n = edge.start_socket.node
+                    if n is not loop_node:
+                        end_nodes.append(n)
+
+        # Preserve order while de-duplicating
+        start_nodes = list(dict.fromkeys(start_nodes))
+        end_nodes = list(dict.fromkeys(end_nodes))
+        if not start_nodes or not end_nodes:
+            return None
+
+        # Nodes in the loop body are those reachable from starts (forward)
+        # and also able to reach ends (backward), using DATA edges only.
+        forward = set()
+        stack = list(start_nodes)
+        while stack:
+            node = stack.pop()
+            if node in forward or getattr(node, "node_type", "") == "loop_control":
+                continue
+            forward.add(node)
+            for out_socket in getattr(node, "outputs", []):
+                for edge in out_socket.connected_edges:
+                    if edge.end_socket:
+                        nxt = edge.end_socket.node
+                        if nxt not in forward:
+                            stack.append(nxt)
+
+        backward = set()
+        stack = list(end_nodes)
+        while stack:
+            node = stack.pop()
+            if node in backward or getattr(node, "node_type", "") == "loop_control":
+                continue
+            backward.add(node)
+            for in_socket in getattr(node, "inputs", []):
+                if in_socket.connected_edges:
+                    prev = in_socket.connected_edges[0].start_socket.node
+                    if prev not in backward:
+                        stack.append(prev)
+
+        body_nodes = (forward & backward) | set(start_nodes) | set(end_nodes)
+        body_order = [n for n in sorted_nodes if n in body_nodes and n is not loop_node]
+        if not body_order:
+            return None
+
+        params = getattr(loop_node, "parameters", {}) or {}
+        mode = params.get("mode", "N times")
+        try:
+            iterations = int(params.get("iterations", 1))
+        except Exception:
+            iterations = 1
+        iterations = max(1, iterations)
+
+        return {
+            "loop_node": loop_node,
+            "mode": mode,
+            "iterations": iterations,
+            "body_order": body_order,
+        }
+
+    def detect_loop_groups(self, sorted_nodes):
+        groups = []
+        for node in sorted_nodes:
+            if getattr(node, "node_type", "") != "loop_control":
+                continue
+            group = self._build_loop_group(node, sorted_nodes)
+            if group is None:
+                self.log_signal.emit(
+                    f"⚠️ Loop '{node.title}' is missing logic links; skipping loop behavior."
+                )
+                continue
+            groups.append(group)
+        return groups
+
+    def _execute_loop_group(self, group, library_def):
+        loop_node = group["loop_node"]
+        body_order = group["body_order"]
+        mode = group["mode"]
+
+        if mode == "Until confirm":
+            self._loop_stop_requested = False
+            self.loop_control_state_signal.emit(True, loop_node.uid)
+            try:
+                iteration = 0
+                while True:
+                    if self._loop_stop_requested:
+                        break
+                    iteration += 1
+                    self.log_signal.emit(
+                        f"🔁 Loop '{loop_node.title}' iteration {iteration} (Until confirm)"
+                    )
+                    if iteration > 1:
+                        for node in body_order:
+                            self._reset_node_cache(node)
+
+                    for node in body_order:
+                        if self._loop_stop_requested:
+                            break
+                        try:
+                            self._execute_single_node(node, library_def)
+                        except InterruptedError:
+                            self._loop_stop_requested = True
+                            break
+                        if self._loop_stop_requested:
+                            break
+
+                    if self._loop_stop_requested:
+                        break
+            finally:
+                self.loop_control_state_signal.emit(False, loop_node.uid)
+                self._loop_stop_requested = False
+        else:
+            iterations = group["iterations"]
+            for iteration in range(iterations):
+                self.log_signal.emit(
+                    f"🔁 Loop '{loop_node.title}' iteration {iteration + 1}/{iterations}"
+                )
+                if iteration > 0:
+                    for node in body_order:
+                        self._reset_node_cache(node)
+
+                for node in body_order:
+                    self._execute_single_node(node, library_def)
+
     def run(self):
         try:
             self.log_signal.emit("--- Starting Smart Execution ---")
@@ -66,62 +239,30 @@ class ExecutionWorker(QObject):
                 return
 
             sorted_nodes = self.topological_sort(nodes)
-            
-            # Determine loop parameters
-            if self.loop_config:
-                loop_uids = set(self.loop_config.get("nodes", []))
-                iterations = self.loop_config.get("iterations", 1)
-            else:
-                loop_uids = set()
-                iterations = 1
-            
-            for iteration in range(iterations):
-                # Log iteration if looping
-                if iterations > 1:
-                    self.log_signal.emit(f"🔁 Loop Iteration {iteration + 1}/{iterations}")
-                
-                # On iterations 2+, wipe cache of loop nodes so they re-execute
-                if iteration > 0:
-                    for node in sorted_nodes:
-                        if node.uid in loop_uids:
-                            node.last_signature = None
-                            node.cached_results = {}
-                
-                # Execute all nodes in topological order
-                for node in sorted_nodes:
-                    try:
-                        # 1. Calculate Signature
-                        current_signature = self.calculate_signature(node)
-                        
-                        # 2. Check Cache (THE FIX)
-                        # We strictly check the signature. 
-                        # We do NOT check 'node.status' because the UI might have reset it to Gray.
-                        # We do NOT check 'cached_results' too strictly to avoid false negatives.
-                        if current_signature == node.last_signature:
-                            self.log_signal.emit(f"Skipping: {node.title} (Cached)")
-                            
-                            # IMPORTANT: Force the UI to turn Green. 
-                            # This fixes the issue where cached nodes looked "Pending/Gray".
-                            self.node_status_signal.emit(node.uid, "green")
-                            
-                            continue # SKIP EXECUTION (Keep existing results)
-                        
-                        # 3. Execution (If we get here, cache missed)
-                        self.node_status_signal.emit(node.uid, "yellow") # Turn Yellow
-                        
-                        # Run Logic
-                        results = self.execute_node_logic(node, NODE_LIBRARY)
-                        
-                        # 4. Update Cache
-                        node.cached_results = results
-                        node.last_signature = current_signature
-                        self.node_status_signal.emit(node.uid, "green") # Turn Green
-                        
-                    except Exception as e:
-                        self.node_status_signal.emit(node.uid, "red")
-                        # Log the specific error for easier debugging
-                        print(f"Error in node {node.title}: {e}") 
-                        raise e 
+            loop_groups = self.detect_loop_groups(sorted_nodes)
+
+            group_by_node_uid = {}
+            for group in loop_groups:
+                gid = group["loop_node"].uid
+                for body_node in group["body_order"]:
+                    group_by_node_uid[body_node.uid] = gid
+
+            executed_groups = set()
+            groups_by_uid = {g["loop_node"].uid: g for g in loop_groups}
+
+            for node in sorted_nodes:
+                if getattr(node, "node_type", "") == "loop_control":
+                    continue
+
+                group_uid = group_by_node_uid.get(node.uid)
+                if group_uid is not None:
+                    if group_uid in executed_groups:
+                        continue
+                    self._execute_loop_group(groups_by_uid[group_uid], NODE_LIBRARY)
+                    executed_groups.add(group_uid)
+                    continue
+
+                self._execute_single_node(node, NODE_LIBRARY)
 
             self.log_signal.emit("--- Execution Finished ---")
 
@@ -251,7 +392,11 @@ class ExecutionWorker(QObject):
                 f"⏳ Waiting for user interaction on '{node.title}'..."
             )
             interaction_data = self._request_interaction(node.uid, interactive_config)
+            if interaction_data is self._stop_sentinel:
+                raise InterruptedError("Loop stop requested during interaction.")
             if interaction_data is None:
+                if self._loop_stop_requested:
+                    raise InterruptedError("Loop stop requested during interaction.")
                 raise RuntimeError(
                     f"Interaction cancelled for '{node.title}'."
                 )
