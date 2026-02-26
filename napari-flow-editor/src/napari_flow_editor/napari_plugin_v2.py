@@ -568,7 +568,7 @@ class FlowEditor(QWidget):
             print(f"CRITICAL ERROR loading node library: {e}")
 
         self.viewer = viewer
-        self._active_interaction_dialog = None
+        self._pending_interaction = None
         
         # 1. Main Layout
         self.layout = QVBoxLayout()
@@ -906,6 +906,38 @@ class FlowEditor(QWidget):
                     widget.textChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
 
                 self.props_layout.addRow(param_name.capitalize(), widget)
+
+        # --- INTERACTIVE CARD (inline in parameters panel) ---
+        pending = self._pending_interaction
+        if pending and pending.get("node_uid") == node.uid:
+            prompt = pending.get("config", {}).get(
+                "prompt", "Draw on the layer, then click Run."
+            )
+            self.props_layout.addRow(QLabel(""))
+            self.props_layout.addRow(QLabel("<u>Interactive</u>"))
+
+            prompt_lbl = QLabel(prompt)
+            prompt_lbl.setWordWrap(True)
+            prompt_lbl.setStyleSheet(
+                "font-size: 12px; padding: 6px; color: #ddd; background: #2d2d2d; border-radius: 4px;"
+            )
+            self.props_layout.addRow(prompt_lbl)
+
+            btns = QWidget()
+            btns_layout = QHBoxLayout(btns)
+            btns_layout.setContentsMargins(0, 0, 0, 0)
+            btn_cancel = QPushButton("Cancel")
+            btn_run = QPushButton("Run")
+            btn_run.setStyleSheet(
+                "QPushButton { background-color: #2E7D32; color: white; font-weight: bold; }"
+                "QPushButton:hover { background-color: #388E3C; }"
+            )
+            btn_cancel.clicked.connect(self._on_inline_interaction_cancel)
+            btn_run.clicked.connect(self._on_inline_interaction_run)
+            btns_layout.addStretch()
+            btns_layout.addWidget(btn_cancel)
+            btns_layout.addWidget(btn_run)
+            self.props_layout.addRow(btns)
 
         # Spacer
         self.props_layout.addRow(QLabel("")) 
@@ -1317,12 +1349,8 @@ class FlowEditor(QWidget):
             self.worker.request_loop_stop()
             self.btn_stop_loop.setEnabled(False)
             self.btn_stop_loop.setText("Stopping...")
-        # If an interactive dialog is currently open, close it immediately.
-        if self._active_interaction_dialog is not None:
-            try:
-                self._active_interaction_dialog.reject()
-            except Exception:
-                pass
+        # Also dismiss any pending inline interaction UI/layer immediately.
+        self._finish_pending_interaction(data=None, notify_worker=False)
 
     def handle_loop_control_state(self, active, loop_node_uid):
         """Show/hide the loop stop button while an 'Until confirm' loop is active."""
@@ -1348,8 +1376,63 @@ class FlowEditor(QWidget):
                 break
 
     # -----------------------------------------------------------------
-    # INTERACTIVE NODE DIALOG
+    # INTERACTIVE NODE UI (inline in parameter panel)
     # -----------------------------------------------------------------
+    def _find_node_by_uid(self, node_uid):
+        for item in self.scene.items():
+            if isinstance(item, Node) and item.uid == node_uid:
+                return item
+        return None
+
+    def _select_node_for_properties(self, node_uid):
+        target = self._find_node_by_uid(node_uid)
+        if target is None:
+            return
+        for item in self.scene.selectedItems():
+            item.setSelected(False)
+        target.setSelected(True)
+        self.on_selection()
+
+    def _cleanup_pending_interaction_layer(self):
+        pending = self._pending_interaction
+        if not pending:
+            return
+        layer_name = pending.get("layer_name")
+        if not layer_name:
+            return
+        try:
+            if layer_name in self.viewer.layers:
+                self.viewer.layers.remove(layer_name)
+        except Exception:
+            pass
+
+    def _finish_pending_interaction(self, data=None, notify_worker=True):
+        if not self._pending_interaction:
+            return
+        self._cleanup_pending_interaction_layer()
+        self._pending_interaction = None
+        self.on_selection()
+        if notify_worker and hasattr(self, "worker") and self.worker is not None:
+            self.worker.provide_interaction_result(data)
+
+    def _on_inline_interaction_run(self):
+        pending = self._pending_interaction
+        if not pending:
+            return
+        layer_name = pending.get("layer_name")
+        data = None
+        try:
+            if layer_name in self.viewer.layers:
+                roi_layer = self.viewer.layers[layer_name]
+                if len(roi_layer.data) > 0:
+                    data = [np.array(s) for s in roi_layer.data]
+        except Exception:
+            data = None
+        self._finish_pending_interaction(data=data, notify_worker=True)
+
+    def _on_inline_interaction_cancel(self):
+        self._finish_pending_interaction(data=None, notify_worker=True)
+
     def handle_interaction_request(self, node_uid, config):
         """
         Called on the **main thread** when an interactive node needs user input.
@@ -1366,14 +1449,12 @@ class FlowEditor(QWidget):
             }
 
         Flow:
-          1. Create a temporary napari layer with the requested settings.
-          2. Show a small dialog with the prompt text and a **Run** / **Cancel** button.
-          3. When Run is clicked, collect the drawn data, remove the temp layer,
-             and call ``worker.provide_interaction_result(data)``.
+          1. Create a temporary napari layer with requested settings.
+          2. Store pending interaction state and show controls in Node Properties.
+          3. Run/Cancel in the panel calls ``worker.provide_interaction_result``.
         """
         layer_type = config.get("layer_type", "shapes")
         layer_name = f"__interactive_{node_uid[:8]}__"
-        prompt = config.get("prompt", "Draw on the layer, then click Run.")
 
         # --- 1. Create temporary layer ---
         try:
@@ -1399,89 +1480,13 @@ class FlowEditor(QWidget):
             self.worker.provide_interaction_result(None)
             return
 
-        # --- 2. Build dialog ---
-        dialog = QDialog(self)
-        self._active_interaction_dialog = dialog
-        dialog.setWindowTitle("Interactive Node")
-        dialog.setMinimumWidth(320)
-        dlg_layout = QVBoxLayout(dialog)
-
-        # Prompt label
-        lbl = QLabel(prompt)
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet("font-size: 13px; padding: 8px;")
-        dlg_layout.addWidget(lbl)
-
-        # Button row
-        btn_layout = QHBoxLayout()
-        btn_run = QPushButton("▶  Run")
-        btn_run.setStyleSheet(
-            "QPushButton { background-color: #2E7D32; color: white; "
-            "font-weight: bold; font-size: 13px; padding: 6px 20px; "
-            "border-radius: 4px; }"
-            "QPushButton:hover { background-color: #388E3C; }"
-        )
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet(
-            "QPushButton { background-color: #555; color: white; "
-            "font-size: 13px; padding: 6px 20px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #777; }"
-        )
-        btn_layout.addStretch()
-        btn_layout.addWidget(btn_cancel)
-        btn_layout.addWidget(btn_run)
-        dlg_layout.addLayout(btn_layout)
-
-        # --- 3. Connect buttons ---
-        # Guard against double-fire (Cancel button also emits rejected)
-        _resolved = {"done": False}
-
-        def _cleanup_layer():
-            try:
-                if layer_name in self.viewer.layers:
-                    self.viewer.layers.remove(layer_name)
-            except Exception:
-                pass
-
-        def _on_run():
-            if _resolved["done"]:
-                return
-            _resolved["done"] = True
-            try:
-                data = [np.array(s) for s in roi_layer.data] if len(roi_layer.data) > 0 else None
-            except Exception:
-                data = None
-            _cleanup_layer()
-            self._active_interaction_dialog = None
-            dialog.accept()
-            self.worker.provide_interaction_result(data)
-
-        def _on_cancel():
-            if _resolved["done"]:
-                return
-            _resolved["done"] = True
-            _cleanup_layer()
-            self._active_interaction_dialog = None
-            dialog.reject()
-            self.worker.provide_interaction_result(None)
-
-        def _on_rejected():
-            # Fired by the X button OR by _on_cancel's dialog.reject().
-            # The guard ensures we only call provide_interaction_result once.
-            if _resolved["done"]:
-                return
-            _resolved["done"] = True
-            _cleanup_layer()
-            self._active_interaction_dialog = None
-            self.worker.provide_interaction_result(None)
-
-        btn_run.clicked.connect(_on_run)
-        btn_cancel.clicked.connect(_on_cancel)
-        dialog.rejected.connect(_on_rejected)
-
-        # Show non-modal so the user can still interact with the napari canvas
-        dialog.setModal(False)
-        dialog.show()
+        # --- 2. Store pending interaction and show inline controls ---
+        self._pending_interaction = {
+            "node_uid": node_uid,
+            "config": config,
+            "layer_name": layer_name,
+        }
+        self._select_node_for_properties(node_uid)
 
     def handle_execution_result(self, node_title, output_name, data):
 
@@ -1679,6 +1684,9 @@ class FlowEditor(QWidget):
             self.btn_stop_loop.setVisible(False)
             self.btn_stop_loop.setEnabled(False)
             self.btn_stop_loop.setText("Stop Loop")
+            # Safety: if execution ended unexpectedly while waiting for interaction,
+            # clear the inline interaction state/layer.
+            self._finish_pending_interaction(data=None, notify_worker=False)
         
         if enabled:
             self.btn_run.setText("RUN PIPELINE")
