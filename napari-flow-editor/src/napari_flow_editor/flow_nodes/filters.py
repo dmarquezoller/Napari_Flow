@@ -547,3 +547,5 @@ def threshold_isodata(image, nbins: int = 256):
 def wiener(image, psf, balance: float = 0.25, clip: bool = True):
     # psf is impulse_response. It must be an image input.
     return skimage.filters.wiener(image, impulse_response=psf, K=balance, clip=clip)
+
+

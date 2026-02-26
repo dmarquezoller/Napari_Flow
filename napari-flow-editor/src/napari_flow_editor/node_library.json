@@ -1,4 +1,34 @@
 {
+  "loop_control": {
+    "label": "Loop",
+    "category": "Control Flow",
+    "inputs": [],
+    "outputs": [],
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "N times",
+        "options": [
+          "N times",
+          "Until confirm",
+          "Until folder empty"
+        ]
+      },
+      "iterations": {
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 100,
+        "step": 1
+      },
+      "folder_path": {
+        "type": "path",
+        "default": "",
+        "mode": "directory"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.control_flow.loop_control"
+  },
   "refine_stardist_model": {
     "label": "Refine StarDist Model",
     "category": "Deep Learning",

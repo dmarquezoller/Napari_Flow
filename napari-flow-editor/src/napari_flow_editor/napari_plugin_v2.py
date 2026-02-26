@@ -50,10 +50,13 @@ class Socket(QGraphicsEllipseItem):
         if self.is_logic:
             # Logic sockets sit at the bottom corners, shifted slightly inward
             # and downward so they don't overlap with data sockets
+            is_loop_node = getattr(node, "node_type", "") == "loop_control"
             if socket_type == "logic_in":
-                self.local_offset = QPointF(14, h - 2)        # bottom-left
+                # Loop node is intentionally reversed: logic_in on right.
+                self.local_offset = QPointF(w - 14, h - 2) if is_loop_node else QPointF(14, h - 2)
             else:  # logic_out
-                self.local_offset = QPointF(w - 14, h - 2)    # bottom-right
+                # Loop node is intentionally reversed: logic_out on left.
+                self.local_offset = QPointF(14, h - 2) if is_loop_node else QPointF(w - 14, h - 2)
             color = QColor("#8888cc")  # muted blue-purple
             self.setToolTip(f"Logic: {socket_type}")
         else:
