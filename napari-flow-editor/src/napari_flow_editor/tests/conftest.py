@@ -14,11 +14,14 @@ class FakeViewer:
 
 
 class FakeSocket:
-    def __init__(self, name, is_logic=False):
+    def __init__(self, name, is_logic=False, socket_type=None):
         self.name = name
         self.connected_edges = []
         self.is_logic = is_logic
-        self.socket_type = ("logic_in" if is_logic else "input")  # default; tests can override
+        if socket_type is not None:
+            self.socket_type = socket_type
+        else:
+            self.socket_type = ("logic_in" if is_logic else "input")  # default; tests can override
 
 
 class FakeEdge:
@@ -27,7 +30,16 @@ class FakeEdge:
 
 
 class FakeNode:
-    def __init__(self, node_type, title="Node", params=None, inputs=None, outputs=None):
+    def __init__(
+        self,
+        node_type,
+        title="Node",
+        params=None,
+        inputs=None,
+        outputs=None,
+        logic_inputs=None,
+        logic_outputs=None,
+    ):
         self.node_type = node_type
         self.title = title
         self.uid = "fake-uid"
@@ -35,10 +47,20 @@ class FakeNode:
         self.parameters = self.params.copy()
         self.inputs = inputs or []
         self.outputs = outputs or []
-        self.logic_inputs = []
-        self.logic_outputs = []
+        # Most nodes in the new model are exec-enabled by default.
+        self.logic_inputs = (
+            logic_inputs
+            if logic_inputs is not None
+            else [FakeSocket("logic_in", is_logic=True, socket_type="logic_in")]
+        )
+        self.logic_outputs = (
+            logic_outputs
+            if logic_outputs is not None
+            else [FakeSocket("exec_out", is_logic=True, socket_type="logic_out")]
+        )
         self.cached_results = {}
         self.last_signature = None
+        self.status = "green"
 
     def all_sockets(self):
         return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs

@@ -32,99 +32,194 @@ class _Node:
         self.cached_results = {}
 
 
-def _connect_data(src_node, dst_node):
-    src = src_node.outputs[0]
-    dst = dst_node.inputs[0]
-    _Edge(src, dst)
-
-
-def _connect_logic(src_node, src_attr, dst_node, dst_attr):
-    src = getattr(src_node, src_attr)[0]
-    dst = getattr(dst_node, dst_attr)[0]
-    _Edge(src, dst)
-
-
 def _make_worker():
     scene = SimpleNamespace(items=lambda: [])
     viewer = SimpleNamespace(layers={})
     return ExecutionWorker(scene, viewer)
 
 
-def test_detect_loop_group_finds_body_nodes_in_order():
-    worker = _make_worker()
+def _with_exec_input(node):
+    sock = _Socket(node, "logic_in")
+    node.logic_inputs = [sock]
+    return sock
 
-    loop = _Node("loop", node_type="loop_control", mode="N times", iterations=3)
+
+def _with_exec_outputs(node, names):
+    node.logic_outputs = [_Socket(node, n) for n in names]
+    return node.logic_outputs
+
+
+def _connect_exec(src_node, out_name, dst_node):
+    src = next(s for s in src_node.logic_outputs if s.name == out_name)
+    dst = dst_node.logic_inputs[0]
+    _Edge(src, dst)
+
+
+def test_next_logic_node_uses_named_output():
+    worker = _make_worker()
+    loop = _Node("loop", node_type="loop_control")
+    body = _Node("body")
+    done = _Node("done")
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_input(done)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
+    assert worker._next_logic_node(loop, "loop_body") is body
+    assert worker._next_logic_node(loop, "completed") is done
+
+
+def test_next_logic_node_defaults_to_first_output():
+    worker = _make_worker()
+    n = _Node("n")
     a = _Node("a")
     b = _Node("b")
-    c = _Node("c")
+    _with_exec_outputs(n, ["first", "second"])
+    _with_exec_input(a)
+    _with_exec_input(b)
+    _connect_exec(n, "first", a)
+    _connect_exec(n, "second", b)
 
-    for n in (loop, a, b, c):
-        n.inputs = [_Socket(n, "in")]
-        n.outputs = [_Socket(n, "out")]
-        n.logic_inputs = [_Socket(n, "logic_in")]
-        n.logic_outputs = [_Socket(n, "logic_out")]
-
-    _connect_data(a, b)
-    _connect_data(b, c)
-    _connect_logic(loop, "logic_outputs", a, "logic_inputs")
-    _connect_logic(c, "logic_outputs", loop, "logic_inputs")
-
-    groups = worker.detect_loop_groups([a, b, c, loop])
-    assert len(groups) == 1
-    group = groups[0]
-
-    assert group["mode"] == "N times"
-    assert group["iterations"] == 3
-    assert [n.uid for n in group["body_order"]] == ["a", "b", "c"]
+    assert worker._next_logic_node(n) is a
 
 
-def test_execute_loop_group_n_times_runs_expected_iterations():
+def test_execute_loop_node_n_times_runs_body_and_returns_completed():
     worker = _make_worker()
-    node1 = _Node("n1")
-    node2 = _Node("n2")
+    loop = _Node("loop", node_type="loop_control", mode="N times", iterations=3)
+    body = _Node("body")
+    done = _Node("done")
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_input(done)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
     calls = []
 
-    def _fake_exec(node, _library):
-        calls.append(node.uid)
+    def _fake_exec_path(start_node, _library, force_recompute=False):
+        calls.append((start_node.uid, force_recompute))
 
-    worker._execute_single_node = _fake_exec
-    group = {
-        "loop_node": _Node("loop", node_type="loop_control", mode="N times", iterations=3),
-        "mode": "N times",
-        "iterations": 3,
-        "body_order": [node1, node2],
-    }
+    worker._execute_exec_path = _fake_exec_path
+    nxt = worker._execute_loop_node(loop, library_def={})
 
-    worker._execute_loop_group(group, library_def={})
-    assert calls == ["n1", "n2", "n1", "n2", "n1", "n2"]
+    assert calls == [("body", True), ("body", True), ("body", True)]
+    assert nxt is done
 
 
-def test_execute_loop_group_until_confirm_stops_on_request():
+def test_execute_loop_node_without_body_logs_warning_and_continues_completed():
     worker = _make_worker()
-    node1 = _Node("n1")
-    node2 = _Node("n2")
-    loop_node = _Node("loop", node_type="loop_control", mode="Until confirm", iterations=1)
-    calls = []
+    loop = _Node("loop", node_type="loop_control", mode="N times", iterations=3)
+    done = _Node("done")
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(done)
+    _connect_exec(loop, "completed", done)
+
+    logs = []
+    worker.log_signal.connect(logs.append)
+    nxt = worker._execute_loop_node(loop, library_def={})
+
+    assert nxt is done
+    assert any("has no Loop Body connection" in msg for msg in logs)
+
+
+def test_execute_loop_node_until_confirm_stops_immediately():
+    worker = _make_worker()
+    loop = _Node("loop", node_type="loop_control", mode="Until confirm", iterations=1)
+    body = _Node("body")
+    done = _Node("done")
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_input(done)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
     signals = []
+    worker.loop_control_state_signal.connect(lambda active, uid: signals.append((active, uid)))
 
-    worker.loop_control_state_signal.connect(
-        lambda active, uid: signals.append((active, uid))
-    )
+    calls = []
 
-    def _fake_exec(node, _library):
-        calls.append(node.uid)
-        # Stop immediately after first node executes.
-        if len(calls) == 1:
-            worker.request_loop_stop()
+    def _fake_exec_path(start_node, _library, force_recompute=False):
+        calls.append((start_node.uid, force_recompute))
+        worker.request_loop_stop()
 
-    worker._execute_single_node = _fake_exec
-    group = {
-        "loop_node": loop_node,
-        "mode": "Until confirm",
-        "iterations": 1,
-        "body_order": [node1, node2],
-    }
+    worker._execute_exec_path = _fake_exec_path
+    nxt = worker._execute_loop_node(loop, library_def={})
 
-    worker._execute_loop_group(group, library_def={})
-    assert calls == ["n1"]
+    assert calls == [("body", True)]
     assert signals == [(True, "loop"), (False, "loop")]
+    assert nxt is done
+
+
+def test_execute_exec_path_runs_loop_then_completed_branch():
+    worker = _make_worker()
+    a = _Node("a")
+    loop = _Node("loop", node_type="loop_control", mode="N times", iterations=2)
+    body = _Node("body")
+    done = _Node("done")
+
+    _with_exec_input(a)
+    _with_exec_outputs(a, ["exec_out"])
+    _with_exec_input(loop)
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_outputs(body, ["exec_out"])  # unconnected -> end body path
+    _with_exec_input(done)
+    _with_exec_outputs(done, ["exec_out"])  # unconnected -> end main path
+
+    _connect_exec(a, "exec_out", loop)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
+    calls = []
+
+    def _fake_exec_single(node, _library, force_recompute=False):
+        calls.append((node.uid, force_recompute))
+
+    worker._execute_single_node = _fake_exec_single
+    worker._execute_exec_path(a, library_def={})
+
+    assert calls == [
+        ("a", False),
+        ("body", True),
+        ("body", True),
+        ("done", False),
+    ]
+
+
+def test_execute_node_logic_refreshes_dirty_data_source():
+    worker = _make_worker()
+    src = _Node("src")
+    dst = _Node("dst", node_type="consumer")
+    dst.parameters = {}
+
+    src_out = _Socket(src, "data_out")
+    dst_in = _Socket(dst, "image_input")
+    src.outputs = [src_out]
+    dst.inputs = [dst_in]
+    _Edge(src_out, dst_in)
+
+    # Stale cache exists, but source is marked dirty.
+    src.cached_results = {"data_out": ("old", {"name": "old"})}
+    src.last_signature = None
+    src.status = "gray"
+
+    calls = []
+
+    def _fake_exec_single(node, _library, force_recompute=False):
+        calls.append((node.uid, force_recompute))
+        node.cached_results["data_out"] = ("new", {"name": "new"})
+        node.last_signature = "fresh"
+        node.status = "green"
+
+    worker._execute_single_node = _fake_exec_single
+
+    library_def = {
+        "consumer": {
+            "executable": lambda image_input: image_input,
+            "outputs": [],
+        }
+    }
+    worker.execute_node_logic(dst, library_def)
+
+    assert calls == [("src", True)]

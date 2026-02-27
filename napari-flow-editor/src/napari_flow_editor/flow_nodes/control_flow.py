@@ -1,5 +1,22 @@
 from .decorator import register_node
 
+# --- BEGIN NODE (Control-Flow) ---
+@register_node(
+    label="Begin",
+    category="Control Flow",
+    outputs=[],
+    logic={
+        "in": False,
+        "out": True,
+        "allow_multi_in": False,
+        "allow_multi_out": False,
+    },
+    params_config={},
+)
+def begin():
+    """Entry point for the exec thread."""
+    return None
+
 # --- LOOP NODE (Control-Flow) ---
 @register_node(
     label="Loop",

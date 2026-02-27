@@ -82,20 +82,21 @@ def interactive_crop(image_input, t_crop=":", interaction=None):
     y_min, x_min = int(min_coords[-2]), int(min_coords[-1])
     y_max, x_max = int(max_coords[-2]), int(max_coords[-1])
 
-    y_min, x_min = max(0, y_min), max(0, x_min)
-    if y_max <= y_min: y_max = y_min + 1
-    if x_max <= x_min: x_max = x_min + 1
-    
-    sl_y = slice(y_min, y_max)
-    sl_x = slice(x_min, x_max)
-
-    print(f"--- Cropping Input: {image.shape} ---")
-    print(f"  > ROI: Y[{y_min}:{y_max}], X[{x_min}:{x_max}]")
+    def _clamp_roi(y0, y1, x0, x1, h, w):
+        if h <= 0 or w <= 0:
+            raise ValueError(f"Invalid image spatial shape: ({h}, {w})")
+        y0 = int(np.clip(y0, 0, h - 1))
+        x0 = int(np.clip(x0, 0, w - 1))
+        y1 = int(np.clip(y1, y0 + 1, h))
+        x1 = int(np.clip(x1, x0 + 1, w))
+        return y0, y1, x0, x1
 
     # C. Smart Slicing Logic (Exact copy of your template)
     try:
         out = None
         is_rgb = False # Flag we will detect
+        sl_y = None
+        sl_x = None
 
         # Case 4D
         if image.ndim == 4:
@@ -104,21 +105,23 @@ def interactive_crop(image_input, t_crop=":", interaction=None):
                 # (Time, Y, X, Channel) -> THIS IS YOUR CASE
                 print("  > Detecting (Time, Y, X, C) structure")
                 is_rgb = True # <--- We mark this!
-                
-                y_max_safe = min(image.shape[1], y_max)
-                x_max_safe = min(image.shape[2], x_max)
-                sl_y = slice(y_min, y_max_safe)
-                sl_x = slice(x_min, x_max_safe)
+
+                y0, y1, x0, x1 = _clamp_roi(
+                    y_min, y_max, x_min, x_max, image.shape[1], image.shape[2]
+                )
+                sl_y = slice(y0, y1)
+                sl_x = slice(x0, x1)
                 
                 out = image[sl_t, sl_y, sl_x, :]
                 
             else:
                 # (Time, Z, Y, X)
                 print("  > Detecting (Time, Z, Y, X) structure")
-                y_max_safe = min(image.shape[2], y_max)
-                x_max_safe = min(image.shape[3], x_max)
-                sl_y = slice(y_min, y_max_safe)
-                sl_x = slice(x_min, x_max_safe)
+                y0, y1, x0, x1 = _clamp_roi(
+                    y_min, y_max, x_min, x_max, image.shape[2], image.shape[3]
+                )
+                sl_y = slice(y0, y1)
+                sl_x = slice(x0, x1)
                 
                 out = image[sl_t, :, sl_y, sl_x]
 
@@ -128,24 +131,37 @@ def interactive_crop(image_input, t_crop=":", interaction=None):
             if image.shape[-1] < 10:
                 print("  > Detecting (Y, X, C) structure")
                 is_rgb = True
+                y0, y1, x0, x1 = _clamp_roi(
+                    y_min, y_max, x_min, x_max, image.shape[0], image.shape[1]
+                )
+                sl_y = slice(y0, y1)
+                sl_x = slice(x0, x1)
                 out = image[sl_y, sl_x, :]
             else:
-                y_max_safe = min(image.shape[1], y_max)
-                x_max_safe = min(image.shape[2], x_max)
-                sl_y = slice(y_min, y_max_safe)
-                sl_x = slice(x_min, x_max_safe)
+                y0, y1, x0, x1 = _clamp_roi(
+                    y_min, y_max, x_min, x_max, image.shape[1], image.shape[2]
+                )
+                sl_y = slice(y0, y1)
+                sl_x = slice(x0, x1)
                 out = image[sl_t, sl_y, sl_x]
 
         # Case 2D: (Y, X)
         elif image.ndim == 2:
-            y_max_safe = min(image.shape[0], y_max)
-            x_max_safe = min(image.shape[1], x_max)
-            sl_y = slice(y_min, y_max_safe)
-            sl_x = slice(x_min, x_max_safe)
+            y0, y1, x0, x1 = _clamp_roi(
+                y_min, y_max, x_min, x_max, image.shape[0], image.shape[1]
+            )
+            sl_y = slice(y0, y1)
+            sl_x = slice(x0, x1)
             out = image[sl_y, sl_x]
 
         else:
             out = image
+
+        print(f"--- Cropping Input: {image.shape} ---")
+        if sl_y is not None and sl_x is not None:
+            print(f"  > ROI: Y[{sl_y.start}:{sl_y.stop}], X[{sl_x.start}:{sl_x.stop}]")
+        else:
+            print("  > ROI: Full image")
 
         # Safety Check
         if out is None or out.size == 0:

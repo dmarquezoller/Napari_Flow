@@ -62,27 +62,21 @@ class Socket(QGraphicsEllipseItem):
         w = node.rect().width()
 
         if self.is_logic:
-            is_control_flow = getattr(node, "category", "") == "Control Flow"
-            # Control nodes: middle sockets, inverted direction.
-            if is_control_flow:
-                side = "right" if socket_type == "logic_in" else "left"
-                logic_position = "middle"
-            # Other nodes: bottom sockets, forward direction.
-            else:
-                side = "left" if socket_type == "logic_in" else "right"
-                logic_position = "bottom"
+            # Exec pins always live on the sides (Unreal-style thread).
+            side = "left" if socket_type == "logic_in" else "right"
             x = 0 if side == "left" else w
-            y = (h / (total_sockets + 1)) * (index + 1)
-
-            if logic_position == "middle":
-                self.local_offset = QPointF(x, y)
+            # Keep exec pins in their own vertical lane (near the top) so they
+            # don't overlap data pins when a node has a single data in/out.
+            if total_sockets <= 1:
+                y = 24
             else:
-                # Legacy bottom-corner style
-                bx = 14 if side == "left" else (w - 14)
-                self.local_offset = QPointF(bx, h - 2)
-            # Distinct control colors: input=blue, output=lavender.
-            color = QColor("#5FA8D3") if socket_type == "logic_in" else QColor("#B08EC6")
-            self.setToolTip(f"Logic: {socket_type}")
+                top = 24
+                bottom = max(top + 1, h - 20)
+                step = (bottom - top) / max(total_sockets - 1, 1)
+                y = top + (step * index)
+            self.local_offset = QPointF(x, y)
+            color = QColor("#F2F2F2")
+            self.setToolTip(f"Exec: {self.name}")
         else:
             # Data sockets — original layout (left/right sides, evenly spaced)
             y = (h / (total_sockets + 1)) * (index + 1)
@@ -122,9 +116,9 @@ class Connection(QGraphicsPathItem):
         self.is_logic = getattr(start_socket, "is_logic", False)
         self.setZValue(1)
 
-        # Logic edges: dashed blue-purple line; Data edges: solid grey
+        # Exec edges: solid white line; Data edges: solid grey
         if self.is_logic:
-            pen = QPen(QColor("#8888cc"), 2, Qt.PenStyle.DashLine)
+            pen = QPen(QColor("#F2F2F2"), 2)
         else:
             pen = QPen(QColor("#444"), 2)
         self.setPen(pen)
@@ -140,14 +134,14 @@ class Connection(QGraphicsPathItem):
 
     def hoverEnterEvent(self, event):
         if self.is_logic:
-            self.setPen(QPen(QColor("#C6C6FF"), 3, Qt.PenStyle.DashLine))
+            self.setPen(QPen(QColor("#FFFFFF"), 3))
         else:
             self.setPen(QPen(QColor("#0078d7"), 3))
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
         if self.is_logic:
-            self.setPen(QPen(QColor("#8888cc"), 2, Qt.PenStyle.DashLine))
+            self.setPen(QPen(QColor("#F2F2F2"), 2))
         else:
             self.setPen(QPen(QColor("#444"), 2))
         super().hoverLeaveEvent(event)
@@ -172,12 +166,13 @@ class Connection(QGraphicsPathItem):
                 event.scenePos(), prefer_logic=self.is_logic
             )
             if self.is_logic:
-                # Logic edges: logic_out → logic_in, skip cycle check
+                # Exec edges: logic_out → logic_in, enforce acyclic exec thread
                 valid = (
                     target
                     and target.socket_type == "logic_in"
                     and target.can_accept_connection()
                     and not self.scene_ref.are_already_connected(self.start_socket, target)
+                    and not self.scene_ref.creates_logic_cycle(self.start_socket.node, target.node)
                 )
             else:
                 # Data edges: output → input, enforce DAG
@@ -284,22 +279,47 @@ class Node(QGraphicsRectItem):
         for i, name in enumerate(outputs_data):
             self.outputs.append(Socket(self, "output", name, i, len(outputs_data), max_connections=None))
 
-        # 5. Generate Logic sockets from node definition.
-        logic_in_enabled = bool(self.logic_config.get("in", True))
-        logic_out_enabled = bool(self.logic_config.get("out", True))
-        logic_in_max = None if self.logic_config.get("allow_multi_in", True) else 1
-        logic_out_max = None if self.logic_config.get("allow_multi_out", True) else 1
+        # 5. Generate Exec sockets (logic thread):
+        # - Begin: exec_out only
+        # - Loop: exec_in + (loop_body, completed) exec_outs
+        # - Source Inputs (no data inputs): no exec pins
+        # - Everything else: exec_in + exec_out
+        is_begin = self.node_type == "begin"
+        is_loop = self.node_type == "loop_control"
+        is_source_input = (
+            self.category in ("Inputs", "Input")
+            and len(inputs_data) == 0
+            and not is_begin
+            and not is_loop
+        )
+
+        has_exec_in = not (is_begin or is_source_input)
+        if is_begin:
+            exec_output_names = ["exec_out"]
+        elif is_loop:
+            exec_output_names = ["loop_body", "completed"]
+        elif is_source_input:
+            exec_output_names = []
+        else:
+            exec_output_names = ["exec_out"]
 
         self.logic_inputs = []
-        if logic_in_enabled:
+        if has_exec_in:
             self.logic_inputs.append(
-                Socket(self, "logic_in", "logic_in", 0, 1, max_connections=logic_in_max)
+                Socket(self, "logic_in", "logic_in", 0, 1, max_connections=1)
             )
 
         self.logic_outputs = []
-        if logic_out_enabled:
+        for i, out_name in enumerate(exec_output_names):
             self.logic_outputs.append(
-                Socket(self, "logic_out", "logic_out", 0, 1, max_connections=logic_out_max)
+                Socket(
+                    self,
+                    "logic_out",
+                    out_name,
+                    i,
+                    max(len(exec_output_names), 1),
+                    max_connections=1,
+                )
             )
 
         if scene:
@@ -453,6 +473,24 @@ class FlowScene(QGraphicsScene):
 
         return dfs(end_node)
 
+    def creates_logic_cycle(self, start_node, end_node):
+        visited = set()
+
+        def dfs(node):
+            if node == start_node:
+                return True
+            for s in getattr(node, "logic_outputs", []):
+                for e in s.connected_edges:
+                    if e.end_socket:
+                        next_node = e.end_socket.node
+                        if next_node not in visited:
+                            visited.add(next_node)
+                            if dfs(next_node):
+                                return True
+            return False
+
+        return dfs(end_node)
+
     def mousePressEvent(self, event):
         item = self.itemAt(event.scenePos(), self.views()[0].transform())
         if (
@@ -481,12 +519,13 @@ class FlowScene(QGraphicsScene):
             target = self.find_nearby_socket(pos, prefer_logic=is_logic)
 
             if is_logic:
-                # Logic edges: logic_out → logic_in, no cycle check
+                # Exec edges: logic_out → logic_in, enforce acyclic exec thread
                 valid = (
                     target
                     and target.socket_type == "logic_in"
                     and target.can_accept_connection()
                     and not self.are_already_connected(start_sock, target)
+                    and not self.creates_logic_cycle(start_sock.node, target.node)
                 )
             else:
                 # Data edges: output → input, enforce DAG
@@ -973,22 +1012,26 @@ class FlowEditor(QWidget):
                 status_lbl.setStyleSheet(style)
                 self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
 
-        # C. Logic (control-flow) connections — always shown
-        logic_in_count = sum(len(s.connected_edges) for s in node.logic_inputs)
-        logic_out_count = sum(len(s.connected_edges) for s in node.logic_outputs)
-        self.props_layout.addRow(QLabel("<b>Logic Flow:</b>"))
+        # C. Exec (logic thread) connections
+        self.props_layout.addRow(QLabel("<b>Exec Flow:</b>"))
+        if not node.logic_inputs and not node.logic_outputs:
+            self.props_layout.addRow("  (none)", QLabel("Data-only node"))
+        else:
+            for s in node.logic_inputs:
+                count = len(s.connected_edges)
+                txt = "Connected" if count else "Empty"
+                style = "color: #f2f2f2;" if count else "color: #888;"
+                lbl = QLabel(txt)
+                lbl.setStyleSheet(style)
+                self.props_layout.addRow(f"  ⟵ {s.name}", lbl)
 
-        li_text = f"{logic_in_count} link(s)" if logic_in_count else "Empty"
-        li_style = "color: #8888cc;" if logic_in_count else "color: #888;"
-        li_lbl = QLabel(li_text)
-        li_lbl.setStyleSheet(li_style)
-        self.props_layout.addRow("  ⟵ logic_in", li_lbl)
-
-        lo_text = f"{logic_out_count} link(s)" if logic_out_count else "Empty"
-        lo_style = "color: #8888cc;" if logic_out_count else "color: #888;"
-        lo_lbl = QLabel(lo_text)
-        lo_lbl.setStyleSheet(lo_style)
-        self.props_layout.addRow("  ⟶ logic_out", lo_lbl)
+            for s in node.logic_outputs:
+                count = len(s.connected_edges)
+                txt = "Connected" if count else "Empty"
+                style = "color: #f2f2f2;" if count else "color: #888;"
+                lbl = QLabel(txt)
+                lbl.setStyleSheet(style)
+                self.props_layout.addRow(f"  ⟶ {s.name}", lbl)
         
         self.props_layout.addRow(QLabel("")) 
 
@@ -1055,6 +1098,13 @@ class FlowEditor(QWidget):
                     child_node = edge.end_socket.node
                     self.set_node_status_recursive(child_node, status)
 
+        # Also propagate across exec thread
+        for exec_socket in node.logic_outputs:
+            for edge in exec_socket.connected_edges:
+                if edge.end_socket:
+                    child_node = edge.end_socket.node
+                    self.set_node_status_recursive(child_node, status)
+
     # --- Save Pipeline Method ---
     def save_pipeline(self):
         # 1. Build the Pipeline Dictionary (Same as before)
@@ -1075,13 +1125,13 @@ class FlowEditor(QWidget):
                             connection_str = f"{src_node.uid}.{edge.start_socket.name}"
                             input_connections[socket.name] = connection_str
 
-                # Map logic connections (logic_in ← logic_out of other nodes)
-                logic_connections = []
+                # Map exec connections (exec_in ← exec_out of other nodes)
+                exec_connections = []
                 for socket in item.logic_inputs:
                     for edge in socket.connected_edges:
                         if edge.start_socket:
                             src_node = edge.start_socket.node
-                            logic_connections.append(
+                            exec_connections.append(
                                 f"{src_node.uid}.{edge.start_socket.name}"
                             )
 
@@ -1092,7 +1142,7 @@ class FlowEditor(QWidget):
                     "position": {"x": item.pos().x(), "y": item.pos().y()},
                     "parameters": item.parameters,
                     "input_connections": input_connections,
-                    "logic_connections": logic_connections,
+                    "exec_connections": exec_connections,
                 }
                 pipeline["nodes"].append(node_data)
 
@@ -1168,8 +1218,9 @@ class FlowEditor(QWidget):
                         conn.finalize(tgt_socket)
                         self.scene.addItem(conn)
 
-            # Reconnect Logic edges
-            for src_string in n_data.get("logic_connections", []):
+            # Reconnect Exec edges
+            exec_conn_list = n_data.get("exec_connections", n_data.get("logic_connections", []))
+            for src_string in exec_conn_list:
                 if "." not in src_string:
                     continue
                 src_uid, src_sock_name = src_string.split(".", 1)
@@ -1415,6 +1466,46 @@ class FlowEditor(QWidget):
         if notify_worker and hasattr(self, "worker") and self.worker is not None:
             self.worker.provide_interaction_result(data)
 
+    def _find_reference_layer_for_interaction(self, node_uid):
+        """
+        Best-effort lookup of the visual layer that interactive drawing should
+        align to, so shape coordinates map correctly back to data indices.
+        """
+        node = self._find_node_by_uid(node_uid)
+        if node is None:
+            return getattr(self.viewer.layers.selection, "active", None)
+
+        # 1) Prefer explicit get_layer upstream connection.
+        for input_socket in getattr(node, "inputs", []):
+            if not input_socket.connected_edges:
+                continue
+            edge = input_socket.connected_edges[0]
+            source_node = edge.start_socket.node
+            if getattr(source_node, "node_type", "") == "get_layer":
+                layer_name = (getattr(source_node, "parameters", {}) or {}).get("layer_name")
+                if layer_name and layer_name in self.viewer.layers:
+                    return self.viewer.layers[layer_name]
+
+        # 2) Fallback: infer from cached upstream metadata name.
+        for input_socket in getattr(node, "inputs", []):
+            if not input_socket.connected_edges:
+                continue
+            edge = input_socket.connected_edges[0]
+            source_node = edge.start_socket.node
+            source_socket_name = edge.start_socket.name
+            cached = getattr(source_node, "cached_results", {}).get(source_socket_name)
+            if (
+                isinstance(cached, tuple)
+                and len(cached) >= 2
+                and isinstance(cached[1], dict)
+            ):
+                layer_name = cached[1].get("name")
+                if layer_name and layer_name in self.viewer.layers:
+                    return self.viewer.layers[layer_name]
+
+        # 3) Last resort: current active layer.
+        return getattr(self.viewer.layers.selection, "active", None)
+
     def _on_inline_interaction_run(self):
         pending = self._pending_interaction
         if not pending:
@@ -1461,11 +1552,29 @@ class FlowEditor(QWidget):
             if layer_name in self.viewer.layers:
                 self.viewer.layers.remove(layer_name)
 
+            reference_layer = self._find_reference_layer_for_interaction(node_uid)
+
             if layer_type == "shapes":
                 layer_kwargs = {"name": layer_name}
                 for key in ("edge_color", "face_color", "edge_width"):
                     if key in config:
                         layer_kwargs[key] = config[key]
+
+                # Align transforms with the source data layer to avoid
+                # world/data coordinate mismatch in ROI extraction.
+                if reference_layer is not None:
+                    try:
+                        layer_kwargs["ndim"] = int(getattr(reference_layer, "ndim"))
+                    except Exception:
+                        pass
+                    for key in ("scale", "translate", "rotate", "shear", "affine"):
+                        try:
+                            value = getattr(reference_layer, key)
+                            if value is not None:
+                                layer_kwargs[key] = value
+                        except Exception:
+                            pass
+
                 roi_layer = self.viewer.add_shapes(**layer_kwargs)
                 mode = config.get("mode", "add_rectangle")
                 roi_layer.mode = mode

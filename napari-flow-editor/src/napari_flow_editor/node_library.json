@@ -1,4 +1,18 @@
 {
+  "begin": {
+    "label": "Begin",
+    "category": "Control Flow",
+    "inputs": [],
+    "outputs": [],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.control_flow.begin",
+    "logic": {
+      "in": false,
+      "out": true,
+      "allow_multi_in": false,
+      "allow_multi_out": false
+    }
+  },
   "loop_control": {
     "label": "Loop",
     "category": "Control Flow",

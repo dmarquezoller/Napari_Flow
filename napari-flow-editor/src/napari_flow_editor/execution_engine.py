@@ -68,10 +68,10 @@ class ExecutionWorker(QObject):
         node.last_signature = None
         node.cached_results = {}
 
-    def _execute_single_node(self, node, library_def):
+    def _execute_single_node(self, node, library_def, force_recompute=False):
         try:
             current_signature = self.calculate_signature(node)
-            if current_signature == node.last_signature:
+            if (not force_recompute) and current_signature == node.last_signature:
                 self.log_signal.emit(f"Skipping: {node.title} (Cached)")
                 self.node_status_signal.emit(node.uid, "green")
                 return
@@ -89,64 +89,65 @@ class ExecutionWorker(QObject):
             self.node_status_signal.emit(node.uid, "red")
             raise
 
-    def _build_loop_group(self, loop_node, sorted_nodes):
-        start_nodes = []
-        end_nodes = []
-
-        for socket in getattr(loop_node, "logic_outputs", []):
-            for edge in socket.connected_edges:
-                if edge.end_socket:
-                    n = edge.end_socket.node
-                    if n is not loop_node:
-                        start_nodes.append(n)
-
-        for socket in getattr(loop_node, "logic_inputs", []):
-            for edge in socket.connected_edges:
-                if edge.start_socket:
-                    n = edge.start_socket.node
-                    if n is not loop_node:
-                        end_nodes.append(n)
-
-        # Preserve order while de-duplicating
-        start_nodes = list(dict.fromkeys(start_nodes))
-        end_nodes = list(dict.fromkeys(end_nodes))
-        if not start_nodes or not end_nodes:
+    def _next_logic_node(self, node, output_name=None):
+        outputs = getattr(node, "logic_outputs", [])
+        if not outputs:
             return None
 
-        # Nodes in the loop body are those reachable from starts (forward)
-        # and also able to reach ends (backward), using DATA edges only.
-        forward = set()
-        stack = list(start_nodes)
-        while stack:
-            node = stack.pop()
-            if node in forward or getattr(node, "node_type", "") == "loop_control":
-                continue
-            forward.add(node)
-            for out_socket in getattr(node, "outputs", []):
-                for edge in out_socket.connected_edges:
-                    if edge.end_socket:
-                        nxt = edge.end_socket.node
-                        if nxt not in forward:
-                            stack.append(nxt)
+        target_socket = None
+        if output_name is not None:
+            target_socket = next((s for s in outputs if s.name == output_name), None)
+        if target_socket is None:
+            target_socket = outputs[0]
 
-        backward = set()
-        stack = list(end_nodes)
-        while stack:
-            node = stack.pop()
-            if node in backward or getattr(node, "node_type", "") == "loop_control":
-                continue
-            backward.add(node)
-            for in_socket in getattr(node, "inputs", []):
-                if in_socket.connected_edges:
-                    prev = in_socket.connected_edges[0].start_socket.node
-                    if prev not in backward:
-                        stack.append(prev)
-
-        body_nodes = (forward & backward) | set(start_nodes) | set(end_nodes)
-        body_order = [n for n in sorted_nodes if n in body_nodes and n is not loop_node]
-        if not body_order:
+        if not target_socket.connected_edges:
             return None
+        edge = target_socket.connected_edges[0]
+        if edge.end_socket is None:
+            return None
+        return edge.end_socket.node
 
+    def _is_data_source_node(self, node):
+        """Pure data provider: no required data inputs and no exec input."""
+        return (
+            len(getattr(node, "inputs", [])) == 0
+            and len(getattr(node, "logic_inputs", [])) == 0
+        )
+
+    def _execute_exec_path(self, start_node, library_def, force_recompute=False):
+        current = start_node
+        visited = set()
+
+        while current is not None:
+            if self._loop_stop_requested and force_recompute:
+                break
+            if current.uid in visited:
+                raise RuntimeError(
+                    f"Exec cycle detected near '{current.title}'. "
+                    "Only loop-control nodes should express repetition."
+                )
+            visited.add(current.uid)
+
+            if current.node_type == "loop_control":
+                current = self._execute_loop_node(current, library_def)
+                continue
+
+            if current.node_type == "begin":
+                current = self._next_logic_node(current)
+                continue
+
+            try:
+                self._execute_single_node(
+                    current, library_def, force_recompute=force_recompute
+                )
+            except InterruptedError:
+                if self._loop_stop_requested:
+                    break
+                raise
+
+            current = self._next_logic_node(current)
+
+    def _execute_loop_node(self, loop_node, library_def):
         params = getattr(loop_node, "parameters", {}) or {}
         mode = params.get("mode", "N times")
         try:
@@ -155,31 +156,14 @@ class ExecutionWorker(QObject):
             iterations = 1
         iterations = max(1, iterations)
 
-        return {
-            "loop_node": loop_node,
-            "mode": mode,
-            "iterations": iterations,
-            "body_order": body_order,
-        }
+        body_start = self._next_logic_node(loop_node, "loop_body")
+        completed_start = self._next_logic_node(loop_node, "completed")
 
-    def detect_loop_groups(self, sorted_nodes):
-        groups = []
-        for node in sorted_nodes:
-            if getattr(node, "node_type", "") != "loop_control":
-                continue
-            group = self._build_loop_group(node, sorted_nodes)
-            if group is None:
-                self.log_signal.emit(
-                    f"⚠️ Loop '{node.title}' is missing logic links; skipping loop behavior."
-                )
-                continue
-            groups.append(group)
-        return groups
-
-    def _execute_loop_group(self, group, library_def):
-        loop_node = group["loop_node"]
-        body_order = group["body_order"]
-        mode = group["mode"]
+        if body_start is None:
+            self.log_signal.emit(
+                f"⚠️ Loop '{loop_node.title}' has no Loop Body connection."
+            )
+            return completed_start
 
         if mode == "Until confirm":
             self._loop_stop_requested = False
@@ -193,38 +177,22 @@ class ExecutionWorker(QObject):
                     self.log_signal.emit(
                         f"🔁 Loop '{loop_node.title}' iteration {iteration} (Until confirm)"
                     )
-                    if iteration > 1:
-                        for node in body_order:
-                            self._reset_node_cache(node)
-
-                    for node in body_order:
-                        if self._loop_stop_requested:
-                            break
-                        try:
-                            self._execute_single_node(node, library_def)
-                        except InterruptedError:
-                            self._loop_stop_requested = True
-                            break
-                        if self._loop_stop_requested:
-                            break
-
+                    self._execute_exec_path(
+                        body_start, library_def, force_recompute=True
+                    )
                     if self._loop_stop_requested:
                         break
             finally:
                 self.loop_control_state_signal.emit(False, loop_node.uid)
                 self._loop_stop_requested = False
         else:
-            iterations = group["iterations"]
-            for iteration in range(iterations):
+            for i in range(iterations):
                 self.log_signal.emit(
-                    f"🔁 Loop '{loop_node.title}' iteration {iteration + 1}/{iterations}"
+                    f"🔁 Loop '{loop_node.title}' iteration {i + 1}/{iterations}"
                 )
-                if iteration > 0:
-                    for node in body_order:
-                        self._reset_node_cache(node)
+                self._execute_exec_path(body_start, library_def, force_recompute=True)
 
-                for node in body_order:
-                    self._execute_single_node(node, library_def)
+        return completed_start
 
     def run(self):
         try:
@@ -238,31 +206,22 @@ class ExecutionWorker(QObject):
                 self.finished_signal.emit()
                 return
 
-            sorted_nodes = self.topological_sort(nodes)
-            loop_groups = self.detect_loop_groups(sorted_nodes)
+            begin_nodes = [n for n in nodes if getattr(n, "node_type", "") == "begin"]
+            if not begin_nodes:
+                raise RuntimeError(
+                    "No Begin node found. Add a Begin node and connect its exec output."
+                )
+            if len(begin_nodes) > 1:
+                raise RuntimeError(
+                    "Multiple Begin nodes found. Use a single Begin node for execution."
+                )
 
-            group_by_node_uid = {}
-            for group in loop_groups:
-                gid = group["loop_node"].uid
-                for body_node in group["body_order"]:
-                    group_by_node_uid[body_node.uid] = gid
-
-            executed_groups = set()
-            groups_by_uid = {g["loop_node"].uid: g for g in loop_groups}
-
-            for node in sorted_nodes:
-                if getattr(node, "node_type", "") == "loop_control":
-                    continue
-
-                group_uid = group_by_node_uid.get(node.uid)
-                if group_uid is not None:
-                    if group_uid in executed_groups:
-                        continue
-                    self._execute_loop_group(groups_by_uid[group_uid], NODE_LIBRARY)
-                    executed_groups.add(group_uid)
-                    continue
-
-                self._execute_single_node(node, NODE_LIBRARY)
+            begin_node = begin_nodes[0]
+            first_exec = self._next_logic_node(begin_node)
+            if first_exec is None:
+                self.log_signal.emit("Begin node is not connected to any exec thread.")
+            else:
+                self._execute_exec_path(first_exec, NODE_LIBRARY)
 
             self.log_signal.emit("--- Execution Finished ---")
 
@@ -329,7 +288,21 @@ class ExecutionWorker(QObject):
                 edge = socket.connected_edges[0]
                 source_node = edge.start_socket.node
                 source_socket_name = edge.start_socket.name
-                
+
+                if self._is_data_source_node(source_node):
+                    source_is_dirty = (
+                        getattr(source_node, "status", "") == "gray"
+                        or getattr(source_node, "last_signature", None) is None
+                        or source_socket_name not in source_node.cached_results
+                    )
+                    if source_is_dirty:
+                        # Allow pure data providers (e.g. Get Layer) outside the
+                        # exec thread; compute them lazily when first requested
+                        # OR when they were invalidated by parameter changes.
+                        self._execute_single_node(
+                            source_node, library_def, force_recompute=True
+                        )
+
                 if source_socket_name in source_node.cached_results:
                     data_package = source_node.cached_results[source_socket_name]
                     print("🔎 INPUT from", source_node.title, "socket", source_socket_name, "->", type(data_package))
