@@ -219,6 +219,8 @@ def dask_gaussian_blur(image, sigma=1.0, mode='nearest', preserve_range=True):
     label="Gaussian Blur",
     category="Filters",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "sigma": {"min": 0.0, "max": 20.0, "step": 0.1},
         "mode": {"options": ["nearest", "reflect", "wrap", "constant"]}
@@ -547,5 +549,4 @@ def threshold_isodata(image, nbins: int = 256):
 def wiener(image, psf, balance: float = 0.25, clip: bool = True):
     # psf is impulse_response. It must be an image input.
     return skimage.filters.wiener(image, impulse_response=psf, K=balance, clip=clip)
-
 

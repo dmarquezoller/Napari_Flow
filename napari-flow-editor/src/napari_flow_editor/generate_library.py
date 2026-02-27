@@ -99,6 +99,12 @@ def generate():
                     logic_cfg = meta.get("logic")
                     if logic_cfg:
                         entry["logic"] = logic_cfg
+                    input_types_cfg = meta.get("input_types")
+                    if input_types_cfg:
+                        entry["input_types"] = input_types_cfg
+                    output_types_cfg = meta.get("output_types")
+                    if output_types_cfg:
+                        entry["output_types"] = output_types_cfg
 
                     library[node_key] = entry
                 except Exception as e:

@@ -13,6 +13,8 @@ import napari
     category="Math",
     # We only have one output, the result
     outputs=["blended_image"],
+    input_types={"image_a": "image", "image_b": "image"},
+    output_types={"blended_image": "image"},
     params_config={
         "alpha": {"min": 0.0, "max": 1.0, "step": 0.1}
     }
@@ -41,6 +43,8 @@ def blend_images(image_a, image_b, alpha: float = 0.5):
     label="Interactive Crop",
     category="Math",
     outputs=["cropped_image"],
+    input_types={"image_input": "image"},
+    output_types={"cropped_image": "image"},
     params_config={
         "t_crop": {"type": "text", "label": "Time/Z Slice", "value": ":"}
     },

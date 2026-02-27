@@ -45,9 +45,55 @@ def _normalize_logic_config(logic_cfg):
         cfg["out"] = False
     return cfg
 
+
+DATA_TYPE_COLORS = {
+    "image": "#4DA3FF",
+    "labels": "#7BC96F",
+    "table": "#F2C14E",
+    "shapes": "#FF7A59",
+    "points": "#2EC4B6",
+    "vectors": "#E76F51",
+    "scalar": "#9B8AFB",
+    "layers": "#B6A3FF",
+    "any": "#9AA0A6",
+}
+
+
+def _normalize_data_type(data_type):
+    if data_type is None:
+        return "any"
+    value = str(data_type).strip().lower()
+    return value if value else "any"
+
+
+def _get_data_type_color(data_type):
+    normalized = _normalize_data_type(data_type)
+    return QColor(DATA_TYPE_COLORS.get(normalized, DATA_TYPE_COLORS["any"]))
+
+
+def _are_data_types_compatible(output_type, input_type):
+    out_t = _normalize_data_type(output_type)
+    in_t = _normalize_data_type(input_type)
+    return out_t == "any" or in_t == "any" or out_t == in_t
+
+
+def _normalize_socket_type_map(type_map):
+    if not isinstance(type_map, dict):
+        return {}
+    return {str(k): _normalize_data_type(v) for k, v in type_map.items()}
+
 # --- SOCKET -----------------------------------------------------
 class Socket(QGraphicsEllipseItem):
-    def __init__(self, node, socket_type, name, index, total_sockets, max_connections=None):
+    def __init__(
+        self,
+        node,
+        socket_type,
+        name,
+        index,
+        total_sockets,
+        max_connections=None,
+        data_type="any",
+    ):
         super().__init__(-6, -6, 12, 12)
         self.socket_type = socket_type
         self.node = node
@@ -57,6 +103,7 @@ class Socket(QGraphicsEllipseItem):
 
         # --- Determine whether this is a logic (control-flow) socket ---
         self.is_logic = socket_type in ("logic_in", "logic_out")
+        self.data_type = "exec" if self.is_logic else _normalize_data_type(data_type)
 
         h = node.rect().height()
         w = node.rect().width()
@@ -75,21 +122,53 @@ class Socket(QGraphicsEllipseItem):
                 step = (bottom - top) / max(total_sockets - 1, 1)
                 y = top + (step * index)
             self.local_offset = QPointF(x, y)
-            color = QColor("#F2F2F2")
+            self.base_color = QColor("#F2F2F2")
             self.setToolTip(f"Exec: {self.name}")
         else:
             # Data sockets — original layout (left/right sides, evenly spaced)
             y = (h / (total_sockets + 1)) * (index + 1)
             x = 0 if socket_type == "input" else w
             self.local_offset = QPointF(x, y)
-            color = QColor("#ffb347") if socket_type == "output" else QColor("#77dd77")
-            self.setToolTip(f"Data: {name}")
+            self.base_color = _get_data_type_color(self.data_type)
+            self.setToolTip(f"Data: {name} ({self.data_type})")
 
-        self.setBrush(QBrush(color))
-        self.setPen(QPen(Qt.GlobalColor.black, 1))
+        self.setBrush(QBrush(self.base_color))
+        self.setPen(QPen(Qt.GlobalColor.black, 1.2))
         self.setZValue(3)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self.update_position()
+
+    def _socket_path(self):
+        path = QPainterPath()
+        is_output = self.socket_type in ("output", "logic_out")
+
+        if self.is_logic:
+            # Exec sockets keep directional triangles.
+            points = (
+                [QPointF(-6, -5), QPointF(6, 0), QPointF(-6, 5)]
+                if is_output
+                else [QPointF(6, -5), QPointF(-6, 0), QPointF(6, 5)]
+            )
+            path.moveTo(points[0])
+            for p in points[1:]:
+                path.lineTo(p)
+            path.closeSubpath()
+        else:
+            # Data sockets are circles (typed by color, not shape).
+            path.addEllipse(QRectF(-6, -6, 12, 12))
+        return path
+
+    def shape(self):
+        stroker = QPainterPathStroker()
+        stroker.setWidth(10)
+        path = self._socket_path()
+        return path.united(stroker.createStroke(path))
+
+    def paint(self, painter, option, widget):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(self.brush())
+        painter.setPen(self.pen())
+        painter.drawPath(self._socket_path())
 
     def update_position(self):
         self.setPos(self.node.pos() + self.local_offset)
@@ -114,13 +193,14 @@ class Connection(QGraphicsPathItem):
         self.dragging = False
         self.hovered = False
         self.is_logic = getattr(start_socket, "is_logic", False)
+        self.data_type = getattr(start_socket, "data_type", "any")
         self.setZValue(1)
 
-        # Exec edges: solid white line; Data edges: solid grey
+        # Exec edges: solid white line; Data edges: typed colors.
         if self.is_logic:
             pen = QPen(QColor("#F2F2F2"), 2)
         else:
-            pen = QPen(QColor("#444"), 2)
+            pen = QPen(_get_data_type_color(self.data_type).darker(120), 2)
         self.setPen(pen)
 
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
@@ -136,14 +216,14 @@ class Connection(QGraphicsPathItem):
         if self.is_logic:
             self.setPen(QPen(QColor("#FFFFFF"), 3))
         else:
-            self.setPen(QPen(QColor("#0078d7"), 3))
+            self.setPen(QPen(_get_data_type_color(self.data_type), 3))
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
         if self.is_logic:
             self.setPen(QPen(QColor("#F2F2F2"), 2))
         else:
-            self.setPen(QPen(QColor("#444"), 2))
+            self.setPen(QPen(_get_data_type_color(self.data_type).darker(120), 2))
         super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -182,6 +262,7 @@ class Connection(QGraphicsPathItem):
                     and target.can_accept_connection()
                     and not self.scene_ref.are_already_connected(self.start_socket, target)
                     and not self.scene_ref.creates_cycle(self.start_socket.node, target.node)
+                    and self.scene_ref.is_data_connection_compatible(self.start_socket, target)
                 )
 
             if valid:
@@ -237,6 +318,8 @@ class Node(QGraphicsRectItem):
         # Load Definition
         inputs_data = ["in"] # Default if not found
         outputs_data = ["out"]
+        input_type_map = {}
+        output_type_map = {}
         
         if node_type in NODE_LIBRARY:
             definition = NODE_LIBRARY[node_type]
@@ -245,6 +328,8 @@ class Node(QGraphicsRectItem):
             self.logic_config = _normalize_logic_config(definition.get("logic"))
             inputs_data = definition.get("inputs", ["in"])
             outputs_data = definition.get("outputs", ["out"])
+            input_type_map = _normalize_socket_type_map(definition.get("input_types"))
+            output_type_map = _normalize_socket_type_map(definition.get("output_types"))
             
             # Load Params
             for key, conf in definition["parameters"].items():
@@ -273,11 +358,31 @@ class Node(QGraphicsRectItem):
         # 4. Generate Data Sockets dynamically
         self.inputs = []
         for i, name in enumerate(inputs_data):
-            self.inputs.append(Socket(self, "input", name, i, len(inputs_data), max_connections=1))
+            self.inputs.append(
+                Socket(
+                    self,
+                    "input",
+                    name,
+                    i,
+                    len(inputs_data),
+                    max_connections=1,
+                    data_type=input_type_map.get(name, "any"),
+                )
+            )
 
         self.outputs = []
         for i, name in enumerate(outputs_data):
-            self.outputs.append(Socket(self, "output", name, i, len(outputs_data), max_connections=None))
+            self.outputs.append(
+                Socket(
+                    self,
+                    "output",
+                    name,
+                    i,
+                    len(outputs_data),
+                    max_connections=None,
+                    data_type=output_type_map.get(name, "any"),
+                )
+            )
 
         # 5. Generate Exec sockets (logic thread):
         # - Begin: exec_out only
@@ -491,6 +596,18 @@ class FlowScene(QGraphicsScene):
 
         return dfs(end_node)
 
+    def is_data_connection_compatible(self, start_socket, end_socket):
+        out_t = getattr(start_socket, "data_type", "any")
+        in_t = getattr(end_socket, "data_type", "any")
+        compatible = _are_data_types_compatible(out_t, in_t)
+        if not compatible:
+            print(
+                f"⛔ Type mismatch blocked: "
+                f"{start_socket.node.title}.{start_socket.name} ({out_t}) -> "
+                f"{end_socket.node.title}.{end_socket.name} ({in_t})"
+            )
+        return compatible
+
     def mousePressEvent(self, event):
         item = self.itemAt(event.scenePos(), self.views()[0].transform())
         if (
@@ -535,6 +652,7 @@ class FlowScene(QGraphicsScene):
                     and target.can_accept_connection()
                     and not self.are_already_connected(start_sock, target)
                     and not self.creates_cycle(start_sock.node, target.node)
+                    and self.is_data_connection_compatible(start_sock, target)
                 )
 
             if valid:
@@ -988,17 +1106,21 @@ class FlowEditor(QWidget):
         if node.inputs:
             self.props_layout.addRow(QLabel("<b>Inputs:</b>"))
             for s in node.inputs:
+                type_color = _get_data_type_color(getattr(s, "data_type", "any")).name()
                 # Check connection status
                 if s.connected_edges:
                     status_text = "Connected"
-                    style = "color: #77dd77;" # Green
+                    style = f"color: {type_color};"
                 else:
                     status_text = "Empty"
                     style = "color: #888;"   # Gray
                 
                 status_lbl = QLabel(status_text)
                 status_lbl.setStyleSheet(style)
-                self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
+                self.props_layout.addRow(
+                    f"  \u25B8 {s.name} [{getattr(s, 'data_type', 'any')}]",
+                    status_lbl,
+                )
         
         # B. Outputs
         if node.outputs:
@@ -1006,11 +1128,15 @@ class FlowEditor(QWidget):
             for s in node.outputs:
                 count = len(s.connected_edges)
                 status_text = f"{count} link(s)"
-                style = "color: #ffb347;" if count > 0 else "color: #888;" # Orange if active
+                type_color = _get_data_type_color(getattr(s, "data_type", "any")).name()
+                style = f"color: {type_color};" if count > 0 else "color: #888;"
                 
                 status_lbl = QLabel(status_text)
                 status_lbl.setStyleSheet(style)
-                self.props_layout.addRow(f"  \u25B8 {s.name}", status_lbl)
+                self.props_layout.addRow(
+                    f"  \u25B8 {s.name} [{getattr(s, 'data_type', 'any')}]",
+                    status_lbl,
+                )
 
         # C. Exec (logic thread) connections
         self.props_layout.addRow(QLabel("<b>Exec Flow:</b>"))

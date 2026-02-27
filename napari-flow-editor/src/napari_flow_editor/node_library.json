@@ -957,6 +957,12 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "hessian": {
@@ -1770,6 +1776,9 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "output_types": {
+      "data_out": "image"
     }
   },
   "load_csv": {
@@ -1794,6 +1803,9 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "output_types": {
+      "csv_data": "table"
     }
   },
   "open_ome_zarr": {
@@ -1816,6 +1828,9 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "output_types": {
+      "data": "layers"
     }
   },
   "select_layer": {
@@ -1848,6 +1863,12 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "layers": "layers"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "blend_images": {
@@ -1875,6 +1896,13 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image_a": "image",
+      "image_b": "image"
+    },
+    "output_types": {
+      "blended_image": "image"
     }
   },
   "crop_image_interactive": {
@@ -1939,6 +1967,12 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image_input": "image"
+    },
+    "output_types": {
+      "cropped_image": "image"
     }
   },
   "project_3d_to_2d": {

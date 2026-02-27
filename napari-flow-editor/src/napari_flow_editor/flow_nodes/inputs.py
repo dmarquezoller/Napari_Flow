@@ -13,6 +13,7 @@ import os
     label="Get Layer",
     category="Input",
     outputs=["data_out"],
+    output_types={"data_out": "image"},
     # We define it as an enum so the JSON knows it's a dropdown.
     # We leave options empty [] because the GUI fills them in real-time.
     params_config={
@@ -43,6 +44,7 @@ def get_layer(layer_name: str = "", axis_map: list = [{"d0": "Y", "d1": "X", "d2
     label="Open Ome-Zarr",
     category="Input",
     outputs=["data"],
+    output_types={"data": "layers"},
     params_config={
         "path": {"type": "path", "mode": "directory"},
     }
@@ -83,6 +85,7 @@ def open_ome_zarr(path: str = ""):
     label="Load CSV",
     category="Input",
     outputs=["csv_data"],
+    output_types={"csv_data": "table"},
     params_config={
         "file_path": {
             "type": "path", 
@@ -118,6 +121,8 @@ def load_csv(file_path=""):
     label="Select Layer",
     category="Input",
     outputs=["image_out"],
+    input_types={"layers": "layers"},
+    output_types={"image_out": "image"},
     params_config={
         # Text input (your UI will render a normal text field if type is unknown)
         "layer_name": {"type": "text", "label": "Layer name (exact preferred)"},
@@ -194,4 +199,3 @@ def select_layer(layers, layer_name: str = "", layer_type: str = "image"):
     meta = chosen["meta"]
 
     return (data, meta)
-

@@ -27,3 +27,18 @@ def test_register_node_logic_overrides_are_applied():
     assert logic["out"] is False
     assert logic["allow_multi_in"] is False
     assert logic["allow_multi_out"] is True
+
+
+def test_register_node_io_types_are_normalized_and_stored():
+    @register_node(
+        label="Typed",
+        category="Filters",
+        input_types={"image": "Image", "mask": ""},
+        output_types={"result": "labels"},
+    )
+    def _typed(image, mask):
+        return image
+
+    meta = _typed._node_meta
+    assert meta["input_types"] == {"image": "image", "mask": "any"}
+    assert meta["output_types"] == {"result": "labels"}

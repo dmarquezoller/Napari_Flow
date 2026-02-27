@@ -19,7 +19,34 @@ def _normalize_logic_config(logic):
         cfg["out"] = False
     return cfg
 
-def register_node(label, category, outputs=None, params_config=None, interactive=None, logic=None):
+def _normalize_io_type_map(type_map):
+    """
+    Normalize optional socket-type maps used for typed data sockets.
+
+    Expected shape:
+      {"socket_name": "image" | "labels" | "table" | ...}
+    """
+    if not isinstance(type_map, dict):
+        return {}
+
+    normalized = {}
+    for socket_name, socket_type in type_map.items():
+        key = str(socket_name)
+        value = str(socket_type).strip().lower() if socket_type is not None else "any"
+        normalized[key] = value if value else "any"
+    return normalized
+
+
+def register_node(
+    label,
+    category,
+    outputs=None,
+    params_config=None,
+    interactive=None,
+    logic=None,
+    input_types=None,
+    output_types=None,
+):
     """
     Decorator to mark a function as a Flow Node.
 
@@ -41,6 +68,8 @@ def register_node(label, category, outputs=None, params_config=None, interactive
     if params_config is None:
         params_config = {}
     logic_config = _normalize_logic_config(logic)
+    input_type_map = _normalize_io_type_map(input_types)
+    output_type_map = _normalize_io_type_map(output_types)
 
     # --- Normalise interactive config ---------------------------------
     if interactive is True:
@@ -62,6 +91,8 @@ def register_node(label, category, outputs=None, params_config=None, interactive
             # will serialise this into the JSON library.
             "interactive": interactive_config,
             "logic": logic_config,
+            "input_types": input_type_map,
+            "output_types": output_type_map,
         }
 
         @functools.wraps(func)
