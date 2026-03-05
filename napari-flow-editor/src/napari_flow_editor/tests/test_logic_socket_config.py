@@ -42,3 +42,29 @@ def test_register_node_io_types_are_normalized_and_stored():
     meta = _typed._node_meta
     assert meta["input_types"] == {"image": "image", "mask": "any"}
     assert meta["output_types"] == {"result": "labels"}
+
+
+def test_register_node_dynamic_output_types_are_normalized_and_stored():
+    @register_node(
+        label="Dynamic",
+        category="Input",
+        outputs=["data_out"],
+        dynamic_output_types={
+            "data_out": {
+                "from_param": "layer_name",
+                "source": "VIEWER_LAYER_TYPE",
+                "fallback": "Image",
+            }
+        },
+    )
+    def _dynamic(layer_name: str = ""):
+        return layer_name
+
+    meta = _dynamic._node_meta
+    assert meta["dynamic_output_types"] == {
+        "data_out": {
+            "from_param": "layer_name",
+            "source": "viewer_layer_type",
+            "fallback": "image",
+        }
+    }

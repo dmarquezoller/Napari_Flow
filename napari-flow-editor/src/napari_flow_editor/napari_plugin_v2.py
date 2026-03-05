@@ -81,6 +81,59 @@ def _normalize_socket_type_map(type_map):
         return {}
     return {str(k): _normalize_data_type(v) for k, v in type_map.items()}
 
+
+def _normalize_dynamic_output_type_rules(config):
+    if not isinstance(config, dict):
+        return {}
+
+    normalized = {}
+    for socket_name, rule in config.items():
+        if not isinstance(rule, dict):
+            continue
+        from_param = rule.get("from_param")
+        if not from_param:
+            continue
+        source_raw = rule.get("source", "viewer_layer_type")
+        source = str(source_raw).strip().lower() if source_raw is not None else "viewer_layer_type"
+        if not source:
+            source = "viewer_layer_type"
+        fallback = _normalize_data_type(rule.get("fallback", "any"))
+        normalized[str(socket_name)] = {
+            "from_param": str(from_param),
+            "source": source,
+            "fallback": fallback,
+        }
+    return normalized
+
+
+def _infer_data_type_from_viewer_layer(layer):
+    """
+    Map a napari layer instance to a flow-socket data type.
+    """
+    if layer is None:
+        return "any"
+
+    layer_name = layer.__class__.__name__.lower()
+    by_class = {
+        "image": "image",
+        "labels": "labels",
+        "shapes": "shapes",
+        "points": "points",
+        "vectors": "vectors",
+    }
+    if layer_name in by_class:
+        return by_class[layer_name]
+
+    layer_type = str(getattr(layer, "layer_type", "")).lower()
+    by_kind = {
+        "image": "image",
+        "labels": "labels",
+        "shapes": "shapes",
+        "points": "points",
+        "vectors": "vectors",
+    }
+    return by_kind.get(layer_type, "any")
+
 # --- SOCKET -----------------------------------------------------
 class Socket(QGraphicsEllipseItem):
     def __init__(
@@ -180,6 +233,28 @@ class Socket(QGraphicsEllipseItem):
         if self.max_connections is None:
             return True
         return len(self.connected_edges) < self.max_connections
+
+    def set_data_type(self, data_type):
+        """
+        Update runtime type/color for data sockets.
+        """
+        if self.is_logic:
+            return
+        self.data_type = _normalize_data_type(data_type)
+        self.base_color = _get_data_type_color(self.data_type)
+        self.setBrush(QBrush(self.base_color))
+        self.setToolTip(f"Data: {self.name} ({self.data_type})")
+        self.update()
+
+        # Keep connected edge colors in sync with source socket type.
+        for edge in list(self.connected_edges):
+            if getattr(edge, "is_logic", False):
+                continue
+            if edge.start_socket is self:
+                edge.data_type = self.data_type
+            elif edge.start_socket is not None:
+                edge.data_type = getattr(edge.start_socket, "data_type", "any")
+            edge._apply_pen_state()
 
 
 # --- CONNECTION -------------------------------------------------
@@ -309,6 +384,7 @@ class Node(QGraphicsRectItem):
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
         self.logic_config = _normalize_logic_config(None)
+        self.dynamic_output_types = {}
 
         # --- State variables ---
         self.status = "gray"
@@ -330,6 +406,9 @@ class Node(QGraphicsRectItem):
             outputs_data = definition.get("outputs", ["out"])
             input_type_map = _normalize_socket_type_map(definition.get("input_types"))
             output_type_map = _normalize_socket_type_map(definition.get("output_types"))
+            self.dynamic_output_types = _normalize_dynamic_output_type_rules(
+                definition.get("dynamic_output_types")
+            )
             
             # Load Params
             for key, conf in definition["parameters"].items():
@@ -1216,12 +1295,95 @@ class FlowEditor(QWidget):
             else:
                 self.props_layout.addRow(QLabel("<em>No cached result.</em>"))
 
+    def _remove_edge(self, edge):
+        if edge.start_socket and edge in edge.start_socket.connected_edges:
+            edge.start_socket.connected_edges.remove(edge)
+        if edge.end_socket and edge in edge.end_socket.connected_edges:
+            edge.end_socket.connected_edges.remove(edge)
+        self.scene.removeItem(edge)
+
+    def _resolve_dynamic_output_type(self, node, rule):
+        fallback = _normalize_data_type(rule.get("fallback", "any"))
+        source = str(rule.get("source", "")).strip().lower()
+
+        if source != "viewer_layer_type":
+            return fallback
+
+        param_name = rule.get("from_param")
+        if not param_name:
+            return fallback
+
+        layer_name = str(node.parameters.get(param_name, "")).strip()
+        if not layer_name or layer_name not in self.viewer.layers:
+            return fallback
+
+        layer = self.viewer.layers[layer_name]
+        return _infer_data_type_from_viewer_layer(layer)
+
+    def _refresh_dynamic_output_types(self, node, changed_param=None):
+        rules = getattr(node, "dynamic_output_types", {}) or {}
+        if not rules:
+            return
+
+        disconnected_messages = []
+        any_socket_type_changed = False
+
+        for socket_name, rule in rules.items():
+            watched_param = rule.get("from_param")
+            if changed_param is not None and watched_param and watched_param != changed_param:
+                continue
+
+            output_socket = next((s for s in node.outputs if s.name == socket_name), None)
+            if output_socket is None:
+                continue
+
+            previous_type = _normalize_data_type(getattr(output_socket, "data_type", "any"))
+            resolved_type = self._resolve_dynamic_output_type(node, rule)
+            output_socket.set_data_type(resolved_type)
+            current_type = _normalize_data_type(output_socket.data_type)
+
+            if current_type == previous_type:
+                continue
+            any_socket_type_changed = True
+
+            for edge in list(output_socket.connected_edges):
+                if getattr(edge, "is_logic", False):
+                    continue
+                if edge.start_socket is not output_socket:
+                    continue
+                if edge.end_socket is None:
+                    continue
+
+                input_socket = edge.end_socket
+                if _are_data_types_compatible(current_type, getattr(input_socket, "data_type", "any")):
+                    continue
+
+                target_node = input_socket.node
+                disconnected_messages.append(
+                    f"{node.title}.{output_socket.name} -> {target_node.title}.{input_socket.name}"
+                )
+                self._remove_edge(edge)
+                self.set_node_status_recursive(target_node, "gray")
+
+        if disconnected_messages:
+            self.append_log(
+                f"⚠️ Auto-disconnected {len(disconnected_messages)} incompatible edge(s) after type update."
+            )
+            for msg in disconnected_messages[:4]:
+                self.append_log(f"   - {msg}")
+            if len(disconnected_messages) > 4:
+                self.append_log("   - ...")
+
+        selected = self.scene.selectedItems()
+        if (any_socket_type_changed or disconnected_messages) and len(selected) == 1 and selected[0] is node:
+            self.on_selection()
 
     def update_param(self, node, param_name, value):
         """Updates a parameter and invalidates the node."""
         node.parameters[param_name] = value
         # When a parameter changes, this node and all downstream nodes become "stale"
         self.set_node_status_recursive(node, "gray")
+        self._refresh_dynamic_output_types(node, changed_param=param_name)
         self.scene.update() 
 
     def set_node_status_recursive(self, node, status):
@@ -1358,7 +1520,11 @@ class FlowEditor(QWidget):
                     src_socket = next((s for s in src_node.outputs if s.name == src_sock_name), None)
                     tgt_socket = next((s for s in target_node.inputs if s.name == tgt_sock_name), None)
                     
-                    if src_socket and tgt_socket:
+                    if (
+                        src_socket
+                        and tgt_socket
+                        and self.scene.is_data_connection_compatible(src_socket, tgt_socket)
+                    ):
                         conn = Connection(src_socket, self.scene)
                         conn.finalize(tgt_socket)
                         self.scene.addItem(conn)
@@ -1449,6 +1615,7 @@ class FlowEditor(QWidget):
             node.parameters.update(loaded_params)
             
         self.scene.addItem(node)
+        self._refresh_dynamic_output_types(node)
         return node
     
     # --- Remove Node Method ---
@@ -2180,6 +2347,9 @@ class FlowEditor(QWidget):
                     logic_cfg = meta.get("logic")
                     if logic_cfg:
                         entry["logic"] = logic_cfg
+                    dynamic_output_types_cfg = meta.get("dynamic_output_types")
+                    if dynamic_output_types_cfg:
+                        entry["dynamic_output_types"] = dynamic_output_types_cfg
                     NODE_LIBRARY[node_key] = entry
                     count += 1
             

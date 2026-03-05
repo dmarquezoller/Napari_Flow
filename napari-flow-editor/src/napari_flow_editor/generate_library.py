@@ -105,6 +105,9 @@ def generate():
                     output_types_cfg = meta.get("output_types")
                     if output_types_cfg:
                         entry["output_types"] = output_types_cfg
+                    dynamic_output_types_cfg = meta.get("dynamic_output_types")
+                    if dynamic_output_types_cfg:
+                        entry["dynamic_output_types"] = dynamic_output_types_cfg
 
                     library[node_key] = entry
                 except Exception as e:

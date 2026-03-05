@@ -38,6 +38,45 @@ def _normalize_io_type_map(type_map):
     return normalized
 
 
+def _normalize_dynamic_output_types(config):
+    """
+    Normalize optional dynamic output type rules.
+
+    Expected shape:
+      {
+        "socket_name": {
+          "from_param": "layer_name",
+          "source": "viewer_layer_type",
+          "fallback": "any",
+        }
+      }
+    """
+    if not isinstance(config, dict):
+        return {}
+
+    normalized = {}
+    for socket_name, rule in config.items():
+        if not isinstance(rule, dict):
+            continue
+        from_param = rule.get("from_param")
+        if not from_param:
+            continue
+
+        source_raw = rule.get("source", "viewer_layer_type")
+        source = str(source_raw).strip().lower() if source_raw is not None else "viewer_layer_type"
+        if not source:
+            source = "viewer_layer_type"
+
+        fallback_map = _normalize_io_type_map({"fallback": rule.get("fallback", "any")})
+        normalized[str(socket_name)] = {
+            "from_param": str(from_param),
+            "source": source,
+            "fallback": fallback_map["fallback"],
+        }
+
+    return normalized
+
+
 _DISPATCH_CONTEXT = threading.local()
 
 
@@ -75,6 +114,7 @@ def register_node(
     logic=None,
     input_types=None,
     output_types=None,
+    dynamic_output_types=None,
 ):
     """
     Decorator to mark a function as a Flow Node.
@@ -99,6 +139,7 @@ def register_node(
     logic_config = _normalize_logic_config(logic)
     input_type_map = _normalize_io_type_map(input_types)
     output_type_map = _normalize_io_type_map(output_types)
+    dynamic_output_type_rules = _normalize_dynamic_output_types(dynamic_output_types)
 
     # --- Normalise interactive config ---------------------------------
     if interactive is True:
@@ -122,6 +163,7 @@ def register_node(
             "logic": logic_config,
             "input_types": input_type_map,
             "output_types": output_type_map,
+            "dynamic_output_types": dynamic_output_type_rules,
         }
 
         @functools.wraps(func)

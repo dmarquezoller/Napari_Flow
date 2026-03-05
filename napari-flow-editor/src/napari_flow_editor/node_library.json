@@ -1778,7 +1778,14 @@
       "allow_multi_out": true
     },
     "output_types": {
-      "data_out": "image"
+      "data_out": "any"
+    },
+    "dynamic_output_types": {
+      "data_out": {
+        "from_param": "layer_name",
+        "source": "viewer_layer_type",
+        "fallback": "any"
+      }
     }
   },
   "load_csv": {

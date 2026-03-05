@@ -13,7 +13,14 @@ import os
     label="Get Layer",
     category="Input",
     outputs=["data_out"],
-    output_types={"data_out": "image"},
+    output_types={"data_out": "any"},
+    dynamic_output_types={
+        "data_out": {
+            "from_param": "layer_name",
+            "source": "viewer_layer_type",
+            "fallback": "any",
+        }
+    },
     # We define it as an enum so the JSON knows it's a dropdown.
     # We leave options empty [] because the GUI fills them in real-time.
     params_config={
