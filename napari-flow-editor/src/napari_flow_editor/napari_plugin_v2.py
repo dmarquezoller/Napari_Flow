@@ -831,6 +831,36 @@ class FlowEditor(QWidget):
         self.btn_stop_loop.setEnabled(False)
         button_layout.addWidget(self.btn_stop_loop)
 
+        # Interaction action bar (visible only while waiting for user input)
+        self.interaction_bar = QFrame()
+        self.interaction_bar.setVisible(False)
+        self.interaction_bar.setStyleSheet(
+            "QFrame {"
+            " background-color: #1f3b2f;"
+            " border: 1px solid #2f6a4b;"
+            " border-radius: 6px;"
+            "}"
+        )
+        interaction_layout = QHBoxLayout(self.interaction_bar)
+        interaction_layout.setContentsMargins(8, 6, 8, 6)
+        interaction_layout.setSpacing(8)
+        self.interaction_status_label = QLabel("Waiting for input")
+        self.interaction_status_label.setStyleSheet("color: #d9ffe7; font-weight: bold;")
+        self.interaction_prompt_label = QLabel("")
+        self.interaction_prompt_label.setStyleSheet("color: #d6e7dc;")
+        self.interaction_prompt_label.setWordWrap(True)
+        self.btn_interaction_cancel = QPushButton("Cancel")
+        self.btn_interaction_run = QPushButton("Run")
+        self.btn_interaction_run.setStyleSheet(
+            "QPushButton { background-color: #2E7D32; color: white; font-weight: bold; }"
+            "QPushButton:hover { background-color: #388E3C; }"
+        )
+        interaction_layout.addWidget(self.interaction_status_label)
+        interaction_layout.addWidget(self.interaction_prompt_label, 1)
+        interaction_layout.addWidget(self.btn_interaction_cancel)
+        interaction_layout.addWidget(self.btn_interaction_run)
+        button_layout.addWidget(self.interaction_bar)
+
         # Run Button
         self.btn_run = QPushButton("RUN PIPELINE")
         self.btn_run.setFixedHeight(40)
@@ -887,6 +917,8 @@ class FlowEditor(QWidget):
         # --- CONNECTIONS ---
         self.btn_fit.clicked.connect(self.view.fit_scene)
         self.btn_stop_loop.clicked.connect(self.on_stop_loop_clicked)
+        self.btn_interaction_cancel.clicked.connect(self._on_inline_interaction_cancel)
+        self.btn_interaction_run.clicked.connect(self._on_inline_interaction_run)
         self.btn_run.clicked.connect(self.run_pipeline)
         self.scene.selectionChanged.connect(self.on_selection)
 
@@ -1081,22 +1113,7 @@ class FlowEditor(QWidget):
                 "font-size: 12px; padding: 6px; color: #ddd; background: #2d2d2d; border-radius: 4px;"
             )
             self.props_layout.addRow(prompt_lbl)
-
-            btns = QWidget()
-            btns_layout = QHBoxLayout(btns)
-            btns_layout.setContentsMargins(0, 0, 0, 0)
-            btn_cancel = QPushButton("Cancel")
-            btn_run = QPushButton("Run")
-            btn_run.setStyleSheet(
-                "QPushButton { background-color: #2E7D32; color: white; font-weight: bold; }"
-                "QPushButton:hover { background-color: #388E3C; }"
-            )
-            btn_cancel.clicked.connect(self._on_inline_interaction_cancel)
-            btn_run.clicked.connect(self._on_inline_interaction_run)
-            btns_layout.addStretch()
-            btns_layout.addWidget(btn_cancel)
-            btns_layout.addWidget(btn_run)
-            self.props_layout.addRow(btns)
+            self.props_layout.addRow(QLabel("<em>Use the Interaction Bar above the graph to Run or Cancel.</em>"))
 
         # Spacer
         self.props_layout.addRow(QLabel("")) 
@@ -1710,11 +1727,28 @@ class FlowEditor(QWidget):
         except Exception:
             pass
 
+    def _update_interaction_bar(self):
+        pending = self._pending_interaction
+        if not pending:
+            self.interaction_bar.setVisible(False)
+            return
+
+        node_uid = pending.get("node_uid")
+        prompt = pending.get("config", {}).get(
+            "prompt", "Draw on the layer, then click Run."
+        )
+        node = self._find_node_by_uid(node_uid)
+        node_title = getattr(node, "title", "Interactive Node")
+        self.interaction_status_label.setText(f"Waiting for input: {node_title}")
+        self.interaction_prompt_label.setText(prompt)
+        self.interaction_bar.setVisible(True)
+
     def _finish_pending_interaction(self, data=None, notify_worker=True):
         if not self._pending_interaction:
             return
         self._cleanup_pending_interaction_layer()
         self._pending_interaction = None
+        self._update_interaction_bar()
         self.on_selection()
         if notify_worker and hasattr(self, "worker") and self.worker is not None:
             self.worker.provide_interaction_result(data)
@@ -1772,6 +1806,14 @@ class FlowEditor(QWidget):
                     data = [np.array(s) for s in roi_layer.data]
         except Exception:
             data = None
+
+        if not data:
+            self.append_log("⚠️ Interactive node: draw at least one shape before clicking Run.")
+            self.interaction_prompt_label.setText(
+                "Draw at least one shape, then click Run."
+            )
+            return
+
         self._finish_pending_interaction(data=data, notify_worker=True)
 
     def _on_inline_interaction_cancel(self):
@@ -1848,6 +1890,7 @@ class FlowEditor(QWidget):
             "config": config,
             "layer_name": layer_name,
         }
+        self._update_interaction_bar()
         self._select_node_for_properties(node_uid)
 
     def handle_execution_result(self, node_title, output_name, data):
