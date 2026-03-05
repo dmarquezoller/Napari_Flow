@@ -7,6 +7,29 @@ import sys
 import time
 import threading
 from qtpy.QtCore import QObject, Signal
+from .flow_nodes.decorator import push_dispatch_context, pop_dispatch_context
+
+
+def infer_layout_kind(axes: str) -> str:
+    """
+    Normalize an axes string (e.g. "TYX") into a semantic layout class.
+    """
+    if not axes:
+        return "unknown_layout"
+
+    a = str(axes).upper()
+    mapping = {
+        "YX": "2d_image",
+        "YXC": "2d_image_channels",
+        "ZYX": "3d_image",
+        "ZYXC": "3d_image_channels",
+        "TYX": "3d_timeline",
+        "TYXC": "3d_timeline_channels",
+        "TZYX": "4d_timeline",
+        "TZYXC": "4d_timeline_channels",
+    }
+    return mapping.get(a, "unknown_layout")
+
 
 class ExecutionWorker(QObject):
     # Signals
@@ -20,6 +43,8 @@ class ExecutionWorker(QObject):
     interaction_request_signal = Signal(str, dict)   # (node_uid, interactive_config)
     # Loop control signal (engine ⇄ main-thread UI stop button)
     loop_control_state_signal = Signal(bool, str)    # (active, loop_node_uid)
+    # Exec trace signal: transition from node via named exec output.
+    exec_transition_signal = Signal(str, str)        # (from_node_uid, output_socket_name)
     # The main thread calls ``provide_interaction_result`` which sets the
     # threading.Event so the worker thread can continue.
 
@@ -90,9 +115,13 @@ class ExecutionWorker(QObject):
             raise
 
     def _next_logic_node(self, node, output_name=None):
+        next_node, _ = self._next_logic_step(node, output_name)
+        return next_node
+
+    def _next_logic_step(self, node, output_name=None):
         outputs = getattr(node, "logic_outputs", [])
         if not outputs:
-            return None
+            return None, None
 
         target_socket = None
         if output_name is not None:
@@ -101,11 +130,11 @@ class ExecutionWorker(QObject):
             target_socket = outputs[0]
 
         if not target_socket.connected_edges:
-            return None
+            return None, target_socket.name
         edge = target_socket.connected_edges[0]
         if edge.end_socket is None:
-            return None
-        return edge.end_socket.node
+            return None, target_socket.name
+        return edge.end_socket.node, target_socket.name
 
     def _is_data_source_node(self, node):
         """Pure data provider: no required data inputs and no exec input."""
@@ -133,7 +162,10 @@ class ExecutionWorker(QObject):
                 continue
 
             if current.node_type == "begin":
-                current = self._next_logic_node(current)
+                next_node, out_name = self._next_logic_step(current)
+                if next_node is not None and out_name is not None:
+                    self.exec_transition_signal.emit(current.uid, out_name)
+                current = next_node
                 continue
 
             try:
@@ -145,7 +177,10 @@ class ExecutionWorker(QObject):
                     break
                 raise
 
-            current = self._next_logic_node(current)
+            next_node, out_name = self._next_logic_step(current)
+            if next_node is not None and out_name is not None:
+                self.exec_transition_signal.emit(current.uid, out_name)
+            current = next_node
 
     def _execute_loop_node(self, loop_node, library_def):
         params = getattr(loop_node, "parameters", {}) or {}
@@ -156,8 +191,8 @@ class ExecutionWorker(QObject):
             iterations = 1
         iterations = max(1, iterations)
 
-        body_start = self._next_logic_node(loop_node, "loop_body")
-        completed_start = self._next_logic_node(loop_node, "completed")
+        body_start, _ = self._next_logic_step(loop_node, "loop_body")
+        completed_start, _ = self._next_logic_step(loop_node, "completed")
 
         if body_start is None:
             self.log_signal.emit(
@@ -177,6 +212,7 @@ class ExecutionWorker(QObject):
                     self.log_signal.emit(
                         f"🔁 Loop '{loop_node.title}' iteration {iteration} (Until confirm)"
                     )
+                    self.exec_transition_signal.emit(loop_node.uid, "loop_body")
                     self._execute_exec_path(
                         body_start, library_def, force_recompute=True
                     )
@@ -190,8 +226,11 @@ class ExecutionWorker(QObject):
                 self.log_signal.emit(
                     f"🔁 Loop '{loop_node.title}' iteration {i + 1}/{iterations}"
                 )
+                self.exec_transition_signal.emit(loop_node.uid, "loop_body")
                 self._execute_exec_path(body_start, library_def, force_recompute=True)
 
+        if completed_start is not None:
+            self.exec_transition_signal.emit(loop_node.uid, "completed")
         return completed_start
 
     def run(self):
@@ -217,10 +256,12 @@ class ExecutionWorker(QObject):
                 )
 
             begin_node = begin_nodes[0]
-            first_exec = self._next_logic_node(begin_node)
+            first_exec, begin_out = self._next_logic_step(begin_node)
             if first_exec is None:
                 self.log_signal.emit("Begin node is not connected to any exec thread.")
             else:
+                if begin_out is not None:
+                    self.exec_transition_signal.emit(begin_node.uid, begin_out)
                 self._execute_exec_path(first_exec, NODE_LIBRARY)
 
             self.log_signal.emit("--- Execution Finished ---")
@@ -270,7 +311,9 @@ class ExecutionWorker(QObject):
         if axis_map:
             row = axis_map[0]
             axes = [row.get(f"d{i}") for i in range(5) if row.get(f"d{i}", "-") != "-"]
-            layer_meta["axes"] = "".join(axes)
+            axes_str = "".join(axes)
+            layer_meta["axes"] = axes_str
+            layer_meta["layout_kind"] = infer_layout_kind(axes_str)
 
         layer_meta["source_layer"] = target_name
 
@@ -377,7 +420,17 @@ class ExecutionWorker(QObject):
 
         # RUN
         args = {**func_inputs, **clean_params}
-        result = func(**args)
+        dispatch_token = push_dispatch_context(
+            {
+                "metadata": current_metadata.copy(),
+                "node_uid": node.uid,
+                "node_type": node.node_type,
+            }
+        )
+        try:
+            result = func(**args)
+        finally:
+            pop_dispatch_context(dispatch_token)
 
         
         # --- D. Format Results ---

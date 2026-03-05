@@ -1,6 +1,7 @@
 import functools
 import dask.array as da
 import numpy as np
+import threading
 from typing import Callable, Optional
 
 def _normalize_logic_config(logic):
@@ -35,6 +36,34 @@ def _normalize_io_type_map(type_map):
         value = str(socket_type).strip().lower() if socket_type is not None else "any"
         normalized[key] = value if value else "any"
     return normalized
+
+
+_DISPATCH_CONTEXT = threading.local()
+
+
+def _get_dispatch_stack():
+    stack = getattr(_DISPATCH_CONTEXT, "stack", None)
+    if stack is None:
+        stack = []
+        _DISPATCH_CONTEXT.stack = stack
+    return stack
+
+
+def push_dispatch_context(context: dict):
+    stack = _get_dispatch_stack()
+    stack.append(context or {})
+    return len(stack)
+
+
+def pop_dispatch_context(_token=None):
+    stack = _get_dispatch_stack()
+    if stack:
+        stack.pop()
+
+
+def get_dispatch_context():
+    stack = _get_dispatch_stack()
+    return stack[-1] if stack else {}
 
 
 def register_node(
@@ -255,16 +284,18 @@ def dispatch(
     args=(),
     kwargs=None,
     pyramid_strategy: str = "per_level",  # "per_level" | "from_level0"
+    layout_policy: str = "spatial_only",  # "spatial_only" | "full_nd"
+    time_policy: str = "independent",      # "independent" | "joint" | "reject"
+    channel_policy: str = "independent",   # "independent" | "joint" | "reject"
 ):
     """
-    Choose backend (cuda > dask > default) and handle pyramids.
+    Choose backend (cuda > dask > default), handle pyramids and apply
+    layout-aware execution policies.
 
-    - If any input is a pyramid (list of arrays), we support:
-        * per_level: run the operation independently on each level
-        * from_level0: compute only on level0, downsample to other levels
-
-    This expects image-like arrays (numpy/dask). If you pass napari LayerDataTuples
-    or (data, meta) wrappers, it will unwrap them.
+    Layout defaults:
+      - time dims (T): independent (no filtering across time)
+      - channel dims (C): independent (no channel mixing)
+      - volumetric data (ZYX): processed as true 3D
     """
     import numpy as np
     import dask.array as da
@@ -272,8 +303,58 @@ def dispatch(
     if kwargs is None:
         kwargs = {}
 
+    runtime_axes = None
+    runtime_layout_kind = None
+
+    ctx = get_dispatch_context()
+    ctx_meta = (ctx.get("metadata", {}) if isinstance(ctx, dict) else {}) or {}
+    ctx_axes = ctx_meta.get("axes")
+    ctx_layout_kind = ctx_meta.get("layout_kind")
+
+    layout_to_axes = {
+        "2d_image": "YX",
+        "2d_image_channels": "YXC",
+        "3d_image": "ZYX",
+        "3d_image_channels": "ZYXC",
+        "3d_timeline": "TYX",
+        "3d_timeline_channels": "TYXC",
+        "4d_timeline": "TZYX",
+        "4d_timeline_channels": "TZYXC",
+    }
+
+    def is_array_like(x):
+        return isinstance(x, (da.Array, np.ndarray)) or hasattr(x, "shape")
+
+    def infer_axes_for_sample(sample, axes_hint=None, layout_hint=None):
+        if sample is None or not hasattr(sample, "shape"):
+            return None
+        ndim = len(sample.shape)
+        if isinstance(axes_hint, str):
+            ax = axes_hint.upper()
+            if len(ax) == ndim:
+                return ax
+        if isinstance(layout_hint, str):
+            mapped = layout_to_axes.get(layout_hint.lower())
+            if mapped and len(mapped) == ndim:
+                return mapped
+
+        if ndim == 2:
+            return "YX"
+        if ndim == 3:
+            # Default to volumetric when unknown (safer for microscopy stacks).
+            return "ZYX"
+        if ndim == 4:
+            # Heuristic: channels usually in the last axis if small.
+            if sample.shape[-1] <= 4:
+                return "ZYXC"
+            return "TZYX"
+        if ndim == 5:
+            return "TZYXC"
+        return None
+
     # ---------- Unwrap helpers ----------
     def unwrap(x):
+        nonlocal runtime_axes, runtime_layout_kind
         # list of LayerDataTuples -> pick first image layer
         if isinstance(x, list) and len(x) > 0 and isinstance(x[0], tuple):
             target = x[0]
@@ -281,14 +362,28 @@ def dispatch(
                 if len(layer) >= 3 and str(layer[2]) == "image":
                     target = layer
                     break
+            if (
+                len(target) >= 2
+                and isinstance(target[1], dict)
+                and runtime_axes is None
+            ):
+                runtime_axes = target[1].get("axes")
+                runtime_layout_kind = target[1].get("layout_kind")
             return target[0]
         # (data, meta) envelope
         if isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], dict):
+            if runtime_axes is None:
+                runtime_axes = x[1].get("axes")
+                runtime_layout_kind = x[1].get("layout_kind")
             return x[0]
         return x
 
     uargs = [unwrap(a) for a in args]
     ukwargs = {k: unwrap(v) for k, v in kwargs.items()}
+    if runtime_axes is None:
+        runtime_axes = ctx_axes
+    if runtime_layout_kind is None:
+        runtime_layout_kind = ctx_layout_kind
 
     # ---------- Find pyramid location ----------
     pyramid_loc = None  # ("arg", idx) or ("kwarg", key)
@@ -320,13 +415,105 @@ def dispatch(
 
     def execute_once(args_in, kwargs_in):
         sample = None
+        sample_loc = None
         # pick the first array-like argument we see
-        for v in list(args_in) + list(kwargs_in.values()):
-            if isinstance(v, (da.Array, np.ndarray)) or hasattr(v, "shape"):
+        for i, v in enumerate(args_in):
+            if is_array_like(v):
                 sample = v
+                sample_loc = ("arg", i)
                 break
+        if sample is None:
+            for k, v in kwargs_in.items():
+                if is_array_like(v):
+                    sample = v
+                    sample_loc = ("kwarg", k)
+                    break
         func = pick_backend(sample)
-        return func(*args_in, **kwargs_in)
+
+        axes = infer_axes_for_sample(
+            sample, axes_hint=runtime_axes, layout_hint=runtime_layout_kind
+        )
+
+        # Fast path: no layout policy or no inferable axes.
+        if (
+            sample is None
+            or layout_policy == "full_nd"
+            or axes is None
+            or len(axes) != len(sample.shape)
+        ):
+            return func(*args_in, **kwargs_in)
+
+        spatial = [i for i, a in enumerate(axes) if a in ("Z", "Y", "X")]
+        if not spatial:
+            return func(*args_in, **kwargs_in)
+
+        if time_policy == "reject" and "T" in axes:
+            raise ValueError("Dispatch rejected time dimension (T) for this node.")
+        if channel_policy == "reject" and "C" in axes:
+            raise ValueError("Dispatch rejected channel dimension (C) for this node.")
+
+        core = list(spatial)
+        if time_policy == "joint":
+            core.extend(i for i, a in enumerate(axes) if a == "T")
+        if channel_policy == "joint":
+            core.extend(i for i, a in enumerate(axes) if a == "C")
+        core = sorted(set(core))
+        independent = [i for i in range(len(axes)) if i not in core]
+
+        # Nothing to split => run once on full N-D sample.
+        if not independent:
+            return func(*args_in, **kwargs_in)
+
+        independent_shape = tuple(sample.shape[i] for i in independent)
+
+        def slice_if_compatible(value, slicer):
+            if not is_array_like(value):
+                return value
+            if not hasattr(value, "shape") or len(value.shape) != len(sample.shape):
+                return value
+            for d in independent:
+                if value.shape[d] != sample.shape[d]:
+                    return value
+            return value[tuple(slicer)]
+
+        outputs = []
+        for idx in np.ndindex(*independent_shape):
+            slicer = [slice(None)] * len(sample.shape)
+            for local_i, axis_i in enumerate(independent):
+                slicer[axis_i] = idx[local_i]
+
+            a2 = [slice_if_compatible(v, slicer) for v in args_in]
+            k2 = {k: slice_if_compatible(v, slicer) for k, v in kwargs_in.items()}
+            outputs.append(func(*a2, **k2))
+
+        if not outputs:
+            return func(*args_in, **kwargs_in)
+
+        first = outputs[0]
+        if not is_array_like(first):
+            # Non-array outputs are not composable here; return per-slice list.
+            return outputs
+
+        if isinstance(first, da.Array):
+            stacked = da.stack(outputs, axis=0)
+            core_shape = outputs[0].shape
+        else:
+            stacked = np.stack(outputs, axis=0)
+            core_shape = outputs[0].shape
+
+        stacked = stacked.reshape(*independent_shape, *core_shape)
+
+        # Reorder from [independent..., core...] back to original axis order.
+        perm = []
+        for orig_dim in range(len(axes)):
+            if orig_dim in independent:
+                perm.append(independent.index(orig_dim))
+            else:
+                perm.append(len(independent) + core.index(orig_dim))
+
+        if isinstance(stacked, da.Array):
+            return stacked.transpose(tuple(perm))
+        return np.transpose(stacked, axes=tuple(perm))
 
     # ---------- Downsample helper for from_level0 ----------
     def downsample_to_shape(arr0, target_shape):

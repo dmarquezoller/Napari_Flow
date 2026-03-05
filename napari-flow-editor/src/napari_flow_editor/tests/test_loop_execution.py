@@ -123,6 +123,57 @@ def test_execute_loop_node_without_body_logs_warning_and_continues_completed():
     assert any("has no Loop Body connection" in msg for msg in logs)
 
 
+def test_exec_transition_signal_emitted_for_linear_exec_path():
+    worker = _make_worker()
+    a = _Node("a")
+    b = _Node("b")
+    _with_exec_input(a)
+    _with_exec_outputs(a, ["exec_out"])
+    _with_exec_input(b)
+    _with_exec_outputs(b, ["exec_out"])
+    _connect_exec(a, "exec_out", b)
+
+    transitions = []
+    calls = []
+    worker.exec_transition_signal.connect(
+        lambda from_uid, out_name: transitions.append((from_uid, out_name))
+    )
+
+    def _fake_exec_single(node, _library, force_recompute=False):
+        calls.append((node.uid, force_recompute))
+
+    worker._execute_single_node = _fake_exec_single
+    worker._execute_exec_path(a, library_def={})
+
+    assert transitions == [("a", "exec_out")]
+    assert calls == [("a", False), ("b", False)]
+
+
+def test_exec_transition_signal_emitted_for_loop_body_and_completed():
+    worker = _make_worker()
+    loop = _Node("loop", node_type="loop_control", mode="N times", iterations=1)
+    body = _Node("body")
+    done = _Node("done")
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_outputs(body, ["exec_out"])
+    _with_exec_input(done)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
+    transitions = []
+    worker.exec_transition_signal.connect(
+        lambda from_uid, out_name: transitions.append((from_uid, out_name))
+    )
+    worker._execute_single_node = lambda *args, **kwargs: None
+
+    nxt = worker._execute_loop_node(loop, library_def={})
+
+    assert nxt is done
+    assert ("loop", "loop_body") in transitions
+    assert ("loop", "completed") in transitions
+
+
 def test_execute_loop_node_until_confirm_stops_immediately():
     worker = _make_worker()
     loop = _Node("loop", node_type="loop_control", mode="Until confirm", iterations=1)

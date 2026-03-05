@@ -1,4 +1,5 @@
 import numpy as np
+from napari_flow_editor.execution_engine import infer_layout_kind
 from .conftest import FakeNode
 
 
@@ -17,6 +18,7 @@ def test_get_layer_axes_injected(worker):
 
     assert isinstance(data, np.ndarray)
     assert meta["axes"] == "ZYX"
+    assert meta["layout_kind"] == "3d_image"
     assert meta["source_layer"] == "LayerA"
 
 
@@ -31,4 +33,17 @@ def test_get_layer_without_axes_map(worker):
     _, meta = result["data_out"]
 
     assert "axes" not in meta
+    assert "layout_kind" not in meta
     assert meta["source_layer"] == "LayerA"
+
+
+def test_infer_layout_kind_mappings():
+    assert infer_layout_kind("YX") == "2d_image"
+    assert infer_layout_kind("YXC") == "2d_image_channels"
+    assert infer_layout_kind("ZYX") == "3d_image"
+    assert infer_layout_kind("ZYXC") == "3d_image_channels"
+    assert infer_layout_kind("TYX") == "3d_timeline"
+    assert infer_layout_kind("TYXC") == "3d_timeline_channels"
+    assert infer_layout_kind("TZYX") == "4d_timeline"
+    assert infer_layout_kind("TZYXC") == "4d_timeline_channels"
+    assert infer_layout_kind("ABC") == "unknown_layout"

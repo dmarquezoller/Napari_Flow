@@ -13,7 +13,6 @@ from qtpy.QtGui import (
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr
-
 import numpy as np
 import dask.array as da
 import matplotlib.pyplot as plt
@@ -195,13 +194,7 @@ class Connection(QGraphicsPathItem):
         self.is_logic = getattr(start_socket, "is_logic", False)
         self.data_type = getattr(start_socket, "data_type", "any")
         self.setZValue(1)
-
-        # Exec edges: solid white line; Data edges: typed colors.
-        if self.is_logic:
-            pen = QPen(QColor("#F2F2F2"), 2)
-        else:
-            pen = QPen(_get_data_type_color(self.data_type).darker(120), 2)
-        self.setPen(pen)
+        self._apply_pen_state()
 
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self.setAcceptHoverEvents(True)
@@ -213,18 +206,25 @@ class Connection(QGraphicsPathItem):
         return stroker.createStroke(self.path())
 
     def hoverEnterEvent(self, event):
-        if self.is_logic:
-            self.setPen(QPen(QColor("#FFFFFF"), 3))
-        else:
-            self.setPen(QPen(_get_data_type_color(self.data_type), 3))
+        self.hovered = True
+        self._apply_pen_state()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        if self.is_logic:
-            self.setPen(QPen(QColor("#F2F2F2"), 2))
-        else:
-            self.setPen(QPen(_get_data_type_color(self.data_type).darker(120), 2))
+        self.hovered = False
+        self._apply_pen_state()
         super().hoverLeaveEvent(event)
+
+    def _apply_pen_state(self):
+        if self.is_logic:
+            color = QColor("#FFFFFF") if self.hovered else QColor("#F2F2F2")
+            width = 3 if self.hovered else 2
+            self.setPen(QPen(color, width))
+        else:
+            base = _get_data_type_color(self.data_type)
+            color = base if self.hovered else base.darker(120)
+            width = 3 if self.hovered else 2
+            self.setPen(QPen(color, width))
 
     def mousePressEvent(self, event):
         if self.end_socket and (self.end_socket.center_pos() - event.scenePos()).manhattanLength() < 20:
@@ -464,9 +464,11 @@ class Node(QGraphicsRectItem):
         # C. Selection Border
         if self.isSelected():
             border_color = QColor("#ff9900")
+            border_width = 2
         else:
             border_color = QColor("#7f9fbe") if is_control_flow else QColor("#727272")
-        painter.setPen(QPen(border_color, 2))
+            border_width = 2
+        painter.setPen(QPen(border_color, border_width))
         painter.drawRoundedRect(rect, 12, 12)
 
         # D. Title Header
@@ -1479,19 +1481,144 @@ class FlowEditor(QWidget):
         
         # 3. Finally, remove the node body
         self.scene.removeItem(node)
-    
+
+    def _get_all_nodes(self):
+        return [item for item in self.scene.items() if isinstance(item, Node)]
+
+    def _get_exec_successors(self, node):
+        successors = []
+        for socket in getattr(node, "logic_outputs", []):
+            for edge in socket.connected_edges:
+                if edge.end_socket:
+                    successors.append(edge.end_socket.node)
+        return successors
+
+    def _collect_exec_reachable(self, start_node):
+        visited = set()
+        stack = [start_node]
+        while stack:
+            node = stack.pop()
+            if node.uid in visited:
+                continue
+            visited.add(node.uid)
+            stack.extend(self._get_exec_successors(node))
+        return visited
+
+    def _has_exec_cycle(self, nodes):
+        state = {}  # 0=unseen, 1=active, 2=done
+
+        def dfs(node):
+            uid = node.uid
+            mark = state.get(uid, 0)
+            if mark == 1:
+                return True
+            if mark == 2:
+                return False
+            state[uid] = 1
+            for nxt in self._get_exec_successors(node):
+                if dfs(nxt):
+                    return True
+            state[uid] = 2
+            return False
+
+        for node in nodes:
+            if state.get(node.uid, 0) == 0 and dfs(node):
+                return True
+        return False
+
+    def validate_pipeline_graph(self):
+        """
+        Validate graph structure before execution.
+        Returns (errors, warnings) where errors block execution.
+        """
+        errors = []
+        warnings = []
+        nodes = self._get_all_nodes()
+
+        if not nodes:
+            warnings.append("Pipeline is empty.")
+            return errors, warnings
+
+        begin_nodes = [n for n in nodes if getattr(n, "node_type", "") == "begin"]
+        if not begin_nodes:
+            errors.append("No Begin node found.")
+            return errors, warnings
+        if len(begin_nodes) > 1:
+            errors.append("Multiple Begin nodes found. Keep only one Begin node.")
+            return errors, warnings
+
+        begin = begin_nodes[0]
+        reachable = self._collect_exec_reachable(begin)
+        reachable_nodes = [n for n in nodes if n.uid in reachable]
+
+        if len(reachable) == 1:
+            warnings.append("Begin node is not connected to any exec thread.")
+
+        exec_capable = [n for n in nodes if n.logic_inputs or n.logic_outputs]
+        if self._has_exec_cycle(exec_capable):
+            errors.append("Exec cycle detected. Only loop nodes should express repetition.")
+
+        disconnected = [n for n in exec_capable if n.uid not in reachable]
+        if disconnected:
+            preview = ", ".join(n.title for n in disconnected[:4])
+            suffix = "..." if len(disconnected) > 4 else ""
+            warnings.append(
+                f"{len(disconnected)} exec node(s) are disconnected from Begin: {preview}{suffix}"
+            )
+
+        for node in reachable_nodes:
+            node_type = getattr(node, "node_type", "")
+            if node_type in ("begin", "loop_control"):
+                continue
+            for socket in getattr(node, "inputs", []):
+                if not socket.connected_edges:
+                    errors.append(
+                        f"Node '{node.title}' is missing required input '{socket.name}'."
+                    )
+
+        for loop in [n for n in reachable_nodes if getattr(n, "node_type", "") == "loop_control"]:
+            has_body = any(
+                s.name == "loop_body" and len(s.connected_edges) > 0
+                for s in getattr(loop, "logic_outputs", [])
+            )
+            has_completed = any(
+                s.name == "completed" and len(s.connected_edges) > 0
+                for s in getattr(loop, "logic_outputs", [])
+            )
+            if not has_body:
+                warnings.append(f"Loop '{loop.title}' has no Loop Body connection.")
+            if not has_completed:
+                warnings.append(f"Loop '{loop.title}' has no Completed connection.")
+
+        return errors, warnings
+
     # --- Run Pipeline Method ---
     def run_pipeline(self):
-        # 1. Disable UI
-        self.set_ui_enabled(False)
+        # 1. Validate graph before creating worker/thread.
         self.console.clear()
-        
-        # 2. Setup Thread
+        errors, warnings = self.validate_pipeline_graph()
+
+        for warning in warnings:
+            self.append_log(f"⚠️ Validation: {warning}")
+
+        if errors:
+            for error in errors:
+                self.append_log(f"❌ Validation: {error}")
+            QMessageBox.critical(
+                self,
+                "Pipeline Validation Failed",
+                "\n".join(errors),
+            )
+            return
+
+        # 2. Disable UI
+        self.set_ui_enabled(False)
+        # 3. Setup Thread
         self.thread = QThread()
         self.worker = ExecutionWorker(self.scene, self.viewer)
         self.worker.moveToThread(self.thread)
         
-        # 3. Connect Signals
+        # 4. Connect Signals
         self.thread.started.connect(self.worker.run)
         self.worker.node_status_signal.connect(self.update_node_status)
         
@@ -1517,7 +1644,7 @@ class FlowEditor(QWidget):
         # RE-ENABLE UI
         self.worker.finished_signal.connect(lambda: self.set_ui_enabled(True))
         
-        # 4. Start
+        # 5. Start
         self.thread.start()
 
     def on_stop_loop_clicked(self):
