@@ -218,6 +218,7 @@ def dask_gaussian_blur(image, sigma=1.0, mode='nearest', preserve_range=True):
 @register_node(
     label="Gaussian Blur",
     category="Filters",
+    description="Applies Gaussian smoothing. Uses dask for large arrays.",
     outputs=["image_out"],
     input_types={"image": "image"},
     output_types={"image_out": "image"},
@@ -239,6 +240,10 @@ def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
         # "from_level0" would chain all levels off the full-res computation,
         # making the coarse levels impossibly expensive to render.
         pyramid_strategy="per_level",
+        # Optional promotion path: if a numpy array is large enough, wrap it
+        # into dask and use dask_func for chunked execution.
+        allow_dask_from_numpy=True,
+        numpy_to_dask_min_bytes=32*1024*1024,  # 32 MB threshold
     )
 
     # IMPORTANT: avoid overwriting the source layer
@@ -549,4 +554,3 @@ def threshold_isodata(image, nbins: int = 256):
 def wiener(image, psf, balance: float = 0.25, clip: bool = True):
     # psf is impulse_response. It must be an image input.
     return skimage.filters.wiener(image, impulse_response=psf, K=balance, clip=clip)
-

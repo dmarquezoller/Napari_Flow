@@ -107,6 +107,28 @@ def test_execute_loop_node_n_times_runs_body_and_returns_completed():
     assert nxt is done
 
 
+def test_execute_loop_node_resets_body_status_to_gray_each_iteration():
+    worker = _make_worker()
+    loop = _Node("loop", node_type="loop_control", mode="N times", iterations=2)
+    body = _Node("body")
+    done = _Node("done")
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_outputs(body, ["exec_out"])
+    _with_exec_input(done)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
+    statuses = []
+    worker.node_status_signal.connect(lambda uid, status: statuses.append((uid, status)))
+    worker._execute_exec_path = lambda *_args, **_kwargs: None
+
+    worker._execute_loop_node(loop, library_def={})
+
+    body_gray = [x for x in statuses if x == ("body", "gray")]
+    assert len(body_gray) == 2
+
+
 def test_execute_loop_node_without_body_logs_warning_and_continues_completed():
     worker = _make_worker()
     loop = _Node("loop", node_type="loop_control", mode="N times", iterations=3)

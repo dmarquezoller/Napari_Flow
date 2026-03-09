@@ -1,4 +1,5 @@
 import functools
+import inspect
 import dask.array as da
 import numpy as np
 import threading
@@ -77,6 +78,13 @@ def _normalize_dynamic_output_types(config):
     return normalized
 
 
+def _normalize_description(description):
+    if description is None:
+        return ""
+    value = str(description).strip()
+    return value
+
+
 _DISPATCH_CONTEXT = threading.local()
 
 
@@ -110,6 +118,7 @@ def register_node(
     category,
     outputs=None,
     params_config=None,
+    description=None,
     interactive=None,
     logic=None,
     input_types=None,
@@ -151,12 +160,17 @@ def register_node(
         interactive_config = None
 
     def decorator(func):
+        resolved_description = _normalize_description(description)
+        if not resolved_description:
+            resolved_description = inspect.getdoc(func) or ""
+
         func._is_flow_node = True
         func._node_meta = {
             "label": label,
             "category": category,
             "outputs": outputs,
             "params_config": params_config,
+            "description": resolved_description,
             # Store the full config (or None); the engine / generate_library
             # will serialise this into the JSON library.
             "interactive": interactive_config,
@@ -329,6 +343,9 @@ def dispatch(
     layout_policy: str = "spatial_only",  # "spatial_only" | "full_nd"
     time_policy: str = "independent",      # "independent" | "joint" | "reject"
     channel_policy: str = "independent",   # "independent" | "joint" | "reject"
+    allow_dask_from_numpy: bool = False,
+    numpy_to_dask_min_bytes: int = 32 * 1024 * 1024,
+    numpy_to_dask_chunks="auto",
 ):
     """
     Choose backend (cuda > dask > default), handle pyramids and apply
@@ -455,6 +472,39 @@ def dispatch(
 
         return default
 
+    def maybe_promote_numpy_to_dask(args_in, kwargs_in, sample):
+        if (
+            not allow_dask_from_numpy
+            or dask_func is None
+            or not isinstance(sample, np.ndarray)
+        ):
+            return args_in, kwargs_in, sample
+
+        min_bytes = max(0, int(numpy_to_dask_min_bytes))
+        if sample.nbytes < min_bytes:
+            return args_in, kwargs_in, sample
+
+        def convert(v):
+            if isinstance(v, np.ndarray):
+                return da.from_array(v, chunks=numpy_to_dask_chunks)
+            return v
+
+        promoted_args = [convert(v) for v in args_in]
+        promoted_kwargs = {k: convert(v) for k, v in kwargs_in.items()}
+
+        promoted_sample = sample
+        for v in promoted_args:
+            if isinstance(v, da.Array):
+                promoted_sample = v
+                break
+        if not isinstance(promoted_sample, da.Array):
+            for v in promoted_kwargs.values():
+                if isinstance(v, da.Array):
+                    promoted_sample = v
+                    break
+
+        return promoted_args, promoted_kwargs, promoted_sample
+
     def execute_once(args_in, kwargs_in):
         sample = None
         sample_loc = None
@@ -470,24 +520,28 @@ def dispatch(
                     sample = v
                     sample_loc = ("kwarg", k)
                     break
-        func = pick_backend(sample)
+
+        args_exec, kwargs_exec, sample_exec = maybe_promote_numpy_to_dask(
+            args_in, kwargs_in, sample
+        )
+        func = pick_backend(sample_exec)
 
         axes = infer_axes_for_sample(
-            sample, axes_hint=runtime_axes, layout_hint=runtime_layout_kind
+            sample_exec, axes_hint=runtime_axes, layout_hint=runtime_layout_kind
         )
 
         # Fast path: no layout policy or no inferable axes.
         if (
-            sample is None
+            sample_exec is None
             or layout_policy == "full_nd"
             or axes is None
-            or len(axes) != len(sample.shape)
+            or len(axes) != len(sample_exec.shape)
         ):
-            return func(*args_in, **kwargs_in)
+            return func(*args_exec, **kwargs_exec)
 
         spatial = [i for i, a in enumerate(axes) if a in ("Z", "Y", "X")]
         if not spatial:
-            return func(*args_in, **kwargs_in)
+            return func(*args_exec, **kwargs_exec)
 
         if time_policy == "reject" and "T" in axes:
             raise ValueError("Dispatch rejected time dimension (T) for this node.")
@@ -504,17 +558,17 @@ def dispatch(
 
         # Nothing to split => run once on full N-D sample.
         if not independent:
-            return func(*args_in, **kwargs_in)
+            return func(*args_exec, **kwargs_exec)
 
-        independent_shape = tuple(sample.shape[i] for i in independent)
+        independent_shape = tuple(sample_exec.shape[i] for i in independent)
 
         def slice_if_compatible(value, slicer):
             if not is_array_like(value):
                 return value
-            if not hasattr(value, "shape") or len(value.shape) != len(sample.shape):
+            if not hasattr(value, "shape") or len(value.shape) != len(sample_exec.shape):
                 return value
             for d in independent:
-                if value.shape[d] != sample.shape[d]:
+                if value.shape[d] != sample_exec.shape[d]:
                     return value
             return value[tuple(slicer)]
 
@@ -524,12 +578,12 @@ def dispatch(
             for local_i, axis_i in enumerate(independent):
                 slicer[axis_i] = idx[local_i]
 
-            a2 = [slice_if_compatible(v, slicer) for v in args_in]
-            k2 = {k: slice_if_compatible(v, slicer) for k, v in kwargs_in.items()}
+            a2 = [slice_if_compatible(v, slicer) for v in args_exec]
+            k2 = {k: slice_if_compatible(v, slicer) for k, v in kwargs_exec.items()}
             outputs.append(func(*a2, **k2))
 
         if not outputs:
-            return func(*args_in, **kwargs_in)
+            return func(*args_exec, **kwargs_exec)
 
         first = outputs[0]
         if not is_array_like(first):

@@ -91,6 +91,9 @@ def generate():
                         "parameters": parameters,
                         "execution_path": f"{full_module_name}.{name}"
                     }
+                    description_cfg = meta.get("description", "")
+                    if description_cfg:
+                        entry["description"] = description_cfg
 
                     # Persist interactive config so the engine knows at runtime
                     interactive_cfg = meta.get("interactive")

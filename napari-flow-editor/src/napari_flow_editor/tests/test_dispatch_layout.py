@@ -1,4 +1,5 @@
 import numpy as np
+import dask.array as da
 
 from napari_flow_editor.flow_nodes.decorator import (
     dispatch,
@@ -113,3 +114,30 @@ def test_worker_propagates_axes_metadata_to_dispatch(worker):
     assert all(shape == (10, 11) for shape in calls)
     assert meta["axes"] == "TYX"
     assert meta["layout_kind"] == "3d_timeline"
+
+
+def test_dispatch_can_promote_large_numpy_to_dask_when_enabled():
+    calls = {"default": 0, "dask": 0}
+    image = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+
+    def default_func(x):
+        calls["default"] += 1
+        return x
+
+    def dask_func(x):
+        calls["dask"] += 1
+        assert isinstance(x, da.Array)
+        return x
+
+    out = dispatch(
+        default=default_func,
+        dask_func=dask_func,
+        args=(image,),
+        kwargs={},
+        allow_dask_from_numpy=True,
+        numpy_to_dask_min_bytes=0,
+    )
+
+    assert isinstance(out, da.Array)
+    assert calls["default"] == 0
+    assert calls["dask"] == 1

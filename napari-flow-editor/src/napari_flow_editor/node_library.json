@@ -6,6 +6,7 @@
     "outputs": [],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.control_flow.begin",
+    "description": "Entry point for the exec thread.",
     "logic": {
       "in": false,
       "out": true,
@@ -36,6 +37,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.control_flow.loop_control",
+    "description": "Control-flow Loop node for visual programming.\n- mode: Loop mode (N times, Until confirm)\n- iterations: Number of times to loop (if mode is N times)\nThis node does not process data, but controls execution flow via logic sockets.",
     "logic": {
       "in": true,
       "out": true,
@@ -622,6 +624,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.butterworth",
+    "description": "Wraps skimage.filters.butterworth",
     "logic": {
       "in": true,
       "out": true,
@@ -653,6 +656,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.correlate_sparse",
+    "description": "Wraps skimage.filters.correlate_sparse",
     "logic": {
       "in": true,
       "out": true,
@@ -697,6 +701,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.difference_of_gaussians",
+    "description": "Wraps skimage.filters.difference_of_gaussians",
     "logic": {
       "in": true,
       "out": true,
@@ -727,6 +732,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.farid",
+    "description": "Wraps skimage.filters.farid",
     "logic": {
       "in": true,
       "out": true,
@@ -745,6 +751,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.farid_horizontal",
+    "description": "Wraps skimage.filters.farid_h",
     "logic": {
       "in": true,
       "out": true,
@@ -763,6 +770,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.farid_vertical",
+    "description": "Wraps skimage.filters.farid_v",
     "logic": {
       "in": true,
       "out": true,
@@ -781,6 +789,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.filter_forward",
+    "description": "Wraps skimage.filters.filter_forward",
     "logic": {
       "in": true,
       "out": true,
@@ -807,6 +816,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.filter_inverse",
+    "description": "Wraps skimage.filters.filter_inverse",
     "logic": {
       "in": true,
       "out": true,
@@ -872,6 +882,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.frangi",
+    "description": "Wraps skimage.filters.frangi",
     "logic": {
       "in": true,
       "out": true,
@@ -916,6 +927,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.gabor",
+    "description": "Wraps skimage.filters.gabor",
     "logic": {
       "in": true,
       "out": true,
@@ -952,6 +964,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.gaussian_blur",
+    "description": "Applies Gaussian smoothing. Uses dask for large arrays.",
     "logic": {
       "in": true,
       "out": true,
@@ -1037,6 +1050,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.hysteresis_threshold",
+    "description": "Wraps skimage.filters.apply_hysteresis_threshold",
     "logic": {
       "in": true,
       "out": true,
@@ -1088,6 +1102,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.median_filter",
+    "description": "Wraps skimage.filters.median with a disk footprint",
     "logic": {
       "in": true,
       "out": true,
@@ -1161,6 +1176,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.prewitt_filter",
+    "description": "Wraps skimage.filters.prewitt",
     "logic": {
       "in": true,
       "out": true,
@@ -1292,6 +1308,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_filter",
+    "description": "Wraps skimage.filters.sobel",
     "logic": {
       "in": true,
       "out": true,
@@ -1805,6 +1822,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.load_csv",
+    "description": "Loads a CSV file and passes it to the next node.",
     "logic": {
       "in": true,
       "out": true,
@@ -1865,6 +1883,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.select_layer",
+    "description": "Select a layer by *name* from a list of napari LayerDataTuples:\n  layers: [(data, meta, layer_type), ...]\n\nReturns (data, meta) so downstream nodes receive just the data (engine will unpack),\nwhile metadata stays available.",
     "logic": {
       "in": true,
       "out": true,
@@ -1898,6 +1917,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.blend_images",
+    "description": "Because image_a and image_b have no defaults, \nthe Generator automatically creates 2 Input Sockets for them.",
     "logic": {
       "in": true,
       "out": true,
@@ -2015,6 +2035,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.math.project_3d_to_2d",
+    "description": "Flattens a 3D volume into a 2D image layer.",
     "logic": {
       "in": true,
       "out": true,
@@ -2142,6 +2163,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.measure.measure_labels",
+    "description": "Calculates properties for labeled regions.\nSupports processing stack slice-by-slice to prevent RAM crashes.",
     "logic": {
       "in": true,
       "out": true,
@@ -2217,6 +2239,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.black_tophat",
+    "description": "Returns dark spots smaller than the structuring element.",
     "logic": {
       "in": true,
       "out": true,
@@ -2235,6 +2258,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.morphology.convex_hull",
+    "description": "Computes the convex hull of the binary image objects.",
     "logic": {
       "in": true,
       "out": true,
@@ -2260,6 +2284,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation",
+    "description": "Wraps skimage.morphology.dilation with a disk footprint",
     "logic": {
       "in": true,
       "out": true,
@@ -2285,6 +2310,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.erosion",
+    "description": "Wraps skimage.morphology.erosion with a disk footprint",
     "logic": {
       "in": true,
       "out": true,
@@ -2303,6 +2329,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.morphology.label_objects",
+    "description": "Labels connected components in a binary image.",
     "logic": {
       "in": true,
       "out": true,
@@ -2329,6 +2356,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_holes",
+    "description": "Fills holes smaller than the threshold inside objects.",
     "logic": {
       "in": true,
       "out": true,
@@ -2398,6 +2426,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat",
+    "description": "Returns bright spots smaller than the structuring element.\nGreat for background subtraction (uniform background).",
     "logic": {
       "in": true,
       "out": true,
@@ -2513,6 +2542,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.chan_vese",
+    "description": "Active contours without edges. Can segment objects without clear boundaries.\nReturns a binary mask.",
     "logic": {
       "in": true,
       "out": true,
@@ -2531,6 +2561,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.clear_border",
+    "description": "Clear objects connected to the border of the image.",
     "logic": {
       "in": true,
       "out": true,
@@ -2556,6 +2587,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.expand_labels",
+    "description": "Expand labels in label image by distance pixels without overlapping.",
     "logic": {
       "in": true,
       "out": true,
@@ -2593,6 +2625,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.felzenszwalb",
+    "description": "Efficient graph-based image segmentation.",
     "logic": {
       "in": true,
       "out": true,
@@ -2622,6 +2655,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.find_boundaries",
+    "description": "Return bool mask where boundaries between labeled regions are True.",
     "logic": {
       "in": true,
       "out": true,
@@ -2661,6 +2695,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.mark_boundaries",
+    "description": "Returns the image with boundaries of the label_img superimposed.\nNOTE: Requires 2 Inputs (Original Image + Label Mask).",
     "logic": {
       "in": true,
       "out": true,
@@ -2699,6 +2734,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.quickshift",
+    "description": "Segments image using quickshift mode seeking.",
     "logic": {
       "in": true,
       "out": true,
@@ -2735,6 +2771,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.random_walker",
+    "description": "Random walker algorithm.\nDetermines segmentation of pixels based on probability of reaching markers.\n\nInputs:\n1. image: Grayscale image.\n2. markers: Seed map.",
     "logic": {
       "in": true,
       "out": true,
@@ -2774,6 +2811,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.slic",
+    "description": "Segments image using k-means clustering in Color-(x,y,z) space.",
     "logic": {
       "in": true,
       "out": true,
@@ -2801,6 +2839,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.segmentation.watershed",
+    "description": "Find watershed basins in `image` flooded from `markers`.\n\nInputs:\n1. image: The \"basin\" image (usually gradient or inverted distance).\n2. markers: An image with seeds (integers > 0) indicating where to start.",
     "logic": {
       "in": true,
       "out": true,
@@ -2827,6 +2866,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.downscale_local_mean",
+    "description": "Downsamples the image by local averaging (integer binning).\nGood for reducing noise while shrinking.",
     "logic": {
       "in": true,
       "out": true,
@@ -2853,6 +2893,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.rescale_image",
+    "description": "Resizes the image by a scale factor.\nNote: Safely handles RGB images by checking dimensions.",
     "logic": {
       "in": true,
       "out": true,
@@ -2922,6 +2963,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.swirl",
+    "description": "Performs a non-linear whirlpool distortion.",
     "logic": {
       "in": true,
       "out": true,
@@ -2956,6 +2998,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.warp_polar",
+    "description": "Remaps image to polar coordinates (Theta x Radius).\nUseful for analyzing circular objects (like clocks, irises, or radial patterns).",
     "logic": {
       "in": true,
       "out": true,
@@ -2975,6 +3018,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.colocalization_scatter",
+    "description": "Plots intensity of Channel 1 vs Channel 2 to show correlation.\nRequires two images of the same size.",
     "logic": {
       "in": true,
       "out": true,
@@ -2993,6 +3037,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.plot_histogram",
+    "description": "Generates a Matplotlib Figure object from the image.",
     "logic": {
       "in": true,
       "out": true,
@@ -3032,6 +3077,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.table_heatmap_plot",
+    "description": "Generates a heatmap figure from a Table/DataFrame.\nAutomatically selects only numeric columns.",
     "logic": {
       "in": true,
       "out": true,

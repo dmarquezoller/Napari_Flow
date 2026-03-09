@@ -182,6 +182,40 @@ class ExecutionWorker(QObject):
                 self.exec_transition_signal.emit(current.uid, out_name)
             current = next_node
 
+    def _collect_linear_exec_nodes(self, start_node, stop_uids=None, max_steps=2048):
+        """
+        Collect nodes on the default exec path starting at ``start_node``.
+        Used for UI status resets between loop iterations.
+        """
+        nodes = []
+        visited = set()
+        current = start_node
+        stop_uids = set(stop_uids or [])
+        steps = 0
+
+        while current is not None and steps < max_steps:
+            if current.uid in stop_uids or current.uid in visited:
+                break
+            nodes.append(current)
+            visited.add(current.uid)
+            steps += 1
+
+            # Prefer explicit loop body path inside nested loops.
+            if current.node_type == "loop_control":
+                current, _ = self._next_logic_step(current, "loop_body")
+            else:
+                current, _ = self._next_logic_step(current)
+
+        return nodes
+
+    def _set_nodes_gray(self, nodes):
+        for node in nodes:
+            try:
+                node.status = "gray"
+            except Exception:
+                pass
+            self.node_status_signal.emit(node.uid, "gray")
+
     def _execute_loop_node(self, loop_node, library_def):
         params = getattr(loop_node, "parameters", {}) or {}
         mode = params.get("mode", "N times")
@@ -203,12 +237,16 @@ class ExecutionWorker(QObject):
         if mode == "Until confirm":
             self._loop_stop_requested = False
             self.loop_control_state_signal.emit(True, loop_node.uid)
+            body_nodes = self._collect_linear_exec_nodes(
+                body_start, stop_uids={loop_node.uid}
+            )
             try:
                 iteration = 0
                 while True:
                     if self._loop_stop_requested:
                         break
                     iteration += 1
+                    self._set_nodes_gray(body_nodes)
                     self.log_signal.emit(
                         f"🔁 Loop '{loop_node.title}' iteration {iteration} (Until confirm)"
                     )
@@ -222,7 +260,11 @@ class ExecutionWorker(QObject):
                 self.loop_control_state_signal.emit(False, loop_node.uid)
                 self._loop_stop_requested = False
         else:
+            body_nodes = self._collect_linear_exec_nodes(
+                body_start, stop_uids={loop_node.uid}
+            )
             for i in range(iterations):
+                self._set_nodes_gray(body_nodes)
                 self.log_signal.emit(
                     f"🔁 Loop '{loop_node.title}' iteration {i + 1}/{iterations}"
                 )

@@ -5,6 +5,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
     QFrame, QMessageBox, QTextEdit, QSplitter, QDialog, QTableWidget, QHeaderView, QAbstractItemView,
+    QToolTip,
     QListWidget, QListWidgetItem
 )
 
@@ -13,6 +14,7 @@ from qtpy.QtGui import (
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr
+import html
 import numpy as np
 import dask.array as da
 import matplotlib.pyplot as plt
@@ -29,6 +31,35 @@ from .widgets.plot_widgets import PlotResultDialog, figure_to_rgb_array, PlotDas
 
 
 NODE_LIBRARY = {}
+
+
+class InfoHoverButton(QPushButton):
+    """Small info button that always shows a transient hover tooltip."""
+
+    def __init__(self, tooltip_html, parent=None):
+        super().__init__("i", parent)
+        self._tooltip_html = tooltip_html
+
+    def _show_tooltip(self):
+        if not self._tooltip_html:
+            return
+        pos = self.mapToGlobal(self.rect().bottomLeft())
+        QToolTip.showText(pos, self._tooltip_html, self)
+
+    def enterEvent(self, event):
+        self._show_tooltip()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._show_tooltip()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 def _normalize_logic_config(logic_cfg):
     cfg = {
@@ -383,6 +414,7 @@ class Node(QGraphicsRectItem):
         self.category = "Uncategorized"
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
+        self.description = ""
         self.logic_config = _normalize_logic_config(None)
         self.dynamic_output_types = {}
 
@@ -401,6 +433,7 @@ class Node(QGraphicsRectItem):
             definition = NODE_LIBRARY[node_type]
             self.title = title if title else definition["label"]
             self.category = definition.get("category", "Uncategorized")
+            self.description = str(definition.get("description", "")).strip()
             self.logic_config = _normalize_logic_config(definition.get("logic"))
             inputs_data = definition.get("inputs", ["in"])
             outputs_data = definition.get("outputs", ["out"])
@@ -515,7 +548,43 @@ class Node(QGraphicsRectItem):
     def all_sockets(self):
         return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
 
+    def boundingRect(self):
+        """
+        Expand paint bounds so off-node decorations (shadow + exec label chips)
+        are always included in Qt's dirty-region repaints.
+        """
+        return super().boundingRect().adjusted(-70, -8, 70, 12)
+
+    def _logic_socket_display_label(self, socket):
+        if socket.socket_type not in ("logic_in", "logic_out"):
+            return ""
+
+        name = socket.name
+        if socket.socket_type == "logic_in":
+            return "IN"
+
+        if self.node_type == "begin":
+            if name == "exec_out":
+                return "START"
+            return "OUT"
+        if self.node_type == "loop_control":
+            mapping = {
+                "logic_in": "IN",
+                "loop_body": "BODY",
+                "completed": "DONE",
+            }
+            return mapping.get(name, name.replace("_", " ").upper())
+
+        if name in ("exec_out", "logic_out"):
+            return "OUT"
+        return name.replace("_", " ").upper()
+
     def itemChange(self, change, value):
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemSelectedChange,
+        ):
+            self.update()
         if change in (QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged, QGraphicsItem.GraphicsItemChange.ItemPositionChange):
             for s in self.all_sockets():
                 s.update_position()
@@ -586,6 +655,38 @@ class Node(QGraphicsRectItem):
             # Draw small circle in top-right
             dot_rect = QRectF(rect.x() + rect.width() - 18, rect.y() + 7, 10, 10)
             painter.drawEllipse(dot_rect)
+
+        # Exec socket labels (only when selected + socket is unconnected)
+        if self.isSelected():
+            logic_font = painter.font()
+            logic_font.setPointSize(7)
+            logic_font.setBold(True)
+            painter.setFont(logic_font)
+            painter.setPen(QColor("#E9E9E9"))
+
+            for socket in self.logic_inputs + self.logic_outputs:
+                label = self._logic_socket_display_label(socket)
+                if not label:
+                    continue
+                if socket.connected_edges:
+                    continue
+                chip_w = max(44, painter.fontMetrics().horizontalAdvance(label) + 12)
+                chip_h = 14
+                y = socket.local_offset.y() - (chip_h / 2)
+                if socket.socket_type == "logic_in":
+                    x = -chip_w - 12
+                else:
+                    x = rect.width() + 12
+                chip_rect = QRectF(x, y, chip_w, chip_h)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(33, 43, 55, 220))
+                painter.drawRoundedRect(chip_rect, 6, 6)
+                painter.setPen(QColor("#E9E9E9"))
+                painter.drawText(
+                    chip_rect,
+                    Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+                    label,
+                )
         
         # G. Parameters Text
         font = painter.font()
@@ -760,8 +861,23 @@ class FlowView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.scale_factor = 1.0
+        self.delete_callback = None
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.setFocus()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if callable(self.delete_callback):
+                self.delete_callback()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         zoom_in = 1.1
@@ -963,6 +1079,7 @@ class FlowEditor(QWidget):
         # 1. Graph View
         self.scene = FlowScene()
         self.view = FlowView(self.scene)
+        self.view.delete_callback = self.delete_selected_nodes
         self.inner_splitter.addWidget(self.view)
         
         # 2. Plot Dashboard (Hidden by default)
@@ -1022,6 +1139,8 @@ class FlowEditor(QWidget):
     # --- Node Selection Handler ---
     def on_selection(self):
         """Rebuilds the property panel based on selection."""
+        self.scene.update()
+        self.view.viewport().update()
         # 1. Clear current widgets
         while self.props_layout.count():
             child = self.props_layout.takeAt(0)
@@ -1036,9 +1155,39 @@ class FlowEditor(QWidget):
         node = sel[0]
         
         # --- HEADER ---
-        # Display the node Title and ID (useful for debugging connections)
+        # Display title, info tooltip and node ID.
+        title_widget = QWidget()
+        title_layout = QHBoxLayout(title_widget)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(6)
+
+        title_layout.addWidget(QLabel(f"<b>{node.title}</b>"))
+        if getattr(node, "description", ""):
+            escaped_description = html.escape(str(node.description).strip()).replace("\n", "<br>")
+            tooltip_html = (
+                "<div style='max-width: 340px; white-space: pre-wrap; line-height: 1.35;'>"
+                f"{escaped_description}"
+                "</div>"
+            )
+            info_button = InfoHoverButton(tooltip_html)
+            info_button.setFixedSize(16, 16)
+            info_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            info_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            info_button.setStyleSheet(
+                "QPushButton {"
+                " border: 1px solid #6f7a86;"
+                " border-radius: 8px;"
+                " color: #dbe7f3;"
+                " font-weight: bold;"
+                " background: #2c3946;"
+                "}"
+                "QPushButton:hover { background: #395067; }"
+            )
+            title_layout.addWidget(info_button)
+        title_layout.addStretch()
+
         id_label = QLabel(f"<span style='color:#888; font-size:10px;'>ID: {node.uid[:8]}...</span>")
-        self.props_layout.addRow(QLabel(f"<b>{node.title}</b>"), id_label)
+        self.props_layout.addRow(title_widget, id_label)
         
         # Spacer
         self.props_layout.addRow(QLabel("")) 
@@ -1665,6 +1814,15 @@ class FlowEditor(QWidget):
         
         # 3. Finally, remove the node body
         self.scene.removeItem(node)
+
+    def delete_selected_nodes(self):
+        """Delete currently selected nodes (used by Delete/Backspace shortcut)."""
+        selected_nodes = [item for item in self.scene.selectedItems() if isinstance(item, Node)]
+        if not selected_nodes:
+            return
+        for node in list(selected_nodes):
+            self.delete_node(node)
+        self.on_selection()
 
     def _get_all_nodes(self):
         return [item for item in self.scene.items() if isinstance(item, Node)]
@@ -2340,6 +2498,9 @@ class FlowEditor(QWidget):
                         "execution_path": "custom_loaded", 
                         "executable": func # <--- DIRECT REFERENCE
                     }
+                    description_cfg = meta.get("description", "")
+                    if description_cfg:
+                        entry["description"] = description_cfg
                     # Persist interactive config if present
                     interactive_cfg = meta.get("interactive")
                     if interactive_cfg:

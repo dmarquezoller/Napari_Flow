@@ -68,3 +68,21 @@ def test_register_node_dynamic_output_types_are_normalized_and_stored():
             "fallback": "image",
         }
     }
+
+
+def test_register_node_description_uses_docstring_by_default():
+    @register_node(label="Desc", category="Utility")
+    def _desc_node(x=1):
+        """Example description from docstring."""
+        return x
+
+    assert _desc_node._node_meta["description"] == "Example description from docstring."
+
+
+def test_register_node_description_explicit_override_wins():
+    @register_node(label="Desc", category="Utility", description="Custom help")
+    def _desc_node(x=1):
+        """This should be ignored."""
+        return x
+
+    assert _desc_node._node_meta["description"] == "Custom help"
