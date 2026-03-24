@@ -182,6 +182,7 @@ class Socket(QGraphicsEllipseItem):
         self.node = node
         self.name = name # e.g. "image_in"
         self.connected_edges = []
+        self.proxy_edges = []
         self.max_connections = max_connections
 
         # --- Determine whether this is a logic (control-flow) socket ---
@@ -255,6 +256,9 @@ class Socket(QGraphicsEllipseItem):
 
     def update_position(self):
         self.setPos(self.node.pos() + self.local_offset)
+        for proxy in list(self.proxy_edges):
+            if hasattr(proxy, "update_positions"):
+                proxy.update_positions()
     
     # ... (keep center_pos and can_accept_connection same as before) ...
     def center_pos(self):
@@ -372,7 +376,7 @@ class Connection(QGraphicsPathItem):
                 )
 
             if valid:
-                self.finalize(target)
+                self.scene_ref.finalize_connection(self, target)
             else:
                 self.scene_ref.removeItem(self)
             self.dragging = False
@@ -404,6 +408,70 @@ class Connection(QGraphicsPathItem):
             self.update_path(
                 self.start_socket.center_pos(), self.end_socket.center_pos()
             )
+
+
+class MacroProxyConnection(QGraphicsPathItem):
+    """
+    Visual-only edge used while a macro is collapsed.
+
+    The real executable edge stays connected to internal nodes; this item only
+    mirrors that relationship on the collapsed macro shell.
+    """
+
+    def __init__(self, start_socket, end_socket):
+        super().__init__()
+        self.start_socket = start_socket
+        self.end_socket = end_socket
+        self.is_logic = bool(getattr(start_socket, "is_logic", False))
+        self.data_type = getattr(start_socket, "data_type", "any")
+        self.setZValue(1)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(False)
+        self._apply_pen_state()
+
+        if hasattr(self.start_socket, "proxy_edges"):
+            self.start_socket.proxy_edges.append(self)
+        if hasattr(self.end_socket, "proxy_edges"):
+            self.end_socket.proxy_edges.append(self)
+        self.update_positions()
+
+    def _apply_pen_state(self):
+        if self.is_logic:
+            color = QColor("#F2F2F2")
+            width = 2
+        else:
+            color = _get_data_type_color(self.data_type).darker(120)
+            width = 2
+        self.setPen(QPen(color, width))
+
+    def update_positions(self):
+        if self.start_socket is None or self.end_socket is None:
+            return
+        start = self.start_socket.center_pos()
+        end = self.end_socket.center_pos()
+        path = QPainterPath()
+        path.moveTo(start)
+        dx = (end.x() - start.x()) * 0.5
+        c1 = QPointF(start.x() + dx, start.y())
+        c2 = QPointF(end.x() - dx, end.y())
+        path.cubicTo(c1, c2, end)
+        self.setPath(path)
+
+    def detach(self):
+        if (
+            self.start_socket is not None
+            and hasattr(self.start_socket, "proxy_edges")
+            and self in self.start_socket.proxy_edges
+        ):
+            self.start_socket.proxy_edges.remove(self)
+        if (
+            self.end_socket is not None
+            and hasattr(self.end_socket, "proxy_edges")
+            and self in self.end_socket.proxy_edges
+        ):
+            self.end_socket.proxy_edges.remove(self)
+        self.start_socket = None
+        self.end_socket = None
 
 
 # --- NODE -------------------------------------------------------
@@ -708,11 +776,254 @@ class Node(QGraphicsRectItem):
             y_offset += 20
 
 
+class MacroGroupItem(QGraphicsRectItem):
+    """
+    Collapsed visual wrapper for a set of nodes.
+
+    This is a UI-only item: the execution engine still runs the original nodes.
+    """
+
+    def __init__(self, x, y, group_id, title, node_count=0, on_open=None, scene=None):
+        super().__init__(0, 0, 170, 90)
+        self.group_id = group_id
+        self.title = title
+        self.node_count = int(node_count)
+        self.on_open = on_open
+        self.scene_ref = scene
+        self.input_bindings = []
+        self.output_bindings = []
+        self.logic_input_bindings = []
+        self.logic_output_bindings = []
+        self.inputs = []
+        self.outputs = []
+        self.logic_inputs = []
+        self.logic_outputs = []
+        self.setPos(x, y)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.setZValue(2)
+        self.setToolTip("Double-click to open macro")
+
+    def all_sockets(self):
+        return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
+
+    def set_macro_visible(self, visible):
+        self.setVisible(visible)
+        for socket in self.all_sockets():
+            socket.setVisible(visible)
+        self.update()
+
+    def clear_proxy_edges(self):
+        if self.scene_ref is None:
+            return
+        seen = set()
+        for socket in self.all_sockets():
+            for proxy in list(getattr(socket, "proxy_edges", [])):
+                if id(proxy) in seen:
+                    continue
+                seen.add(id(proxy))
+                if hasattr(proxy, "detach"):
+                    proxy.detach()
+                if proxy.scene() is self.scene_ref:
+                    self.scene_ref.removeItem(proxy)
+
+    def clear_sockets(self):
+        if self.scene_ref is None:
+            self.inputs = []
+            self.outputs = []
+            self.logic_inputs = []
+            self.logic_outputs = []
+            return
+        self.clear_proxy_edges()
+        for socket in self.all_sockets():
+            for edge in list(getattr(socket, "connected_edges", [])):
+                other = edge.end_socket if edge.start_socket is socket else edge.start_socket
+                if other is not None and edge in getattr(other, "connected_edges", []):
+                    other.connected_edges.remove(edge)
+                if edge.scene() is self.scene_ref:
+                    self.scene_ref.removeItem(edge)
+            if socket.scene() is self.scene_ref:
+                self.scene_ref.removeItem(socket)
+        self.inputs = []
+        self.outputs = []
+        self.logic_inputs = []
+        self.logic_outputs = []
+
+    def set_bindings(
+        self,
+        *,
+        input_bindings=None,
+        output_bindings=None,
+        logic_input_bindings=None,
+        logic_output_bindings=None,
+    ):
+        self.input_bindings = list(input_bindings or [])
+        self.output_bindings = list(output_bindings or [])
+        self.logic_input_bindings = list(logic_input_bindings or [])
+        self.logic_output_bindings = list(logic_output_bindings or [])
+        self._rebuild_sockets()
+
+    def _apply_binding_to_socket(self, socket, binding):
+        socket.macro_group_id = self.group_id
+        socket.is_macro_socket = True
+        socket.macro_binding = dict(binding)
+
+    def _rebuild_sockets(self):
+        self.clear_sockets()
+        if self.scene_ref is None:
+            return
+
+        total_inputs = max(len(self.input_bindings), 1)
+        total_outputs = max(len(self.output_bindings), 1)
+        total_logic_inputs = max(len(self.logic_input_bindings), 1)
+        total_logic_outputs = max(len(self.logic_output_bindings), 1)
+
+        for i, b in enumerate(self.input_bindings):
+            sock = Socket(
+                self,
+                "input",
+                b.get("socket_name", f"in_{i}"),
+                i,
+                total_inputs,
+                max_connections=b.get("max_connections", 1),
+                data_type=b.get("data_type", "any"),
+            )
+            self._apply_binding_to_socket(sock, b)
+            self.inputs.append(sock)
+            self.scene_ref.addItem(sock)
+
+        for i, b in enumerate(self.output_bindings):
+            sock = Socket(
+                self,
+                "output",
+                b.get("socket_name", f"out_{i}"),
+                i,
+                total_outputs,
+                max_connections=b.get("max_connections", None),
+                data_type=b.get("data_type", "any"),
+            )
+            self._apply_binding_to_socket(sock, b)
+            self.outputs.append(sock)
+            self.scene_ref.addItem(sock)
+
+        for i, b in enumerate(self.logic_input_bindings):
+            sock = Socket(
+                self,
+                "logic_in",
+                b.get("socket_name", "logic_in"),
+                i,
+                total_logic_inputs,
+                max_connections=b.get("max_connections", 1),
+            )
+            self._apply_binding_to_socket(sock, b)
+            self.logic_inputs.append(sock)
+            self.scene_ref.addItem(sock)
+
+        for i, b in enumerate(self.logic_output_bindings):
+            sock = Socket(
+                self,
+                "logic_out",
+                b.get("socket_name", f"logic_out_{i}"),
+                i,
+                total_logic_outputs,
+                max_connections=b.get("max_connections", 1),
+            )
+            self._apply_binding_to_socket(sock, b)
+            self.logic_outputs.append(sock)
+            self.scene_ref.addItem(sock)
+
+    def paint(self, painter, option, widget):
+        rect = self.rect()
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(rect.adjusted(4, 4, 4, 4), QColor(0, 0, 0, 60))
+
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0, QColor("#35513f"))
+        gradient.setColorAt(1, QColor("#26392d"))
+        painter.setBrush(QBrush(gradient))
+
+        if self.isSelected():
+            border_color = QColor("#ff9900")
+            border_width = 2
+        else:
+            border_color = QColor("#6ea785")
+            border_width = 2
+        painter.setPen(QPen(border_color, border_width))
+        painter.drawRoundedRect(rect, 12, 12)
+
+        title_rect = QRectF(rect.x(), rect.y(), rect.width(), 25)
+        title_grad = QLinearGradient(title_rect.topLeft(), title_rect.bottomRight())
+        title_grad.setColorAt(0, QColor("#4e7a63"))
+        title_grad.setColorAt(1, QColor("#395846"))
+        painter.setBrush(QBrush(title_grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(title_rect, 12, 12)
+        painter.drawRect(QRectF(rect.x(), rect.y() + 15, rect.width(), 10))
+
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(
+            QRectF(rect.x(), rect.y(), rect.width(), 25),
+            Qt.AlignmentFlag.AlignCenter,
+            self.title,
+        )
+
+        painter.setPen(QColor("#d7efe0"))
+        painter.drawText(
+            QRectF(8, 36, rect.width() - 16, 18),
+            Qt.AlignmentFlag.AlignLeft,
+            f"nodes: {self.node_count}",
+        )
+        painter.setPen(QColor("#b4d2c1"))
+        painter.drawText(
+            QRectF(8, 56, rect.width() - 16, 22),
+            Qt.AlignmentFlag.AlignLeft,
+            "double-click to open",
+        )
+
+    def mouseDoubleClickEvent(self, event):
+        if callable(self.on_open):
+            self.on_open(self.group_id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def itemChange(self, change, value):
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemSelectedChange,
+        ):
+            self.update()
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemPositionChange,
+        ):
+            for socket in self.all_sockets():
+                socket.update_position()
+                for edge in list(getattr(socket, "connected_edges", [])):
+                    edge.update_positions()
+                for proxy in list(getattr(socket, "proxy_edges", [])):
+                    if hasattr(proxy, "update_positions"):
+                        proxy.update_positions()
+        return super().itemChange(change, value)
+
+
 # --- SCENE ------------------------------------------------------
 class FlowScene(QGraphicsScene):
     def __init__(self):
         super().__init__()
         self.current_connection = None
+        self.editor_ref = None
+
+    def finalize_connection(self, connection, target_socket):
+        editor = getattr(self, "editor_ref", None)
+        if editor is not None and hasattr(editor, "finalize_connection_with_macros"):
+            handled = editor.finalize_connection_with_macros(connection, target_socket)
+            if handled:
+                return True
+        connection.finalize(target_socket)
+        return True
 
     def find_nearby_socket(self, pos, radius=15, prefer_logic=None):
         """
@@ -838,7 +1149,7 @@ class FlowScene(QGraphicsScene):
                 )
 
             if valid:
-                self.current_connection.finalize(target)
+                self.finalize_connection(self.current_connection, target)
             else:
                 self.removeItem(self.current_connection)
             self.current_connection = None
@@ -865,6 +1176,7 @@ class FlowView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.scale_factor = 1.0
         self.delete_callback = None
+        self.resize_callback = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def mousePressEvent(self, event):
@@ -884,6 +1196,11 @@ class FlowView(QGraphicsView):
         zoom_out = 0.9
         factor = zoom_in if event.angleDelta().y() > 0 else zoom_out
         self.scale(factor, factor)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if callable(self.resize_callback):
+            self.resize_callback()
 
     def reset_view(self):
         items = self.scene().items()
@@ -923,6 +1240,8 @@ class FlowEditor(QWidget):
 
         self.viewer = viewer
         self._pending_interaction = None
+        self.macro_groups = {}  # group_id -> {"title","member_uids","collapsed","item"}
+        self._active_macro_id = None
         
         # 1. Main Layout
         self.layout = QVBoxLayout()
@@ -932,11 +1251,16 @@ class FlowEditor(QWidget):
         toolbar = QHBoxLayout()
         
         self.btn_add = QPushButton("Add Node")
-        self.btn_add.clicked.connect(self.open_add_menu)
         toolbar.addWidget(self.btn_add)
+        self.menu_add_node = QMenu(self)
+        self.menu_add_node.aboutToShow.connect(
+            lambda: self._populate_add_menu(
+                self.menu_add_node, include_control=False, control_only=False
+            )
+        )
+        self.btn_add.setMenu(self.menu_add_node)
 
         self.btn_add_control = QPushButton("Add Control")
-        self.btn_add_control.clicked.connect(self.open_control_menu)
         self.btn_add_control.setStyleSheet("""
             QPushButton {
                 background-color: #4f6780;
@@ -945,32 +1269,62 @@ class FlowEditor(QWidget):
             }
             QPushButton:hover { background-color: #5d7a99; }
             QPushButton:pressed { background-color: #405469; }
+            QPushButton::menu-indicator {
+                subcontrol-origin: padding;
+                subcontrol-position: bottom right;
+                right: 5px;
+                bottom: 3px;
+            }
         """)
         toolbar.addWidget(self.btn_add_control)
+        self.menu_add_control = QMenu(self)
+        self.menu_add_control.aboutToShow.connect(
+            lambda: self._populate_add_menu(
+                self.menu_add_control, include_control=True, control_only=True
+            )
+        )
+        self.btn_add_control.setMenu(self.menu_add_control)
 
         self.btn_remove = QPushButton("Remove Node")
-        self.btn_remove.clicked.connect(self.open_remove_menu)
         toolbar.addWidget(self.btn_remove)
+        self.menu_remove_node = QMenu(self)
+        self.menu_remove_node.aboutToShow.connect(
+            lambda: self._populate_remove_menu(self.menu_remove_node)
+        )
+        self.btn_remove.setMenu(self.menu_remove_node)
 
-        self.btn_save = QPushButton("Save Pipeline")
-        self.btn_save.clicked.connect(self.save_pipeline)
-        toolbar.addWidget(self.btn_save)
+        # File dropdown (common app pattern)
+        self.btn_file_menu = QPushButton("File")
+        self.file_menu = QMenu(self)
+        self.action_save_pipeline = self.file_menu.addAction("Save Pipeline")
+        self.action_load_pipeline = self.file_menu.addAction("Load Pipeline")
+        self.file_menu.addSeparator()
+        self.action_save_zarr = self.file_menu.addAction("Save to Zarr")
+        self.file_menu.addSeparator()
+        self.action_import_nodes = self.file_menu.addAction("Import Nodes (.py)")
+        self.action_export_script = self.file_menu.addAction("Export Script")
 
-        self.btn_save_zarr = QPushButton("Save to Zarr")
-        self.btn_save_zarr.clicked.connect(self.save_to_zarr)
-        toolbar.addWidget(self.btn_save_zarr)
+        self.action_save_pipeline.triggered.connect(self.save_pipeline)
+        self.action_load_pipeline.triggered.connect(self.load_pipeline)
+        self.action_save_zarr.triggered.connect(self.save_to_zarr)
+        self.action_import_nodes.triggered.connect(self.import_custom_module)
+        self.action_export_script.triggered.connect(self.export_to_python)
 
-        self.btn_load = QPushButton("Load Pipeline")
-        self.btn_load.clicked.connect(self.load_pipeline)
-        toolbar.addWidget(self.btn_load)
+        self.btn_file_menu.setMenu(self.file_menu)
+        toolbar.addWidget(self.btn_file_menu)
 
-        self.btn_import = QPushButton("Import Nodes (.py)")
-        self.btn_import.clicked.connect(self.import_custom_module)
-        toolbar.addWidget(self.btn_import)  
+        # Keep old attributes as aliases to preserve internal references.
+        self.btn_save = self.action_save_pipeline
+        self.btn_load = self.action_load_pipeline
+        self.btn_save_zarr = self.action_save_zarr
+        self.btn_import = self.action_import_nodes
+        self.btn_export = self.action_export_script
 
-        self.btn_export = QPushButton("Export Script")
-        self.btn_export.clicked.connect(self.export_to_python)
-        toolbar.addWidget(self.btn_export)      
+        self.btn_collapse_macro = QPushButton("Collapse Macro")
+        self.btn_collapse_macro.clicked.connect(self.collapse_selected_to_macro)
+        toolbar.addWidget(self.btn_collapse_macro)
+        self.btn_expand_macro = None
+        self.btn_back_macro = None
 
         self.layout.addLayout(toolbar)
 
@@ -1078,9 +1432,29 @@ class FlowEditor(QWidget):
         
         # 1. Graph View
         self.scene = FlowScene()
+        self.scene.editor_ref = self
         self.view = FlowView(self.scene)
         self.view.delete_callback = self.delete_selected_nodes
+        self.view.resize_callback = self._position_floating_buttons
         self.inner_splitter.addWidget(self.view)
+
+        # Floating in-graph button shown only while viewing inside a macro.
+        self.btn_back_macro_floating = QPushButton("Back to Main", self.view.viewport())
+        self.btn_back_macro_floating.clicked.connect(self.exit_macro_view)
+        self.btn_back_macro_floating.setVisible(False)
+        self.btn_back_macro_floating.setStyleSheet(
+            "QPushButton {"
+            " background-color: #4f6780;"
+            " color: white;"
+            " font-weight: bold;"
+            " border: 1px solid #405469;"
+            " border-radius: 5px;"
+            " padding: 6px 10px;"
+            "}"
+            "QPushButton:hover { background-color: #5d7a99; }"
+            "QPushButton:pressed { background-color: #405469; }"
+        )
+        self.btn_back_macro_floating.raise_()
         
         # 2. Plot Dashboard (Hidden by default)
         self.plot_dashboard = PlotDashboard()
@@ -1117,6 +1491,29 @@ class FlowEditor(QWidget):
         self.btn_interaction_run.clicked.connect(self._on_inline_interaction_run)
         self.btn_run.clicked.connect(self.run_pipeline)
         self.scene.selectionChanged.connect(self.on_selection)
+        self._position_floating_buttons()
+
+    def _position_floating_buttons(self):
+        btn = getattr(self, "btn_back_macro_floating", None)
+        view = getattr(self, "view", None)
+        if btn is None or view is None:
+            return
+        viewport = view.viewport()
+        hint = btn.sizeHint()
+        btn.resize(hint)
+        margin = 12
+        x = max(margin, viewport.width() - btn.width() - margin)
+        y = margin
+        btn.move(x, y)
+
+    def _set_back_macro_button_visible(self, visible):
+        btn = getattr(self, "btn_back_macro_floating", None)
+        if btn is None:
+            return
+        btn.setVisible(bool(visible))
+        if visible:
+            self._position_floating_buttons()
+            btn.raise_()
 
     # HELPER TO GET UNIQUE NODE TITLE
     def get_unique_title(self, base_title):
@@ -1135,6 +1532,565 @@ class FlowEditor(QWidget):
             if new_title not in existing_titles:
                 return new_title
             counter += 1
+
+    def _next_macro_title(self):
+        existing = {g.get("title", "") for g in self.macro_groups.values()}
+        base = "Macro"
+        if base not in existing:
+            return base
+        i = 1
+        while True:
+            name = f"{base} {i}"
+            if name not in existing:
+                return name
+            i += 1
+
+    def _get_all_connections(self):
+        return [item for item in self.scene.items() if isinstance(item, Connection)]
+
+    def _socket_ref_key_from_socket(self, socket):
+        node = getattr(socket, "node", None)
+        node_uid = getattr(node, "uid", None)
+        if node_uid is None:
+            return None
+        return (
+            str(node_uid),
+            str(getattr(socket, "name", "")),
+            str(getattr(socket, "socket_type", "")),
+        )
+
+    def _socket_ref_key_from_binding(self, binding):
+        if not isinstance(binding, dict):
+            return None
+        node_uid = binding.get("node_uid")
+        if not node_uid:
+            return None
+        return (
+            str(node_uid),
+            str(binding.get("socket_name", "")),
+            str(binding.get("socket_type", "")),
+        )
+
+    def _socket_binding_from_socket(self, socket):
+        if socket is None:
+            return None
+        node_uid = getattr(getattr(socket, "node", None), "uid", None)
+        if not node_uid:
+            return None
+        binding = {
+            "node_uid": str(node_uid),
+            "socket_name": str(getattr(socket, "name", "")),
+            "socket_type": str(getattr(socket, "socket_type", "")),
+            "max_connections": getattr(socket, "max_connections", None),
+        }
+        if not getattr(socket, "is_logic", False):
+            binding["data_type"] = _normalize_data_type(
+                getattr(socket, "data_type", "any")
+            )
+        return binding
+
+    def _resolve_socket_binding(self, binding):
+        if not isinstance(binding, dict):
+            return None
+        node = self._get_node_by_uid(binding.get("node_uid"))
+        if node is None:
+            return None
+        socket_name = binding.get("socket_name")
+        socket_type = binding.get("socket_type")
+        pool = []
+        if socket_type == "input":
+            pool = getattr(node, "inputs", [])
+        elif socket_type == "output":
+            pool = getattr(node, "outputs", [])
+        elif socket_type == "logic_in":
+            pool = getattr(node, "logic_inputs", [])
+        elif socket_type == "logic_out":
+            pool = getattr(node, "logic_outputs", [])
+        for socket in pool:
+            if socket.name == socket_name:
+                return socket
+        return None
+
+    def _derive_macro_flow_endpoints(self, member_nodes):
+        if not member_nodes:
+            return None, None
+        if len(member_nodes) == 1:
+            return member_nodes[0], member_nodes[0]
+
+        member_uids = {n.uid for n in member_nodes}
+        incoming = {n.uid: 0 for n in member_nodes}
+        outgoing = {n.uid: 0 for n in member_nodes}
+        external_entries = set()  # outside -> inside (exec boundary in)
+        external_exits = set()    # inside -> outside (exec boundary out)
+
+        for edge in self._get_all_connections():
+            if edge.start_socket is None or edge.end_socket is None:
+                continue
+            if not getattr(edge, "is_logic", False):
+                continue
+            src = getattr(edge.start_socket, "node", None)
+            dst = getattr(edge.end_socket, "node", None)
+            if not isinstance(src, Node) or not isinstance(dst, Node):
+                continue
+            src_in = src.uid in member_uids
+            dst_in = dst.uid in member_uids
+            if src_in and dst_in:
+                outgoing[src.uid] += 1
+                incoming[dst.uid] += 1
+            elif (not src_in) and dst_in:
+                external_entries.add(dst.uid)
+            elif src_in and (not dst_in):
+                external_exits.add(src.uid)
+
+        def sort_key(n):
+            p = n.pos()
+            return (p.x(), p.y())
+
+        # Prefer true exec-boundary nodes when macro is wired into the
+        # external white flow thread.
+        if external_entries:
+            first_candidates = [
+                n for n in member_nodes if n.uid in external_entries
+            ]
+        else:
+            first_candidates = [n for n in member_nodes if incoming[n.uid] == 0]
+
+        if external_exits:
+            last_candidates = [
+                n for n in member_nodes if n.uid in external_exits
+            ]
+        else:
+            last_candidates = [n for n in member_nodes if outgoing[n.uid] == 0]
+
+        first = min(first_candidates or member_nodes, key=sort_key)
+        last = max(
+            last_candidates or member_nodes,
+            key=lambda n: (n.pos().x(), n.pos().y()),
+        )
+        return first, last
+
+    def _sync_macro_group_bindings(self, group_id):
+        group = self.macro_groups.get(group_id)
+        if not group:
+            return
+        item = group.get("item")
+        if item is None:
+            return
+
+        members = [
+            self._get_node_by_uid(uid)
+            for uid in group.get("member_uids", set())
+        ]
+        members = [n for n in members if isinstance(n, Node)]
+        if not members:
+            item.set_bindings()
+            return
+
+        first, last = self._derive_macro_flow_endpoints(members)
+        if first is None or last is None:
+            item.set_bindings()
+            return
+
+        input_bindings = [
+            self._socket_binding_from_socket(s) for s in getattr(first, "inputs", [])
+        ]
+        output_bindings = [
+            self._socket_binding_from_socket(s) for s in getattr(last, "outputs", [])
+        ]
+        logic_input_bindings = [
+            self._socket_binding_from_socket(s)
+            for s in getattr(first, "logic_inputs", [])
+        ]
+        logic_output_bindings = [
+            self._socket_binding_from_socket(s)
+            for s in getattr(last, "logic_outputs", [])
+        ]
+
+        input_bindings = [b for b in input_bindings if b]
+        output_bindings = [b for b in output_bindings if b]
+        logic_input_bindings = [b for b in logic_input_bindings if b]
+        logic_output_bindings = [b for b in logic_output_bindings if b]
+
+        group["input_bindings"] = input_bindings
+        group["output_bindings"] = output_bindings
+        group["logic_input_bindings"] = logic_input_bindings
+        group["logic_output_bindings"] = logic_output_bindings
+
+        item.set_bindings(
+            input_bindings=input_bindings,
+            output_bindings=output_bindings,
+            logic_input_bindings=logic_input_bindings,
+            logic_output_bindings=logic_output_bindings,
+        )
+
+    def _set_macro_visible(self, macro_item, visible):
+        if macro_item is None:
+            return
+        if hasattr(macro_item, "set_macro_visible"):
+            macro_item.set_macro_visible(visible)
+        else:
+            macro_item.setVisible(visible)
+
+    def _clear_macro_proxy_edges(self):
+        for group in self.macro_groups.values():
+            item = group.get("item")
+            if item is not None and hasattr(item, "clear_proxy_edges"):
+                item.clear_proxy_edges()
+
+    def _macro_socket_for_internal_endpoint(self, socket, want_start):
+        if socket is None:
+            return None
+        if socket.isVisible():
+            return socket
+
+        node = getattr(socket, "node", None)
+        if not isinstance(node, Node):
+            return None
+
+        group_id = self._group_for_node_uid(node.uid)
+        if not group_id:
+            return None
+        group = self.macro_groups.get(group_id)
+        if not group or not group.get("collapsed", True):
+            return None
+        item = group.get("item")
+        if item is None or not item.isVisible():
+            return None
+
+        key = self._socket_ref_key_from_socket(socket)
+        if key is None:
+            return None
+
+        if want_start:
+            candidates = item.outputs + item.logic_outputs
+        else:
+            candidates = item.inputs + item.logic_inputs
+        for macro_socket in candidates:
+            m_key = self._socket_ref_key_from_binding(
+                getattr(macro_socket, "macro_binding", None)
+            )
+            if m_key == key:
+                return macro_socket
+        return None
+
+    def _rebuild_macro_proxy_edges(self):
+        self._clear_macro_proxy_edges()
+        if self._active_macro_id:
+            return
+
+        for edge in self._get_all_connections():
+            if edge.start_socket is None or edge.end_socket is None:
+                continue
+            if getattr(edge, "dragging", False):
+                continue
+            s_node = getattr(edge.start_socket, "node", None)
+            e_node = getattr(edge.end_socket, "node", None)
+            if isinstance(s_node, Node) and isinstance(e_node, Node):
+                s_group = self._group_for_node_uid(s_node.uid)
+                e_group = self._group_for_node_uid(e_node.uid)
+                if s_group and s_group == e_group:
+                    continue
+
+            start_proxy = self._macro_socket_for_internal_endpoint(
+                edge.start_socket, want_start=True
+            )
+            end_proxy = self._macro_socket_for_internal_endpoint(
+                edge.end_socket, want_start=False
+            )
+
+            if start_proxy is None or end_proxy is None:
+                continue
+            if start_proxy is edge.start_socket and end_proxy is edge.end_socket:
+                continue
+
+            proxy = MacroProxyConnection(start_proxy, end_proxy)
+            self.scene.addItem(proxy)
+
+    def _resolve_macro_socket_to_internal(self, socket):
+        if socket is None:
+            return None
+        if not isinstance(getattr(socket, "node", None), MacroGroupItem):
+            return socket
+        binding = getattr(socket, "macro_binding", None)
+        return self._resolve_socket_binding(binding)
+
+    def finalize_connection_with_macros(self, temp_connection, target_socket):
+        """
+        Scene hook: if a drag starts/ends on macro sockets, translate it to the
+        corresponding internal real sockets so execution remains unchanged.
+        """
+        start_socket = getattr(temp_connection, "start_socket", None)
+        start_is_macro = isinstance(getattr(start_socket, "node", None), MacroGroupItem)
+        target_is_macro = isinstance(getattr(target_socket, "node", None), MacroGroupItem)
+        if not start_is_macro and not target_is_macro:
+            return False
+
+        real_start = self._resolve_macro_socket_to_internal(start_socket)
+        real_target = self._resolve_macro_socket_to_internal(target_socket)
+
+        if real_start is None or real_target is None:
+            if temp_connection.scene() is self.scene:
+                self.scene.removeItem(temp_connection)
+            return True
+
+        is_logic = bool(getattr(real_start, "is_logic", False))
+        if is_logic != bool(getattr(real_target, "is_logic", False)):
+            if temp_connection.scene() is self.scene:
+                self.scene.removeItem(temp_connection)
+            return True
+
+        if is_logic:
+            valid = (
+                real_target.socket_type == "logic_in"
+                and real_target.can_accept_connection()
+                and not self.scene.are_already_connected(real_start, real_target)
+                and not self.scene.creates_logic_cycle(real_start.node, real_target.node)
+            )
+        else:
+            valid = (
+                real_target.socket_type == "input"
+                and real_target.can_accept_connection()
+                and not self.scene.are_already_connected(real_start, real_target)
+                and not self.scene.creates_cycle(real_start.node, real_target.node)
+                and self.scene.is_data_connection_compatible(real_start, real_target)
+            )
+
+        if temp_connection.scene() is self.scene:
+            self.scene.removeItem(temp_connection)
+        if not valid:
+            return True
+
+        real_conn = Connection(real_start, self.scene)
+        real_conn.finalize(real_target)
+        self.scene.addItem(real_conn)
+        self._refresh_macro_visibility()
+        return True
+
+    def _set_node_visible(self, node, visible):
+        node.setVisible(visible)
+        for socket in node.all_sockets():
+            socket.setVisible(visible)
+
+    def _get_node_by_uid(self, uid):
+        for n in self._get_all_nodes():
+            if n.uid == uid:
+                return n
+        return None
+
+    def _group_for_node_uid(self, uid):
+        for group_id, group in self.macro_groups.items():
+            if uid in group.get("member_uids", set()):
+                return group_id
+        return None
+
+    def _refresh_macro_visibility(self):
+        nodes = self._get_all_nodes()
+
+        # Keep macro card counters in sync.
+        for group_id, group in self.macro_groups.items():
+            members = group.get("member_uids", set())
+            existing_members = [uid for uid in members if self._get_node_by_uid(uid)]
+            group["member_uids"] = set(existing_members)
+            item = group.get("item")
+            if item:
+                item.node_count = len(existing_members)
+                self._sync_macro_group_bindings(group_id)
+                item.update()
+
+        if self._active_macro_id and self._active_macro_id in self.macro_groups:
+            active_members = self.macro_groups[self._active_macro_id].get("member_uids", set())
+            for node in nodes:
+                self._set_node_visible(node, node.uid in active_members)
+            for group_id, group in self.macro_groups.items():
+                item = group.get("item")
+                if item is not None:
+                    self._set_macro_visible(item, False)
+        else:
+            self._active_macro_id = None
+            self._set_back_macro_button_visible(False)
+            collapsed_members = set()
+            for group in self.macro_groups.values():
+                if group.get("collapsed", True):
+                    collapsed_members.update(group.get("member_uids", set()))
+
+            for node in nodes:
+                self._set_node_visible(node, node.uid not in collapsed_members)
+
+            for group in self.macro_groups.values():
+                item = group.get("item")
+                if item is not None:
+                    self._set_macro_visible(item, bool(group.get("collapsed", True)))
+
+        for edge in self._get_all_connections():
+            if getattr(edge, "dragging", False):
+                edge.setVisible(True)
+                continue
+            if edge.start_socket is None:
+                edge.setVisible(False)
+                continue
+            if edge.end_socket is None:
+                edge.setVisible(edge.start_socket.isVisible())
+                continue
+            edge.setVisible(edge.start_socket.isVisible() and edge.end_socket.isVisible())
+
+        self._rebuild_macro_proxy_edges()
+        self.scene.update()
+        self.view.viewport().update()
+
+    def _clear_macro_groups(self):
+        for group in list(self.macro_groups.values()):
+            item = group.get("item")
+            if item is not None and hasattr(item, "clear_sockets"):
+                item.clear_sockets()
+            if item is not None and item.scene() is self.scene:
+                self.scene.removeItem(item)
+        self.macro_groups = {}
+        self._active_macro_id = None
+        self._set_back_macro_button_visible(False)
+
+    def collapse_selected_to_macro(self):
+        if self._active_macro_id:
+            QMessageBox.information(
+                self,
+                "Collapse Not Available",
+                "Exit the current macro before collapsing a new selection.",
+            )
+            return
+
+        selected_nodes = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, Node)
+        ]
+        if len(selected_nodes) < 2:
+            QMessageBox.information(
+                self,
+                "Select Nodes",
+                "Select at least 2 nodes to collapse into a macro.",
+            )
+            return
+
+        for node in selected_nodes:
+            if node.node_type == "begin":
+                QMessageBox.warning(
+                    self,
+                    "Cannot Collapse",
+                    "Begin node cannot be collapsed into a macro.",
+                )
+                return
+            if self._group_for_node_uid(node.uid):
+                QMessageBox.warning(
+                    self,
+                    "Cannot Collapse",
+                    f"Node '{node.title}' is already in a macro group.",
+                )
+                return
+
+        # Use selection bounds to place the collapsed macro card.
+        bounds = selected_nodes[0].sceneBoundingRect()
+        for node in selected_nodes[1:]:
+            bounds = bounds.united(node.sceneBoundingRect())
+        macro_pos = bounds.center() - QPointF(85, 45)
+
+        group_id = str(uuid.uuid4())
+        group_title = self._next_macro_title()
+        macro_item = MacroGroupItem(
+            macro_pos.x(),
+            macro_pos.y(),
+            group_id=group_id,
+            title=group_title,
+            node_count=len(selected_nodes),
+            on_open=self.enter_macro,
+            scene=self.scene,
+        )
+        self.scene.addItem(macro_item)
+
+        self.macro_groups[group_id] = {
+            "id": group_id,
+            "title": group_title,
+            "member_uids": {n.uid for n in selected_nodes},
+            "collapsed": True,
+            "item": macro_item,
+        }
+
+        for item in self.scene.selectedItems():
+            item.setSelected(False)
+        macro_item.setSelected(True)
+
+        self._refresh_macro_visibility()
+        self.on_selection()
+        self.append_log(f"📦 Collapsed {len(selected_nodes)} nodes into '{group_title}'.")
+
+    def enter_macro(self, group_id):
+        group = self.macro_groups.get(group_id)
+        if not group:
+            return
+        self._active_macro_id = group_id
+        self._set_back_macro_button_visible(True)
+        self._refresh_macro_visibility()
+        self.append_log(f"🔍 Entered macro: {group.get('title', 'Macro')}")
+
+    def exit_macro_view(self):
+        if not self._active_macro_id:
+            return
+        self._active_macro_id = None
+        self._set_back_macro_button_visible(False)
+        self._refresh_macro_visibility()
+        self.append_log("↩️ Returned to main graph.")
+
+    def _expand_macro_group(self, group_id):
+        group = self.macro_groups.get(group_id)
+        if not group:
+            return
+        if self._active_macro_id == group_id:
+            self._active_macro_id = None
+            self._set_back_macro_button_visible(False)
+
+        item = group.get("item")
+        if item is not None and hasattr(item, "clear_sockets"):
+            item.clear_sockets()
+        if item is not None and item.scene() is self.scene:
+            self.scene.removeItem(item)
+        self.macro_groups.pop(group_id, None)
+        self._refresh_macro_visibility()
+        self.on_selection()
+
+    def expand_selected_macro(self):
+        selected_macros = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, MacroGroupItem)
+        ]
+        if not selected_macros:
+            QMessageBox.information(
+                self,
+                "Select Macro",
+                "Select a macro card to expand.",
+            )
+            return
+        # V1: one-at-a-time
+        macro_item = selected_macros[0]
+        group = self.macro_groups.get(macro_item.group_id)
+        if not group:
+            return
+        title = group.get("title", "Macro")
+        self._expand_macro_group(macro_item.group_id)
+        self.append_log(f"📂 Expanded macro: {title}")
+
+    def _rename_macro_group(self, group_id, new_title):
+        group = self.macro_groups.get(group_id)
+        if not group:
+            return
+        title = str(new_title or "").strip()
+        if not title:
+            return
+        if title == group.get("title", ""):
+            return
+        group["title"] = title
+        item = group.get("item")
+        if item is not None:
+            item.title = title
+            item.update()
+        self.append_log(f"✏️ Renamed macro to '{title}'.")
+        self.on_selection()
     
     # --- Node Selection Handler ---
     def on_selection(self):
@@ -1148,6 +2104,47 @@ class FlowEditor(QWidget):
 
         # 2. Get selected node
         sel = self.scene.selectedItems()
+        if len(sel) == 1 and isinstance(sel[0], MacroGroupItem):
+            macro_item = sel[0]
+            group = self.macro_groups.get(macro_item.group_id, {})
+            title = group.get("title", macro_item.title)
+            member_count = len(group.get("member_uids", set()))
+            self.props_layout.addRow(QLabel(f"<b>{title}</b>"))
+
+            name_edit = QLineEdit(str(title))
+            name_edit.setPlaceholderText("Macro name")
+            name_edit.editingFinished.connect(
+                lambda gid=macro_item.group_id, w=name_edit: self._rename_macro_group(
+                    gid, w.text()
+                )
+            )
+            self.props_layout.addRow("Name:", name_edit)
+
+            self.props_layout.addRow(QLabel(f"Contains {member_count} node(s)."))
+            self.props_layout.addRow(QLabel("<u>Nodes Inside</u>"))
+
+            member_nodes = []
+            for uid in group.get("member_uids", set()):
+                node = self._get_node_by_uid(uid)
+                if node is not None:
+                    member_nodes.append(node)
+            member_nodes.sort(key=lambda n: (n.pos().x(), n.pos().y(), n.title))
+
+            members_list = QListWidget()
+            members_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            members_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            members_list.setMaximumHeight(170)
+            if not member_nodes:
+                members_list.addItem("(empty)")
+            else:
+                for idx, node in enumerate(member_nodes, start=1):
+                    members_list.addItem(QListWidgetItem(f"{idx}. {node.title}"))
+            self.props_layout.addRow(members_list)
+
+            self.props_layout.addRow(QLabel("Double-click to open internal view."))
+            self.props_layout.addRow(QLabel("Select macro + Delete to ungroup."))
+            return
+
         if len(sel) != 1 or not isinstance(sel[0], Node):
             self.props_layout.addRow(QLabel("Select a single node to edit parameters."))
             return
@@ -1566,7 +2563,8 @@ class FlowEditor(QWidget):
         # 1. Build the Pipeline Dictionary (Same as before)
         pipeline = {
             "schema_version": "0.1",
-            "nodes": []
+            "nodes": [],
+            "macro_groups": [],
         }
 
         for item in self.scene.items():
@@ -1602,6 +2600,20 @@ class FlowEditor(QWidget):
                 }
                 pipeline["nodes"].append(node_data)
 
+        for group_id, group in self.macro_groups.items():
+            item = group.get("item")
+            if item is None:
+                continue
+            pipeline["macro_groups"].append(
+                {
+                    "id": group_id,
+                    "label": group.get("title", "Macro"),
+                    "position": {"x": item.pos().x(), "y": item.pos().y()},
+                    "members": sorted(list(group.get("member_uids", set()))),
+                    "collapsed": bool(group.get("collapsed", True)),
+                }
+            )
+
         # 2. Open File Browser to Save
         # Arguments: Parent, Title, Default Name, File Filter
         filename, _ = QFileDialog.getSaveFileName(
@@ -1630,6 +2642,7 @@ class FlowEditor(QWidget):
         filename, _ = QFileDialog.getOpenFileName(self, "Open Pipeline", "", "JSON Files (*.json)")
         if not filename: return
 
+        self._clear_macro_groups()
         self.scene.clear()
         with open(filename, "r") as f:
             pipeline = json.load(f)
@@ -1695,20 +2708,56 @@ class FlowEditor(QWidget):
                         conn.finalize(tgt_socket)
                         self.scene.addItem(conn)
 
+        # Pass 3: Restore macro groups (if present)
+        for g_data in pipeline.get("macro_groups", []):
+            group_id = g_data.get("id", str(uuid.uuid4()))
+            title = g_data.get("label", self._next_macro_title())
+            pos = g_data.get("position", {"x": 0, "y": 0})
+            members = {
+                uid for uid in g_data.get("members", [])
+                if uid in node_map
+            }
+            if not members:
+                continue
+            item = MacroGroupItem(
+                pos.get("x", 0),
+                pos.get("y", 0),
+                group_id=group_id,
+                title=title,
+                node_count=len(members),
+                on_open=self.enter_macro,
+                scene=self.scene,
+            )
+            self.scene.addItem(item)
+            self.macro_groups[group_id] = {
+                "id": group_id,
+                "title": title,
+                "member_uids": set(members),
+                "collapsed": bool(g_data.get("collapsed", True)),
+                "item": item,
+            }
+
+        self._active_macro_id = None
+        self._set_back_macro_button_visible(False)
+        self._refresh_macro_visibility()
+
 
     # --- Add Node Method ---
     # 1. The UI Logic (Dropdown)
     def open_add_menu(self):
         """Shows a categorized dropdown menu to add data-processing nodes."""
-        self._open_add_menu(include_control=False)
+        menu = QMenu(self)
+        self._populate_add_menu(menu, include_control=False, control_only=False)
+        menu.exec_(QCursor.pos())
 
     def open_control_menu(self):
         """Shows a dropdown menu with only control-flow nodes."""
-        self._open_add_menu(include_control=True, control_only=True)
-
-    def _open_add_menu(self, include_control=True, control_only=False):
         menu = QMenu(self)
-        
+        self._populate_add_menu(menu, include_control=True, control_only=True)
+        menu.exec_(QCursor.pos())
+
+    def _populate_add_menu(self, menu, include_control=True, control_only=False):
+        menu.clear()
         # Dictionary to hold reference to created submenus
         # Structure: {"Filters": QMenu_Object, "Segmentation": QMenu_Object}
         submenus = {}
@@ -1741,9 +2790,6 @@ class FlowEditor(QWidget):
             action = menu.addAction("No nodes available")
             action.setEnabled(False)
 
-        # Show the menu at the mouse cursor position
-        menu.exec_(QCursor.pos())
-
     # 2. The Creation Logic (Scene Manipulation)
     def add_node(self, node_type, pos=None, loaded_params=None, loaded_uid=None, loaded_title=None):
         if not pos:
@@ -1765,20 +2811,28 @@ class FlowEditor(QWidget):
             
         self.scene.addItem(node)
         self._refresh_dynamic_output_types(node)
+        if self._active_macro_id and self._active_macro_id in self.macro_groups:
+            self.macro_groups[self._active_macro_id]["member_uids"].add(node.uid)
+            self._refresh_macro_visibility()
         return node
     
     # --- Remove Node Method ---
     def open_remove_menu(self):
         """Shows a QMenu list of existing nodes to remove."""
+        menu = QMenu(self)
+        self._populate_remove_menu(menu)
+        menu.exec_(QCursor.pos())
+
+    def _populate_remove_menu(self, menu):
+        menu.clear()
         # 1. Find all nodes currently in the scene
         nodes = [item for item in self.scene.items() if isinstance(item, Node)]
         
         if not nodes:
-            # Optional: Show a disabled menu item saying "Empty"
+            action = menu.addAction("No nodes to remove")
+            action.setEnabled(False)
             return
 
-        menu = QMenu(self)
-        
         # 2. Sort them alphabetically by title so the list is readable
         nodes.sort(key=lambda n: n.title)
 
@@ -1792,9 +2846,6 @@ class FlowEditor(QWidget):
             # 3. Connect the action. 
             # We pass the specific 'node' object to the lambda.
             action.triggered.connect(lambda checked=False, n=node: self.delete_node(n))
-
-        # 4. Show menu at cursor position
-        menu.exec_(QCursor.pos())
 
     def delete_node(self, node):
         """Helper function to safely remove a specific node, its edges, AND its sockets."""
@@ -1815,13 +2866,29 @@ class FlowEditor(QWidget):
         # 3. Finally, remove the node body
         self.scene.removeItem(node)
 
+        # Remove node from any macro group membership.
+        empty_groups = []
+        for group_id, group in self.macro_groups.items():
+            members = group.get("member_uids", set())
+            if node.uid in members:
+                members.discard(node.uid)
+            if not members:
+                empty_groups.append(group_id)
+        for group_id in empty_groups:
+            self._expand_macro_group(group_id)
+        self._refresh_macro_visibility()
+
     def delete_selected_nodes(self):
         """Delete currently selected nodes (used by Delete/Backspace shortcut)."""
-        selected_nodes = [item for item in self.scene.selectedItems() if isinstance(item, Node)]
-        if not selected_nodes:
+        selected = list(self.scene.selectedItems())
+        selected_nodes = [item for item in selected if isinstance(item, Node)]
+        selected_macros = [item for item in selected if isinstance(item, MacroGroupItem)]
+        if not selected_nodes and not selected_macros:
             return
         for node in list(selected_nodes):
             self.delete_node(node)
+        for macro_item in list(selected_macros):
+            self._expand_macro_group(macro_item.group_id)
         self.on_selection()
 
     def _get_all_nodes(self):
@@ -1894,7 +2961,11 @@ class FlowEditor(QWidget):
         reachable_nodes = [n for n in nodes if n.uid in reachable]
 
         if len(reachable) == 1:
-            warnings.append("Begin node is not connected to any exec thread.")
+            errors.append(
+                "Begin node is not connected to any exec thread. "
+                "Connect Begin exec_out to the first processing node."
+            )
+            return errors, warnings
 
         exec_capable = [n for n in nodes if n.logic_inputs or n.logic_outputs]
         if self._has_exec_cycle(exec_capable):
@@ -2410,6 +3481,13 @@ class FlowEditor(QWidget):
         self.btn_load.setEnabled(enabled)
         self.btn_save.setEnabled(enabled)
         self.btn_import.setEnabled(enabled)
+        self.btn_collapse_macro.setEnabled(enabled)
+        if self.btn_expand_macro is not None:
+            self.btn_expand_macro.setEnabled(enabled)
+        if self.btn_back_macro is not None:
+            self.btn_back_macro.setEnabled(enabled)
+        if hasattr(self, "btn_back_macro_floating"):
+            self.btn_back_macro_floating.setEnabled(enabled)
         if enabled:
             self.btn_stop_loop.setVisible(False)
             self.btn_stop_loop.setEnabled(False)

@@ -641,20 +641,39 @@ class ExecutionWorker(QObject):
 
         # Determine if this node is a passthrough/input node that should NOT rename
         node_category = def_data.get("category", "").lower()
-        is_input_node = node_category in ("input",)
+        is_input_node = node_category in ("input", "inputs")
 
-        def _ensure_processed_name(meta):
+        def _assign_node_output_name(meta, output_name_hint=None):
             """
-            If the metadata still carries the original source layer name,
-            append '(Processed)' so we never overwrite the input layer.
-            Skip renaming for Input-category nodes (e.g. Select Layer) that
-            are just passing data through.
+            Ensure processed node outputs use stable node-scoped layer names
+            so intermediate layers do not overwrite each other.
+
+            Input/passthrough nodes keep original source names.
             """
             if is_input_node:
                 return meta
-            name = meta.get("name", "")
-            if name and "(Processed)" not in name:
-                meta["name"] = f"{name} (Processed)"
+
+            inherited_name = str(current_metadata.get("name", "") or "").strip()
+            current_name = str(meta.get("name", "") or "").strip()
+            inherited_processed = (
+                f"{inherited_name} (Processed)" if inherited_name else ""
+            )
+
+            # Rename when missing name OR when the name is clearly inherited
+            # from upstream metadata (which would cause layer overwrite).
+            should_rename = (
+                not current_name
+                or current_name == inherited_name
+                or (inherited_processed and current_name == inherited_processed)
+            )
+            if not should_rename:
+                return meta
+
+            if len(output_names) > 1 and output_name_hint:
+                suffix = str(output_name_hint).replace("_", " ").strip()
+                meta["name"] = f"{node.title} - {suffix}"
+            else:
+                meta["name"] = f"{node.title} Output"
             return meta
 
         def _sanitize_inherited_meta(meta):
@@ -729,7 +748,7 @@ class ExecutionWorker(QObject):
             except Exception:
                 return None
 
-        def wrap_result(res):
+        def wrap_result(res, output_name_hint=None):
             # 1) If node returned a single LayerDataTuple: keep it as LayerDataTuple
             if is_layer_data_tuple(res):
                 return normalize_layer_data_tuple(res)
@@ -742,10 +761,7 @@ class ExecutionWorker(QObject):
             if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
                 merged = current_metadata.copy()
                 merged.update(res[1])
-                # If the node's own meta explicitly provides a "name", respect it.
-                # Otherwise ensure we don't overwrite the source layer.
-                if "name" not in res[1]:
-                    _ensure_processed_name(merged)
+                _assign_node_output_name(merged, output_name_hint=output_name_hint)
                 _sanitize_inherited_meta(merged)
                 # Keep inherited contrast_limits when present; only auto-estimate
                 # if neither inherited nor node-provided limits exist.
@@ -760,7 +776,7 @@ class ExecutionWorker(QObject):
             # returns raw data (array or list of arrays) without its own metadata.
             # We must rename so the output doesn't clobber the input layer.
             meta = current_metadata.copy()
-            _ensure_processed_name(meta)
+            _assign_node_output_name(meta, output_name_hint=output_name_hint)
             _sanitize_inherited_meta(meta)
             # Keep inherited contrast_limits when available; fallback to
             # auto-estimate only when nothing is provided upstream.
@@ -772,19 +788,24 @@ class ExecutionWorker(QObject):
 
         if isinstance(result, tuple) and len(output_names) > 1 and not is_layer_data_tuple(result):
             for i, name in enumerate(output_names):
-                if i < len(result): node_outputs[name] = wrap_result(result[i])
+                if i < len(result):
+                    node_outputs[name] = wrap_result(result[i], output_name_hint=name)
         elif isinstance(result, dict):
              for k, v in result.items():
-                 node_outputs[k] = wrap_result(v)
+                 node_outputs[k] = wrap_result(v, output_name_hint=k)
         else:
              # FIX FOR SAVE IMAGE (Sink Nodes)
              # Only try to assign output if the node actually HAS outputs
              if output_names: 
-                 node_outputs[output_names[0]] = wrap_result(result)
+                 node_outputs[output_names[0]] = wrap_result(
+                     result, output_name_hint=output_names[0]
+                 )
              elif hasattr(node, 'outputs') and len(node.outputs) > 0:
                  first_out = list(node.outputs)[0] if isinstance(node.outputs, list) else list(node.outputs.keys())[0]
                  out_name = first_out.name if hasattr(first_out, 'name') else first_out
-                 node_outputs[out_name] = wrap_result(result)
+                 node_outputs[out_name] = wrap_result(
+                     result, output_name_hint=out_name
+                 )
              else:
                  # Pass for nodes with no outputs (like Save Image)
                  pass

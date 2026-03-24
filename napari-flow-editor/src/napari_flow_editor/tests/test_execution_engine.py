@@ -136,3 +136,65 @@ def test_execute_node_logic_keeps_explicit_contrast_limits(worker):
     result = worker.execute_node_logic(node, library_def)
     _, meta = result["out"]
     assert meta["contrast_limits"] == [5.0, 6.0]
+
+
+def test_execute_node_logic_uses_node_scoped_output_name_for_processed_nodes(worker):
+    upstream = FakeNode("upstream")
+    upstream.cached_results = {
+        "out": (
+            np.zeros((8, 8), dtype=np.float32),
+            {"name": "nuclei"},
+        )
+    }
+
+    input_socket = FakeSocket("image")
+    input_socket.connected_edges = [
+        FakeEdge(start_socket=type("S", (), {"node": upstream, "name": "out"})())
+    ]
+    node = FakeNode(node_type="dummy", title="Gaussian Blur", inputs=[input_socket])
+
+    def dummy_func(image):
+        return image + 1
+
+    library_def = {
+        "dummy": {
+            "outputs": ["out"],
+            "category": "Filters",
+            "executable": dummy_func,
+        }
+    }
+
+    result = worker.execute_node_logic(node, library_def)
+    _, meta = result["out"]
+    assert meta["name"] == "Gaussian Blur Output"
+
+
+def test_execute_node_logic_preserves_name_for_input_category_nodes(worker):
+    upstream = FakeNode("upstream")
+    upstream.cached_results = {
+        "out": (
+            np.zeros((8, 8), dtype=np.float32),
+            {"name": "nuclei"},
+        )
+    }
+
+    input_socket = FakeSocket("image")
+    input_socket.connected_edges = [
+        FakeEdge(start_socket=type("S", (), {"node": upstream, "name": "out"})())
+    ]
+    node = FakeNode(node_type="dummy", title="Select Layer", inputs=[input_socket])
+
+    def dummy_func(image):
+        return image
+
+    library_def = {
+        "dummy": {
+            "outputs": ["out"],
+            "category": "Inputs",
+            "executable": dummy_func,
+        }
+    }
+
+    result = worker.execute_node_logic(node, library_def)
+    _, meta = result["out"]
+    assert meta["name"] == "nuclei"
