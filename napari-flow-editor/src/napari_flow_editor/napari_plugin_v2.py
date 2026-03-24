@@ -2219,18 +2219,6 @@ class FlowEditor(QWidget):
         self._select_node_for_properties(node_uid)
 
     def handle_execution_result(self, node_title, output_name, data):
-
-        # DEBUG
-
-        if node_title == "Gaussian Blur":
-            print(f"\n🟦 UI GOT GAUSS | output_name={output_name!r} type(data)={type(data)}")
-            if isinstance(data, tuple):
-                print("   tuple len:", len(data), "types:", [type(x) for x in data])
-                if len(data) == 2 and isinstance(data[1], dict):
-                    print("   meta name:", data[1].get("name"), "multiscale:", data[1].get("multiscale"))
-
-        ###
-
         # 1. Update Cache
 
         node_obj = next((item for item in self.scene.items() 
@@ -2269,15 +2257,12 @@ class FlowEditor(QWidget):
         def add_layer_to_viewer(layer_data, raw_meta):
             # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
-            #DEBUG
-            if node_title == "Gaussian Blur":
-                print("🟩 UI ADD GAUSS layer_name =", layer_name, "layer_type=", raw_meta.get("layer_type"))
-            ####
 
             # 2. Filter Metadata
             valid_napari_args = {
                 "name", "opacity", "blending", "visible", "multiscale",
                 "colormap", "contrast_limits", "gamma", "rgb",
+                "interpolation2d", "interpolation3d",
                 "scale", "translate", "rotate", "shear", "affine",
             }
             napari_kwargs = {"name": layer_name}
@@ -2290,6 +2275,19 @@ class FlowEditor(QWidget):
                     custom_metadata[k] = v
 
             napari_kwargs["metadata"] = custom_metadata
+
+            def apply_visual_kwargs(layer_obj, kwargs_obj):
+                # Keep existing layer object but refresh display params so output
+                # appearance stays consistent with incoming metadata.
+                for key, value in kwargs_obj.items():
+                    if key in {"name", "metadata", "multiscale"}:
+                        continue
+                    if not hasattr(layer_obj, key):
+                        continue
+                    try:
+                        setattr(layer_obj, key, value)
+                    except Exception:
+                        pass
 
             # 3. Create/Update Layer
             try:
@@ -2316,6 +2314,7 @@ class FlowEditor(QWidget):
                                 need_recreate = True
                             else:
                                 layer.data = layer_data
+                                apply_visual_kwargs(layer, napari_kwargs)
                                 layer.metadata.update(custom_metadata)
                                 return
                         else:
@@ -2327,6 +2326,7 @@ class FlowEditor(QWidget):
                             need_recreate = True
                         else:
                             layer.data = layer_data
+                            apply_visual_kwargs(layer, napari_kwargs)
                             layer.metadata.update(custom_metadata)
                             return
 

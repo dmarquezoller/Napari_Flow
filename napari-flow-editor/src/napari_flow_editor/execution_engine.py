@@ -89,6 +89,40 @@ class ExecutionWorker(QObject):
         self._interaction_result = self._stop_sentinel
         self._interaction_event.set()
 
+    @staticmethod
+    def _looks_like_multiscale_data(data):
+        t = type(data)
+        name = getattr(t, "__name__", "")
+        module = str(getattr(t, "__module__", "") or "").lower()
+        if name == "MultiScaleData" or "multiscale" in module:
+            return True
+
+        # Fallback for wrappers that do not expose a canonical class/module
+        # but still provide napari-like multiscale metadata.
+        shapes = getattr(data, "shapes", None)
+        if shapes is not None:
+            try:
+                return len(shapes) > 1
+            except Exception:
+                return False
+        return False
+
+    @classmethod
+    def _normalize_layer_data(cls, data):
+        """
+        Normalize viewer layer payloads to match dispatch expectations.
+
+        For multiscale viewer wrappers, convert to a plain list of levels so
+        downstream nodes (e.g. gaussian via dispatch) always take the pyramid
+        path instead of trying to run skimage directly on the wrapper object.
+        """
+        if cls._looks_like_multiscale_data(data):
+            try:
+                return list(data)
+            except Exception:
+                return data
+        return data
+
     def _reset_node_cache(self, node):
         node.last_signature = None
         node.cached_results = {}
@@ -345,8 +379,75 @@ class ExecutionWorker(QObject):
 
         layer = self.viewer.layers[target_name]
 
-        # Copy metadata
-        layer_meta = layer.metadata.copy() if hasattr(layer, "metadata") else {}
+        # Build metadata from the richest available source:
+        # 1) layer.as_layer_data_tuple() visual kwargs (colormap, gamma, etc.)
+        # 2) layer.metadata custom user metadata (overrides/additions)
+        layer_meta = {}
+        layer_data = getattr(layer, "data", None)
+
+        if hasattr(layer, "as_layer_data_tuple"):
+            try:
+                ldt = layer.as_layer_data_tuple()
+                if (
+                    isinstance(ldt, tuple)
+                    and len(ldt) >= 2
+                    and isinstance(ldt[1], dict)
+                ):
+                    layer_data = ldt[0]
+                    layer_meta.update(dict(ldt[1]))
+            except Exception:
+                # Fallback to direct layer attributes below
+                pass
+
+        if hasattr(layer, "metadata") and isinstance(layer.metadata, dict):
+            layer_meta.update(layer.metadata.copy())
+
+        # Defensive fallback: copy common display attrs if not present.
+        for attr in (
+            "name",
+            "axis_labels",
+            "colormap",
+            "contrast_limits",
+            "gamma",
+            "rgb",
+            "interpolation2d",
+            "interpolation3d",
+            "opacity",
+            "blending",
+            "visible",
+            "scale",
+            "translate",
+            "rotate",
+            "shear",
+            "affine",
+        ):
+            if attr not in layer_meta and hasattr(layer, attr):
+                try:
+                    layer_meta[attr] = getattr(layer, attr)
+                except Exception:
+                    pass
+
+        def infer_ndim(data_obj):
+            obj = data_obj
+            if isinstance(obj, list) and obj and hasattr(obj[0], "shape"):
+                obj = obj[0]
+            if hasattr(obj, "shape"):
+                try:
+                    return len(obj.shape)
+                except Exception:
+                    return None
+            return None
+
+        def is_default_yx_axis_row(row_dict):
+            if not isinstance(row_dict, dict):
+                return False
+            return (
+                row_dict.get("d0", "-") == "Y"
+                and row_dict.get("d1", "-") == "X"
+                and row_dict.get("d2", "-") == "-"
+                and row_dict.get("d3", "-") == "-"
+                and row_dict.get("d4", "-") == "-"
+            )
 
         # Axis map -> axes string
         axis_map = func_params.get("axis_map", [])
@@ -354,12 +455,54 @@ class ExecutionWorker(QObject):
             row = axis_map[0]
             axes = [row.get(f"d{i}") for i in range(5) if row.get(f"d{i}", "-") != "-"]
             axes_str = "".join(axes)
-            layer_meta["axes"] = axes_str
-            layer_meta["layout_kind"] = infer_layout_kind(axes_str)
+            if axes_str:
+                data_ndim = infer_ndim(layer_data)
+                existing_axes = str(layer_meta.get("axes", "") or "")
+                existing_axes_ndim = len(existing_axes) if existing_axes else None
+                has_valid_existing_axes = (
+                    data_ndim is not None
+                    and existing_axes_ndim == data_ndim
+                )
+                is_default_row = is_default_yx_axis_row(row)
+                explicit_matches_ndim = (
+                    data_ndim is None or len(axes_str) == data_ndim
+                )
+
+                # Case 1: preserve valid source axes when axis-map is still default.
+                if has_valid_existing_axes and is_default_row:
+                    pass
+                # Case 2: explicit (non-default) axis-map -> trust user.
+                # For default rows, require ndim match to avoid accidental
+                # clobbering. For explicit user mappings, preserve as entered.
+                elif (not is_default_row) or explicit_matches_ndim:
+                    layer_meta["axes"] = axes_str
+                    layer_meta["layout_kind"] = infer_layout_kind(axes_str)
+                    layer_meta.setdefault(
+                        "axis_labels", tuple(a.lower() for a in axes_str)
+                    )
+                # Case 3: missing source axes + default YX on 3D/4D -> infer safe defaults.
+                elif is_default_row and not has_valid_existing_axes:
+                    inferred = None
+                    if data_ndim == 3:
+                        # Default to timeline stack to avoid unintended blur across
+                        # axis-0 when users keep default axis-map.
+                        inferred = "TYX"
+                    elif data_ndim == 4:
+                        inferred = "TZYX"
+                    elif data_ndim == 5:
+                        inferred = "TZYXC"
+
+                    if inferred is not None:
+                        layer_meta["axes"] = inferred
+                        layer_meta["layout_kind"] = infer_layout_kind(inferred)
+                        layer_meta.setdefault(
+                            "axis_labels", tuple(a.lower() for a in inferred)
+                        )
 
         layer_meta["source_layer"] = target_name
 
-        return {"data_out": (layer.data, layer_meta)}
+        normalized_data = self._normalize_layer_data(layer_data)
+        return {"data_out": (normalized_data, layer_meta)}
 
     def execute_node_logic(self, node, library_def):
         self.log_signal.emit(f"Executing: {node.title}...")
@@ -390,11 +533,6 @@ class ExecutionWorker(QObject):
 
                 if source_socket_name in source_node.cached_results:
                     data_package = source_node.cached_results[source_socket_name]
-                    print("🔎 INPUT from", source_node.title, "socket", source_socket_name, "->", type(data_package))
-                    if isinstance(data_package, list):
-                        print("   list len:", len(data_package), "first:", type(data_package[0]), "tuplelen:", len(data_package[0]) if isinstance(data_package[0], tuple) else None)
-                    elif isinstance(data_package, tuple):
-                        print("   tuple len:", len(data_package), "types:", [type(x) for x in data_package])
 
                     # Unpack (Data, Meta) Envelope
                     if isinstance(data_package, tuple) and len(data_package) == 2 and isinstance(data_package[1], dict):
@@ -524,13 +662,72 @@ class ExecutionWorker(QObject):
             Remove metadata keys that are only valid for the *source* layer
             and would be wrong for a processed result (e.g. contrast_limits
             computed on different data, or multiscales descriptors).
-            Let napari auto-detect these for the new layer.
-            We keep colormap so the processed output preserves the source
-            channel's color (e.g. green, magenta tint from OME-Zarr).
+            We keep display settings (contrast_limits, colormap, gamma, etc.)
+            so processed outputs preserve source appearance by default.
             """
-            for key in ("contrast_limits", "multiscales"):
+            for key in ("multiscales",):
                 meta.pop(key, None)
             return meta
+
+        def _auto_contrast_limits(data):
+            """
+            Estimate display contrast limits from output data.
+            Uses a bounded sample so very large/dask arrays remain cheap.
+            Returns [min, max] or None.
+            """
+            try:
+                arr = data
+                # Multiscale: estimate from the highest-resolution level.
+                if isinstance(arr, list) and len(arr) > 0:
+                    arr = arr[0]
+
+                if not hasattr(arr, "shape"):
+                    return None
+
+                shape = tuple(int(s) for s in arr.shape)
+                if len(shape) == 0:
+                    return None
+
+                n_dim = len(shape)
+                slicer = []
+                for axis, size in enumerate(shape):
+                    if axis >= n_dim - 2:
+                        # Keep a centered spatial window.
+                        width = min(size, 512)
+                        start = max(0, (size - width) // 2)
+                        slicer.append(slice(start, start + width))
+                    else:
+                        # Collapse large non-spatial dims to the center.
+                        if size <= 4:
+                            slicer.append(slice(0, size))
+                        else:
+                            center = size // 2
+                            slicer.append(slice(center, center + 1))
+
+                sampled = arr[tuple(slicer)]
+
+                # Lazily backed data (dask): compute sampled window only.
+                if hasattr(sampled, "compute"):
+                    sampled = sampled.compute()
+
+                sampled = np.asarray(sampled)
+                if sampled.size == 0 or not np.issubdtype(sampled.dtype, np.number):
+                    return None
+
+                finite = sampled[np.isfinite(sampled)]
+                if finite.size == 0:
+                    return None
+
+                lo = float(np.percentile(finite, 1.0))
+                hi = float(np.percentile(finite, 99.5))
+                if hi <= lo:
+                    lo = float(finite.min())
+                    hi = float(finite.max())
+                    if hi <= lo:
+                        hi = lo + 1e-6
+                return [lo, hi]
+            except Exception:
+                return None
 
         def wrap_result(res):
             # 1) If node returned a single LayerDataTuple: keep it as LayerDataTuple
@@ -549,10 +746,13 @@ class ExecutionWorker(QObject):
                 # Otherwise ensure we don't overwrite the source layer.
                 if "name" not in res[1]:
                     _ensure_processed_name(merged)
-                # Strip stale contrast_limits from inherited metadata; node's own
-                # meta (res[1]) takes precedence if it supplies new ones.
-                if "contrast_limits" not in res[1]:
-                    _sanitize_inherited_meta(merged)
+                _sanitize_inherited_meta(merged)
+                # Keep inherited contrast_limits when present; only auto-estimate
+                # if neither inherited nor node-provided limits exist.
+                if "contrast_limits" not in merged:
+                    auto_limits = _auto_contrast_limits(res[0])
+                    if auto_limits is not None:
+                        merged["contrast_limits"] = auto_limits
                 return (res[0], merged)
 
             # 4) Default: wrap as (data, meta)
@@ -562,6 +762,12 @@ class ExecutionWorker(QObject):
             meta = current_metadata.copy()
             _ensure_processed_name(meta)
             _sanitize_inherited_meta(meta)
+            # Keep inherited contrast_limits when available; fallback to
+            # auto-estimate only when nothing is provided upstream.
+            if "contrast_limits" not in meta:
+                auto_limits = _auto_contrast_limits(res)
+                if auto_limits is not None:
+                    meta["contrast_limits"] = auto_limits
             return (res, meta)
 
         if isinstance(result, tuple) and len(output_names) > 1 and not is_layer_data_tuple(result):
@@ -585,16 +791,6 @@ class ExecutionWorker(QObject):
 
         # Emit Results
         for out_name, out_data in node_outputs.items():
-            if node.title == "Gaussian Blur":
-                # DEBUG
-                print("🧪 GAUSS EMIT out_name=", out_name, "type(out_data)=", type(out_data))
-                if isinstance(out_data, tuple):
-                    print("   tuple len=", len(out_data), "types=", [type(x) for x in out_data])
-                    if len(out_data) == 2 and isinstance(out_data[1], dict):
-                        print("   meta name=", out_data[1].get("name"), "multiscale=", out_data[1].get("multiscale"))
-                if isinstance(out_data, list):
-                    print("   list len=", len(out_data), "first type=", type(out_data[0]) if out_data else None)
-                ####
             self.result_signal.emit(node.title, out_name, out_data)
             
         return node_outputs

@@ -343,8 +343,12 @@ def dispatch(
     layout_policy: str = "spatial_only",  # "spatial_only" | "full_nd"
     time_policy: str = "independent",      # "independent" | "joint" | "reject"
     channel_policy: str = "independent",   # "independent" | "joint" | "reject"
-    allow_dask_from_numpy: bool = False,
-    numpy_to_dask_min_bytes: int = 32 * 1024 * 1024,
+    dask_strategy: Optional[str] = None,   # None | "pointwise" | "neighborhood"
+    dask_halo_from_param: Optional[str] = None,
+    dask_halo_factor: float = 4.0,
+    dask_boundary_from_param: Optional[str] = None,
+    dask_output_dtype=None,
+    pyramid_param_policy: Optional[dict] = None,
     numpy_to_dask_chunks="auto",
 ):
     """
@@ -363,11 +367,13 @@ def dispatch(
         kwargs = {}
 
     runtime_axes = None
+    runtime_axis_labels = None
     runtime_layout_kind = None
 
     ctx = get_dispatch_context()
     ctx_meta = (ctx.get("metadata", {}) if isinstance(ctx, dict) else {}) or {}
     ctx_axes = ctx_meta.get("axes")
+    ctx_axis_labels = ctx_meta.get("axis_labels")
     ctx_layout_kind = ctx_meta.get("layout_kind")
 
     layout_to_axes = {
@@ -384,7 +390,69 @@ def dispatch(
     def is_array_like(x):
         return isinstance(x, (da.Array, np.ndarray)) or hasattr(x, "shape")
 
-    def infer_axes_for_sample(sample, axes_hint=None, layout_hint=None):
+    def _looks_like_napari_multiscale(x):
+        t = type(x)
+        name = getattr(t, "__name__", "")
+        module = getattr(t, "__module__", "")
+        if name == "MultiScaleData" or "multiscale" in module.lower():
+            return True
+
+        # Defensive fallback for sequence wrappers exposing per-level shapes.
+        shapes = getattr(x, "shapes", None)
+        if shapes is not None:
+            try:
+                return len(shapes) > 1
+            except Exception:
+                return False
+        return False
+
+    def is_pyramid_like(x):
+        """
+        True for sequence-like multiscale containers (e.g. napari MultiScaleData)
+        whose items are array-like levels.
+        """
+        if isinstance(x, (np.ndarray, da.Array, tuple, str, bytes)):
+            return False
+        # napari MultiScaleData may expose .shape; keep it eligible.
+        if hasattr(x, "shape") and not _looks_like_napari_multiscale(x):
+            return False
+        try:
+            n = len(x)
+            if n <= 0:
+                return False
+            first = x[0]
+        except Exception:
+            return False
+        return is_array_like(first)
+
+    def axis_labels_to_axes(labels, ndim):
+        if labels is None:
+            return None
+        try:
+            seq = list(labels)
+        except Exception:
+            return None
+        if len(seq) != ndim:
+            return None
+
+        mapped = []
+        for raw in seq:
+            token = str(raw).strip().lower()
+            if token in ("t", "time"):
+                mapped.append("T")
+            elif token in ("z", "depth"):
+                mapped.append("Z")
+            elif token in ("c", "ch", "channel", "channels"):
+                mapped.append("C")
+            elif token in ("y",):
+                mapped.append("Y")
+            elif token in ("x",):
+                mapped.append("X")
+            else:
+                return None
+        return "".join(mapped)
+
+    def infer_axes_for_sample(sample, axes_hint=None, axis_labels_hint=None, layout_hint=None):
         if sample is None or not hasattr(sample, "shape"):
             return None
         ndim = len(sample.shape)
@@ -392,6 +460,9 @@ def dispatch(
             ax = axes_hint.upper()
             if len(ax) == ndim:
                 return ax
+        labels_ax = axis_labels_to_axes(axis_labels_hint, ndim)
+        if labels_ax:
+            return labels_ax
         if isinstance(layout_hint, str):
             mapped = layout_to_axes.get(layout_hint.lower())
             if mapped and len(mapped) == ndim:
@@ -413,7 +484,7 @@ def dispatch(
 
     # ---------- Unwrap helpers ----------
     def unwrap(x):
-        nonlocal runtime_axes, runtime_layout_kind
+        nonlocal runtime_axes, runtime_axis_labels, runtime_layout_kind
         # list of LayerDataTuples -> pick first image layer
         if isinstance(x, list) and len(x) > 0 and isinstance(x[0], tuple):
             target = x[0]
@@ -427,32 +498,45 @@ def dispatch(
                 and runtime_axes is None
             ):
                 runtime_axes = target[1].get("axes")
+                runtime_axis_labels = target[1].get("axis_labels")
                 runtime_layout_kind = target[1].get("layout_kind")
-            return target[0]
+            data0 = target[0]
+            if is_pyramid_like(data0):
+                return list(data0)
+            return data0
+        # generic pyramid container (napari MultiScaleData, list, etc)
+        if is_pyramid_like(x):
+            return list(x)
         # (data, meta) envelope
         if isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], dict):
             if runtime_axes is None:
                 runtime_axes = x[1].get("axes")
+                runtime_axis_labels = x[1].get("axis_labels")
                 runtime_layout_kind = x[1].get("layout_kind")
-            return x[0]
+            data0 = x[0]
+            if is_pyramid_like(data0):
+                return list(data0)
+            return data0
         return x
 
     uargs = [unwrap(a) for a in args]
     ukwargs = {k: unwrap(v) for k, v in kwargs.items()}
     if runtime_axes is None:
         runtime_axes = ctx_axes
+    if runtime_axis_labels is None:
+        runtime_axis_labels = ctx_axis_labels
     if runtime_layout_kind is None:
         runtime_layout_kind = ctx_layout_kind
 
     # ---------- Find pyramid location ----------
     pyramid_loc = None  # ("arg", idx) or ("kwarg", key)
     for i, a in enumerate(uargs):
-        if isinstance(a, list) and len(a) > 0:
+        if is_pyramid_like(a):
             pyramid_loc = ("arg", i)
             break
     if pyramid_loc is None:
         for k, v in ukwargs.items():
-            if isinstance(v, list) and len(v) > 0:
+            if is_pyramid_like(v):
                 pyramid_loc = ("kwarg", k)
                 break
 
@@ -472,16 +556,14 @@ def dispatch(
 
         return default
 
+    def has_dask_backend():
+        return dask_func is not None or dask_strategy in ("pointwise", "neighborhood")
+
     def maybe_promote_numpy_to_dask(args_in, kwargs_in, sample):
         if (
-            not allow_dask_from_numpy
-            or dask_func is None
+            not has_dask_backend()
             or not isinstance(sample, np.ndarray)
         ):
-            return args_in, kwargs_in, sample
-
-        min_bytes = max(0, int(numpy_to_dask_min_bytes))
-        if sample.nbytes < min_bytes:
             return args_in, kwargs_in, sample
 
         def convert(v):
@@ -505,6 +587,92 @@ def dispatch(
 
         return promoted_args, promoted_kwargs, promoted_sample
 
+    def _replace_sample(args_in, kwargs_in, sample_loc, sample_value):
+        a2 = list(args_in)
+        k2 = dict(kwargs_in)
+        if sample_loc is not None:
+            loc_type, loc_key = sample_loc
+            if loc_type == "arg":
+                a2[loc_key] = sample_value
+            else:
+                k2[loc_key] = sample_value
+        return a2, k2
+
+    def _boundary_for_overlap(kwargs_in):
+        if dask_boundary_from_param:
+            mode = kwargs_in.get(dask_boundary_from_param, "reflect")
+        else:
+            mode = "reflect"
+
+        mode_value = str(mode).strip().lower()
+        if mode_value == "wrap":
+            return "periodic"
+        if mode_value == "constant":
+            return kwargs_in.get("cval", 0)
+        if mode_value == "mirror":
+            return "reflect"
+        if mode_value in ("nearest", "reflect", "periodic", "none"):
+            return mode_value
+        return "reflect"
+
+    def _depth_for_overlap(sample_arr, axes, kwargs_in):
+        if not dask_halo_from_param:
+            return tuple(0 for _ in range(sample_arr.ndim))
+
+        halo_source = kwargs_in.get(dask_halo_from_param, 0)
+        if np.isscalar(halo_source):
+            seq = [float(halo_source)] * sample_arr.ndim
+        else:
+            seq = [float(x) for x in list(halo_source)]
+            if len(seq) == 1:
+                seq = seq * sample_arr.ndim
+            elif len(seq) < sample_arr.ndim:
+                seq = seq + [seq[-1]] * (sample_arr.ndim - len(seq))
+            elif len(seq) > sample_arr.ndim:
+                seq = seq[: sample_arr.ndim]
+
+        radii = [max(0, int(np.ceil(abs(v) * float(dask_halo_factor)))) for v in seq]
+
+        if isinstance(axes, str) and len(axes) == sample_arr.ndim:
+            spatial = {i for i, a in enumerate(axes) if a in ("Z", "Y", "X")}
+            radii = [r if i in spatial else 0 for i, r in enumerate(radii)]
+
+        # Avoid overlap depth > axis size (common failure on small Z/C dims)
+        return tuple(min(r, max(0, int(sz) - 1)) for r, sz in zip(radii, sample_arr.shape))
+
+    def _execute_auto_dask(args_in, kwargs_in, sample_loc, axes):
+        if dask_strategy not in ("pointwise", "neighborhood"):
+            raise ValueError(f"Unknown dask_strategy={dask_strategy!r}")
+        sample_exec = None
+        if sample_loc is not None:
+            loc_type, loc_key = sample_loc
+            sample_exec = args_in[loc_key] if loc_type == "arg" else kwargs_in.get(loc_key)
+        if not isinstance(sample_exec, da.Array):
+            raise TypeError("Auto dask strategy requires a dask array sample.")
+
+        if dask_strategy == "pointwise":
+            def block_apply(block):
+                a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
+                return default(*a2, **k2)
+
+            out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
+            return da.map_blocks(block_apply, sample_exec, dtype=out_dtype)
+
+        # dask_strategy == "neighborhood"
+        def overlap_apply(block):
+            a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
+            return default(*a2, **k2)
+
+        depth = _depth_for_overlap(sample_exec, axes, kwargs_in)
+        boundary = _boundary_for_overlap(kwargs_in)
+        out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
+        return sample_exec.map_overlap(
+            overlap_apply,
+            depth=depth,
+            boundary=boundary,
+            dtype=out_dtype,
+        )
+
     def execute_once(args_in, kwargs_in):
         sample = None
         sample_loc = None
@@ -524,11 +692,27 @@ def dispatch(
         args_exec, kwargs_exec, sample_exec = maybe_promote_numpy_to_dask(
             args_in, kwargs_in, sample
         )
-        func = pick_backend(sample_exec)
 
         axes = infer_axes_for_sample(
-            sample_exec, axes_hint=runtime_axes, layout_hint=runtime_layout_kind
+            sample_exec,
+            axes_hint=runtime_axes,
+            axis_labels_hint=runtime_axis_labels,
+            layout_hint=runtime_layout_kind,
         )
+
+        auto_dask = (
+            isinstance(sample_exec, da.Array)
+            and dask_func is None
+            and dask_strategy in ("pointwise", "neighborhood")
+        )
+        if auto_dask:
+            def run_now(a_now, k_now):
+                return _execute_auto_dask(a_now, k_now, sample_loc, axes)
+        else:
+            func = pick_backend(sample_exec)
+
+            def run_now(a_now, k_now):
+                return func(*a_now, **k_now)
 
         # Fast path: no layout policy or no inferable axes.
         if (
@@ -537,11 +721,11 @@ def dispatch(
             or axes is None
             or len(axes) != len(sample_exec.shape)
         ):
-            return func(*args_exec, **kwargs_exec)
+            return run_now(args_exec, kwargs_exec)
 
         spatial = [i for i, a in enumerate(axes) if a in ("Z", "Y", "X")]
         if not spatial:
-            return func(*args_exec, **kwargs_exec)
+            return run_now(args_exec, kwargs_exec)
 
         if time_policy == "reject" and "T" in axes:
             raise ValueError("Dispatch rejected time dimension (T) for this node.")
@@ -558,7 +742,7 @@ def dispatch(
 
         # Nothing to split => run once on full N-D sample.
         if not independent:
-            return func(*args_exec, **kwargs_exec)
+            return run_now(args_exec, kwargs_exec)
 
         independent_shape = tuple(sample_exec.shape[i] for i in independent)
 
@@ -580,10 +764,10 @@ def dispatch(
 
             a2 = [slice_if_compatible(v, slicer) for v in args_exec]
             k2 = {k: slice_if_compatible(v, slicer) for k, v in kwargs_exec.items()}
-            outputs.append(func(*a2, **k2))
+            outputs.append(run_now(a2, k2))
 
         if not outputs:
-            return func(*args_exec, **kwargs_exec)
+            return run_now(args_exec, kwargs_exec)
 
         first = outputs[0]
         if not is_array_like(first):
@@ -657,15 +841,121 @@ def dispatch(
         return execute_once(uargs, ukwargs)
 
     loc_type, loc_key = pyramid_loc
-    pyramid = uargs[loc_key] if loc_type == "arg" else ukwargs[loc_key]
-    if not isinstance(pyramid, list) or len(pyramid) == 0:
+    pyramid_raw = uargs[loc_key] if loc_type == "arg" else ukwargs[loc_key]
+    if not is_pyramid_like(pyramid_raw):
         return execute_once(uargs, ukwargs)
+    pyramid = list(pyramid_raw)
 
     if pyramid_strategy not in ("per_level", "from_level0"):
         raise ValueError(f"Unknown pyramid_strategy={pyramid_strategy!r}")
 
+    def _spatial_indices_for_shape(shape, axes_hint):
+        ndim = len(shape)
+        if isinstance(axes_hint, str) and len(axes_hint) == ndim:
+            idx = [i for i, a in enumerate(axes_hint) if a in ("Z", "Y", "X")]
+            if idx:
+                return idx
+        # Fallback: last two dims are spatial
+        if ndim >= 2:
+            return [ndim - 2, ndim - 1]
+        return list(range(ndim))
+
+    def _compute_level_scale_context(base_level, level):
+        if not (hasattr(base_level, "shape") and hasattr(level, "shape")):
+            return None
+        base_shape = tuple(int(s) for s in base_level.shape)
+        lvl_shape = tuple(int(s) for s in level.shape)
+        if len(base_shape) != len(lvl_shape):
+            return None
+
+        base_axes = infer_axes_for_sample(
+            base_level,
+            axes_hint=runtime_axes,
+            axis_labels_hint=runtime_axis_labels,
+            layout_hint=runtime_layout_kind,
+        )
+        spatial_idx = _spatial_indices_for_shape(base_shape, base_axes)
+        if not spatial_idx:
+            return None
+
+        axis_factors = {}
+        for i in spatial_idx:
+            b = max(1.0, float(base_shape[i]))
+            l = max(1.0, float(lvl_shape[i]))
+            axis_factors[i] = max(1.0, b / l)
+        return {"axis_factors": axis_factors, "spatial_idx": spatial_idx, "ndim": len(base_shape)}
+
+    def _rebuild_like(original, values):
+        if isinstance(original, tuple):
+            return tuple(values)
+        if isinstance(original, list):
+            return list(values)
+        if isinstance(original, np.ndarray):
+            return np.asarray(values)
+        return values
+
+    def _scale_value_fixed_world(value, ctx):
+        if ctx is None:
+            return value
+        axis_factors = ctx["axis_factors"]
+        spatial_idx = ctx["spatial_idx"]
+        ndim = ctx["ndim"]
+
+        # Scalar sigma -> divide by average spatial scale factor.
+        if np.isscalar(value):
+            # Use only axes that actually downsampled when present.
+            # Example: (T,Y,X) or (Z,Y,X) pyramids often keep the first axis
+            # unchanged while downsampling Y/X by 2, so factors are (1,2,2).
+            # In that case scalar sigma should scale by 2, not by mean(1,2,2).
+            scaled_axes = [axis_factors[i] for i in spatial_idx if axis_factors[i] > 1.0 + 1e-9]
+            if not scaled_axes:
+                scaled_axes = [axis_factors[i] for i in spatial_idx]
+            avg_factor = float(np.mean(scaled_axes))
+            return float(value) / avg_factor
+
+        # Sequence sigma:
+        # - len == ndim: scale spatial positions by their corresponding axis factor.
+        # - len == n_spatial: scale each item by spatial factor order.
+        if isinstance(value, (list, tuple, np.ndarray)):
+            vals = list(value)
+            if len(vals) == ndim:
+                scaled = []
+                for i, v in enumerate(vals):
+                    if np.isscalar(v) and i in axis_factors:
+                        scaled.append(float(v) / axis_factors[i])
+                    else:
+                        scaled.append(v)
+                return _rebuild_like(value, scaled)
+            if len(vals) == len(spatial_idx):
+                scaled = []
+                for local_i, v in enumerate(vals):
+                    if np.isscalar(v):
+                        axis_i = spatial_idx[local_i]
+                        scaled.append(float(v) / axis_factors[axis_i])
+                    else:
+                        scaled.append(v)
+                return _rebuild_like(value, scaled)
+        return value
+
+    def _apply_pyramid_param_policy(kwargs_in, base_level, level):
+        if not isinstance(pyramid_param_policy, dict) or not pyramid_param_policy:
+            return kwargs_in
+        ctx = _compute_level_scale_context(base_level, level)
+        if ctx is None:
+            return kwargs_in
+
+        out = dict(kwargs_in)
+        for param_name, policy in pyramid_param_policy.items():
+            if policy != "fixed_world":
+                continue
+            if param_name not in out:
+                continue
+            out[param_name] = _scale_value_fixed_world(out[param_name], ctx)
+        return out
+
     if pyramid_strategy == "per_level":
         out_levels = []
+        base_level = pyramid[0]
         for level in pyramid:
             a2 = list(uargs)
             k2 = dict(ukwargs)
@@ -673,6 +963,7 @@ def dispatch(
                 a2[loc_key] = level
             else:
                 k2[loc_key] = level
+            k2 = _apply_pyramid_param_policy(k2, base_level, level)
             out_levels.append(execute_once(a2, k2))
         return out_levels
 
