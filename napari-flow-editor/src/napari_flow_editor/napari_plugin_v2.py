@@ -396,6 +396,7 @@ class Connection(QGraphicsPathItem):
             if valid:
                 self.scene_ref.finalize_connection(self, target)
             else:
+                self.remove_from_sockets()
                 self.scene_ref.removeItem(self)
             self.dragging = False
         else:
@@ -417,6 +418,13 @@ class Connection(QGraphicsPathItem):
         self.end_socket.connected_edges.append(self)
 
     def detach_end(self):
+        if self.end_socket and self in self.end_socket.connected_edges:
+            self.end_socket.connected_edges.remove(self)
+        self.end_socket = None
+
+    def remove_from_sockets(self):
+        if self.start_socket and self in self.start_socket.connected_edges:
+            self.start_socket.connected_edges.remove(self)
         if self.end_socket and self in self.end_socket.connected_edges:
             self.end_socket.connected_edges.remove(self)
         self.end_socket = None
