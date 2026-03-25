@@ -304,6 +304,7 @@ class Connection(QGraphicsPathItem):
         self.is_logic = getattr(start_socket, "is_logic", False)
         self.data_type = getattr(start_socket, "data_type", "any")
         self.setZValue(1)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self._apply_pen_state()
 
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
@@ -326,15 +327,32 @@ class Connection(QGraphicsPathItem):
         super().hoverLeaveEvent(event)
 
     def _apply_pen_state(self):
+        selected = self.isSelected()
         if self.is_logic:
-            color = QColor("#FFFFFF") if self.hovered else QColor("#F2F2F2")
-            width = 3 if self.hovered else 2
+            if selected:
+                color = QColor("#FFD166")
+                width = 3
+            else:
+                color = QColor("#FFFFFF") if self.hovered else QColor("#F2F2F2")
+                width = 3 if self.hovered else 2
             self.setPen(QPen(color, width))
         else:
             base = _get_data_type_color(self.data_type)
-            color = base if self.hovered else base.darker(120)
-            width = 3 if self.hovered else 2
+            if selected:
+                color = base.lighter(140)
+                width = 3
+            else:
+                color = base if self.hovered else base.darker(120)
+                width = 3 if self.hovered else 2
             self.setPen(QPen(color, width))
+
+    def itemChange(self, change, value):
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemSelectedChange,
+        ):
+            self._apply_pen_state()
+        return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
         if self.end_socket and (self.end_socket.center_pos() - event.scenePos()).manhattanLength() < 20:
@@ -342,7 +360,7 @@ class Connection(QGraphicsPathItem):
             self.detach_end()
             self.dragging = True
         else:
-            event.ignore()
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self.dragging:
@@ -381,7 +399,7 @@ class Connection(QGraphicsPathItem):
                 self.scene_ref.removeItem(self)
             self.dragging = False
         else:
-            event.ignore()
+            super().mouseReleaseEvent(event)
 
     def update_path(self, start, end):
         path = QPainterPath()
@@ -418,14 +436,16 @@ class MacroProxyConnection(QGraphicsPathItem):
     mirrors that relationship on the collapsed macro shell.
     """
 
-    def __init__(self, start_socket, end_socket):
+    def __init__(self, start_socket, end_socket, real_edge=None):
         super().__init__()
         self.start_socket = start_socket
         self.end_socket = end_socket
+        self.real_edge = real_edge
         self.is_logic = bool(getattr(start_socket, "is_logic", False))
         self.data_type = getattr(start_socket, "data_type", "any")
         self.setZValue(1)
-        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self.setAcceptHoverEvents(False)
         self._apply_pen_state()
 
@@ -436,13 +456,23 @@ class MacroProxyConnection(QGraphicsPathItem):
         self.update_positions()
 
     def _apply_pen_state(self):
+        selected = self.isSelected()
         if self.is_logic:
-            color = QColor("#F2F2F2")
-            width = 2
+            color = QColor("#FFD166") if selected else QColor("#F2F2F2")
+            width = 3 if selected else 2
         else:
-            color = _get_data_type_color(self.data_type).darker(120)
-            width = 2
+            base = _get_data_type_color(self.data_type)
+            color = base.lighter(140) if selected else base.darker(120)
+            width = 3 if selected else 2
         self.setPen(QPen(color, width))
+
+    def itemChange(self, change, value):
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemSelectedChange,
+        ):
+            self._apply_pen_state()
+        return super().itemChange(change, value)
 
     def update_positions(self):
         if self.start_socket is None or self.end_socket is None:
@@ -1803,7 +1833,7 @@ class FlowEditor(QWidget):
             if start_proxy is edge.start_socket and end_proxy is edge.end_socket:
                 continue
 
-            proxy = MacroProxyConnection(start_proxy, end_proxy)
+            proxy = MacroProxyConnection(start_proxy, end_proxy, real_edge=edge)
             self.scene.addItem(proxy)
 
     def _resolve_macro_socket_to_internal(self, socket):
@@ -2517,7 +2547,8 @@ class FlowEditor(QWidget):
             edge.start_socket.connected_edges.remove(edge)
         if edge.end_socket and edge in edge.end_socket.connected_edges:
             edge.end_socket.connected_edges.remove(edge)
-        self.scene.removeItem(edge)
+        if edge.scene() is self.scene:
+            self.scene.removeItem(edge)
 
     def _resolve_dynamic_output_type(self, node, rule):
         fallback = _normalize_data_type(rule.get("fallback", "any"))
@@ -2954,12 +2985,37 @@ class FlowEditor(QWidget):
         selected = list(self.scene.selectedItems())
         selected_nodes = [item for item in selected if isinstance(item, Node)]
         selected_macros = [item for item in selected if isinstance(item, MacroGroupItem)]
-        if not selected_nodes and not selected_macros:
+        selected_edges = [item for item in selected if isinstance(item, Connection)]
+        selected_proxy_edges = [
+            item for item in selected if isinstance(item, MacroProxyConnection)
+        ]
+
+        if not selected_nodes and not selected_macros and not selected_edges and not selected_proxy_edges:
             return
+
+        for edge in list(selected_edges):
+            downstream = getattr(getattr(edge, "end_socket", None), "node", None)
+            self._remove_edge(edge)
+            if isinstance(downstream, Node):
+                self.set_node_status_recursive(downstream, "gray")
+
+        for proxy in list(selected_proxy_edges):
+            real_edge = getattr(proxy, "real_edge", None)
+            if isinstance(real_edge, Connection):
+                downstream = getattr(getattr(real_edge, "end_socket", None), "node", None)
+                self._remove_edge(real_edge)
+                if isinstance(downstream, Node):
+                    self.set_node_status_recursive(downstream, "gray")
+            if hasattr(proxy, "detach"):
+                proxy.detach()
+            if proxy.scene() is self.scene:
+                self.scene.removeItem(proxy)
+
         for node in list(selected_nodes):
             self.delete_node(node)
         for macro_item in list(selected_macros):
             self._expand_macro_group(macro_item.group_id)
+        self._refresh_macro_visibility()
         self.on_selection()
 
     def _get_all_nodes(self):
