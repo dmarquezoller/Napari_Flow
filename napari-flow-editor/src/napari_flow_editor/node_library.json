@@ -1884,6 +1884,10 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.select_layer",
     "description": "Select a layer by *name* from a list of napari LayerDataTuples:\n  layers: [(data, meta, layer_type), ...]\n\nReturns (data, meta) so downstream nodes receive just the data (engine will unpack),\nwhile metadata stays available.",
+    "interactive": {
+      "interaction_type": "layer_choice",
+      "prompt": "Select one incoming layer, then click Run."
+    },
     "logic": {
       "in": true,
       "out": true,
@@ -1987,7 +1991,8 @@
         0
       ],
       "edge_width": 3,
-      "prompt": "Draw a rectangle on the image, then click Run."
+      "prompt": "Draw a rectangle on the image, then click Run.",
+      "interaction_type": "shapes"
     },
     "logic": {
       "in": true,

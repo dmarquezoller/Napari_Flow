@@ -130,6 +130,10 @@ def load_csv(file_path=""):
     outputs=["image_out"],
     input_types={"layers": "layers"},
     output_types={"image_out": "image"},
+    interactive={
+        "interaction_type": "layer_choice",
+        "prompt": "Select one incoming layer, then click Run.",
+    },
     params_config={
         # Text input (your UI will render a normal text field if type is unknown)
         "layer_name": {"type": "text", "label": "Layer name (exact preferred)"},
@@ -137,7 +141,12 @@ def load_csv(file_path=""):
         "layer_type": {"options": ["image", "labels"]},
     }
 )
-def select_layer(layers, layer_name: str = "", layer_type: str = "image"):
+def select_layer(
+    layers,
+    layer_name: str = "",
+    layer_type: str = "image",
+    interaction=None,
+):
     """
     Select a layer by *name* from a list of napari LayerDataTuples:
       layers: [(data, meta, layer_type), ...]
@@ -164,6 +173,15 @@ def select_layer(layers, layer_name: str = "", layer_type: str = "image"):
 
     if not available:
         raise ValueError("Select Layer: no valid LayerDataTuples found in input.")
+
+    # Interactive path can override static params.
+    if isinstance(interaction, dict):
+        selected_name = str(interaction.get("layer_name", "")).strip()
+        selected_type = str(interaction.get("layer_type", "")).strip()
+        if selected_name:
+            layer_name = selected_name
+        if selected_type:
+            layer_type = selected_type
 
     # If no name provided, print available and fail (for testing)
     if not layer_name.strip():

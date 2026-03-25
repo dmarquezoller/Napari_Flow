@@ -2196,10 +2196,81 @@ class FlowEditor(QWidget):
             self.props_layout.addRow(QLabel("No parameters defined."))
         else:
             params_def = NODE_LIBRARY[node.node_type]["parameters"]
+            pending = self._pending_interaction
+            pending_layer_choice = (
+                pending
+                and pending.get("node_uid") == node.uid
+                and pending.get("interaction_type") == "layer_choice"
+            )
             
             for param_name, conf in params_def.items():
                 default_val = conf.get("default", "")
                 current_val = node.parameters.get(param_name, default_val)
+                if (
+                    node.node_type == "select_layer"
+                    and param_name == "layer_name"
+                    and not pending_layer_choice
+                ):
+                    placeholder = QLabel("<em>Will be chosen at runtime.</em>")
+                    placeholder.setStyleSheet("color: #888;")
+                    self.props_layout.addRow("Select Layer:", placeholder)
+                    continue
+
+                if (
+                    node.node_type == "select_layer"
+                    and param_name == "layer_type"
+                    and not pending_layer_choice
+                ):
+                    placeholder = QLabel("<em>Auto from selected layer.</em>")
+                    placeholder.setStyleSheet("color: #888;")
+                    self.props_layout.addRow("Layer Type:", placeholder)
+                    continue
+
+                if pending_layer_choice and param_name == "layer_name":
+                    widget = QComboBox()
+                    choices = pending.get("choices", [])
+                    if not choices:
+                        widget.addItem("No incoming layers")
+                        widget.setEnabled(False)
+                    else:
+                        selected = pending.get("selected_choice", {})
+                        selected_index = 0
+                        for i, ch in enumerate(choices):
+                            label = str(
+                                ch.get(
+                                    "label",
+                                    f"{ch.get('name', '')} ({ch.get('layer_type', '')})",
+                                )
+                            )
+                            widget.addItem(label, ch)
+                            if (
+                                ch.get("name") == selected.get("name")
+                                and ch.get("layer_type") == selected.get("layer_type")
+                            ):
+                                selected_index = i
+                        widget.setCurrentIndex(selected_index)
+
+                        def _on_choice_change(index, nuid=node.uid, combo=widget):
+                            ch = combo.itemData(index)
+                            if not ch:
+                                return
+                            self._set_pending_layer_choice(nuid, ch)
+                            self.on_selection()
+
+                        widget.currentIndexChanged.connect(_on_choice_change)
+                    self.props_layout.addRow("Select Layer:", widget)
+                    continue
+
+                if pending_layer_choice and param_name == "layer_type":
+                    selected = pending.get("selected_choice", {})
+                    layer_type_text = str(
+                        selected.get(
+                            "layer_type",
+                            node.parameters.get("layer_type", current_val),
+                        )
+                    )
+                    self.props_layout.addRow("Layer Type:", QLabel(layer_type_text))
+                    continue
                 # --- A. SPECIAL CASE: Dynamic Layer Selector ---
                 # If this is the Input Node, populate the dropdown with REAL Napari layers
                 if node.node_type == "get_layer" and param_name == "layer_name":
@@ -3123,6 +3194,26 @@ class FlowEditor(QWidget):
         except Exception:
             pass
 
+    def _set_pending_layer_choice(self, node_uid, choice):
+        pending = self._pending_interaction
+        if not pending:
+            return
+        if pending.get("node_uid") != node_uid:
+            return
+        if pending.get("interaction_type") != "layer_choice":
+            return
+        if not isinstance(choice, dict):
+            return
+
+        pending["selected_choice"] = dict(choice)
+
+        node = self._find_node_by_uid(node_uid)
+        if node is not None:
+            node.parameters["layer_name"] = str(choice.get("name", ""))
+            node.parameters["layer_type"] = str(
+                choice.get("layer_type", node.parameters.get("layer_type", "image"))
+            )
+
     def _update_interaction_bar(self):
         pending = self._pending_interaction
         if not pending:
@@ -3193,6 +3284,25 @@ class FlowEditor(QWidget):
         pending = self._pending_interaction
         if not pending:
             return
+        if pending.get("interaction_type") == "layer_choice":
+            selected = pending.get("selected_choice")
+            if not selected:
+                choices = pending.get("choices", [])
+                selected = choices[0] if choices else None
+            if not selected:
+                self.append_log("⚠️ Select Layer: no options available.")
+                return
+            payload = {
+                "layer_name": str(selected.get("name", "")),
+                "layer_type": str(selected.get("layer_type", "image")),
+                "index": int(selected.get("index", 0)),
+            }
+            if not payload["layer_name"]:
+                self.append_log("⚠️ Select Layer: please choose a layer before Run.")
+                return
+            self._finish_pending_interaction(data=payload, notify_worker=True)
+            return
+
         layer_name = pending.get("layer_name")
         data = None
         try:
@@ -3235,6 +3345,28 @@ class FlowEditor(QWidget):
           2. Store pending interaction state and show controls in Node Properties.
           3. Run/Cancel in the panel calls ``worker.provide_interaction_result``.
         """
+        interaction_type = str(config.get("interaction_type", "shapes")).strip().lower()
+        if interaction_type == "layer_choice":
+            choices = list(config.get("choices", []) or [])
+            if not choices:
+                self.worker.provide_interaction_result(None)
+                return
+            default_index = int(config.get("default_index", 0))
+            if default_index < 0 or default_index >= len(choices):
+                default_index = 0
+            selected_choice = dict(choices[default_index])
+            self._pending_interaction = {
+                "node_uid": node_uid,
+                "config": config,
+                "interaction_type": "layer_choice",
+                "choices": choices,
+                "selected_choice": selected_choice,
+            }
+            self._set_pending_layer_choice(node_uid, selected_choice)
+            self._update_interaction_bar()
+            self._select_node_for_properties(node_uid)
+            return
+
         layer_type = config.get("layer_type", "shapes")
         layer_name = f"__interactive_{node_uid[:8]}__"
 

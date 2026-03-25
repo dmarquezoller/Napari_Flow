@@ -584,10 +584,63 @@ class ExecutionWorker(QObject):
         # user interaction from the main thread before running the function.
         interactive_config = def_data.get("interactive")
         if interactive_config:
+            prepared_interactive_config = dict(interactive_config)
+            interaction_type = str(
+                prepared_interactive_config.get("interaction_type", "shapes")
+            ).strip().lower()
+
+            if interaction_type == "layer_choice":
+                layers_input = func_inputs.get("layers")
+                choices = []
+                if isinstance(layers_input, list):
+                    for i, item in enumerate(layers_input):
+                        if (
+                            isinstance(item, tuple)
+                            and len(item) == 3
+                            and isinstance(item[1], dict)
+                        ):
+                            _, meta, lt = item
+                            layer_name = str(meta.get("name", f"layer_{i}"))
+                            layer_type = str(lt)
+                            choices.append(
+                                {
+                                    "name": layer_name,
+                                    "layer_type": layer_type,
+                                    "label": f"{layer_name} ({layer_type})",
+                                    "index": i,
+                                }
+                            )
+
+                if not choices:
+                    raise ValueError(
+                        "Select Layer: no incoming layers available for selection."
+                    )
+
+                current_name = str(clean_params.get("layer_name", "")).strip()
+                current_type = str(clean_params.get("layer_type", "")).strip()
+                default_index = 0
+                for i, ch in enumerate(choices):
+                    if (
+                        ch["name"] == current_name
+                        and (not current_type or ch["layer_type"] == current_type)
+                    ):
+                        default_index = i
+                        break
+                else:
+                    for i, ch in enumerate(choices):
+                        if ch["name"] == current_name:
+                            default_index = i
+                            break
+
+                prepared_interactive_config["choices"] = choices
+                prepared_interactive_config["default_index"] = default_index
+
             self.log_signal.emit(
                 f"⏳ Waiting for user interaction on '{node.title}'..."
             )
-            interaction_data = self._request_interaction(node.uid, interactive_config)
+            interaction_data = self._request_interaction(
+                node.uid, prepared_interactive_config
+            )
             if interaction_data is self._stop_sentinel:
                 raise InterruptedError("Loop stop requested during interaction.")
             if interaction_data is None:

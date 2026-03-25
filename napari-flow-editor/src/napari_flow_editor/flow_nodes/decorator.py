@@ -152,10 +152,20 @@ def register_node(
 
     # --- Normalise interactive config ---------------------------------
     if interactive is True:
-        interactive_config = {"layer_type": "shapes"}
+        interactive_config = {
+            "interaction_type": "shapes",
+            "layer_type": "shapes",
+        }
     elif isinstance(interactive, dict):
         interactive_config = interactive.copy()
-        interactive_config.setdefault("layer_type", "shapes")
+        interaction_type = str(
+            interactive_config.get("interaction_type", "")
+        ).strip().lower()
+        if not interaction_type:
+            interaction_type = "shapes"
+            interactive_config["interaction_type"] = interaction_type
+        if interaction_type == "shapes":
+            interactive_config.setdefault("layer_type", "shapes")
     else:
         interactive_config = None
 
