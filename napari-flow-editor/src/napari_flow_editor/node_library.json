@@ -3042,7 +3042,7 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.visualisation.plot_histogram",
-    "description": "Generates a Matplotlib Figure object from the image.",
+    "description": "Generates a histogram plot from the image.",
     "logic": {
       "in": true,
       "out": true,

@@ -27,7 +27,12 @@ from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
 from .script_generator import ScriptGenerator
 from .widgets.dynamic_table import DynamicTableWidget
-from .widgets.plot_widgets import PlotResultDialog, figure_to_rgb_array, PlotDashboard
+from .widgets.plot_widgets import (
+    PlotResultDialog,
+    figure_to_rgb_array,
+    PlotDashboard,
+    is_plotly_figure,
+)
 
 
 NODE_LIBRARY = {}
@@ -845,6 +850,13 @@ class MacroGroupItem(QGraphicsRectItem):
 
     def all_sockets(self):
         return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
+
+    def boundingRect(self):
+        """
+        Expand paint bounds so drag repaints include the macro shadow and avoid
+        ghost/streak artifacts.
+        """
+        return super().boundingRect().adjusted(-8, -8, 12, 12)
 
     def set_macro_visible(self, visible):
         self.setVisible(visible)
@@ -3506,13 +3518,16 @@ class FlowEditor(QWidget):
         # If it is a plot, SHOW the dashboard
         is_plot = False
         type_str = str(type(display_data))
-        if "matplotlib" in type_str and "Figure" in type_str:
+        plotly_figure = display_meta.get("plotly_figure") if isinstance(display_meta, dict) else None
+        if is_plotly_figure(display_data):
+            is_plot = True
+        elif "matplotlib" in type_str and "Figure" in type_str:
             is_plot = True
         elif hasattr(display_data, "canvas"): 
             is_plot = True
 
         if is_plot:
-            self.plot_dashboard.display(display_data) # <--- Pop up the widget!
+            self.plot_dashboard.display(display_data, plotly_figure=plotly_figure) # <--- Pop up the widget!
             return
 
         # --- C. NON-VISUAL FILTER ---
