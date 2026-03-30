@@ -12,8 +12,8 @@ from qtpy.QtWidgets import (
 from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
-from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal
-import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr
+from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer
+import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time
 import html
 import numpy as np
 import dask.array as da
@@ -92,6 +92,12 @@ DATA_TYPE_COLORS = {
     "layers": "#B6A3FF",
     "any": "#9AA0A6",
 }
+
+# Socket layout lanes (single source of truth for spacing).
+SOCKET_EXEC_Y = 24
+SOCKET_DATA_TOP = 44
+SOCKET_DATA_BOTTOM_MARGIN = 16
+SOCKET_DATA_MIN_GAP = 18
 
 
 def _normalize_data_type(data_type):
@@ -204,9 +210,9 @@ class Socket(QGraphicsEllipseItem):
             # Keep exec pins in their own vertical lane (near the top) so they
             # don't overlap data pins when a node has a single data in/out.
             if total_sockets <= 1:
-                y = 24
+                y = SOCKET_EXEC_Y
             else:
-                top = 24
+                top = SOCKET_EXEC_Y
                 bottom = max(top + 1, h - 20)
                 step = (bottom - top) / max(total_sockets - 1, 1)
                 y = top + (step * index)
@@ -214,8 +220,15 @@ class Socket(QGraphicsEllipseItem):
             self.base_color = QColor("#F2F2F2")
             self.setToolTip(f"Exec: {self.name}")
         else:
-            # Data sockets — original layout (left/right sides, evenly spaced)
-            y = (h / (total_sockets + 1)) * (index + 1)
+            # Data sockets live in a dedicated lower lane to avoid overlap with
+            # exec sockets near the header.
+            top = min(max(0.0, h - SOCKET_DATA_BOTTOM_MARGIN - 1), SOCKET_DATA_TOP)
+            bottom = max(top + 1, h - SOCKET_DATA_BOTTOM_MARGIN)
+            if total_sockets <= 1:
+                y = (top + bottom) * 0.5
+            else:
+                step = (bottom - top) / max(total_sockets - 1, 1)
+                y = top + (step * index)
             x = 0 if socket_type == "input" else w
             self.local_offset = QPointF(x, y)
             self.base_color = _get_data_type_color(self.data_type)
@@ -556,15 +569,25 @@ class Node(QGraphicsRectItem):
             
             # Load Params
             for key, conf in definition["parameters"].items():
-                self.parameters[key] = conf["default"]
+                default_val = conf.get("default")
+                # Some table params are authored with "value" in params_config
+                # and can end up with default=None in generated library metadata.
+                if default_val is None and conf.get("type") == "table":
+                    default_val = conf.get("value", [])
+                self.parameters[key] = copy.deepcopy(default_val)
         else:
             self.title = title if title else node_type
 
         # 2. Calculate Height based on params AND sockets
         param_count = len(self.parameters)
         socket_count = max(len(inputs_data), len(outputs_data))
-        h = 45 + (param_count * 20) + (socket_count * 10) # Add space for multiple sockets
-        h = max(h, 80)
+        h = 45 + (param_count * 20) + (socket_count * 10)
+        min_h_for_data_lane = (
+            SOCKET_DATA_TOP
+            + SOCKET_DATA_BOTTOM_MARGIN
+            + max(0, socket_count - 1) * SOCKET_DATA_MIN_GAP
+        )
+        h = max(h, 80, min_h_for_data_lane)
         
         super().__init__(0, 0, 160, h)
         self.setPos(x, y)
@@ -1290,6 +1313,30 @@ class FlowEditor(QWidget):
 
         self.viewer = viewer
         self._pending_interaction = None
+        self._pending_param_updates = {}
+        self._param_update_timer = QTimer(self)
+        self._param_update_timer.setSingleShot(True)
+        self._param_update_timer.timeout.connect(self._flush_pending_param_updates)
+        self._last_props_selection_sig = None
+        self._pending_props_refresh = False
+        self._props_refresh_timer = QTimer(self)
+        self._props_refresh_timer.setSingleShot(True)
+        self._props_refresh_timer.timeout.connect(self._flush_deferred_props_refresh)
+        self._video_props_refresh_timer = QTimer(self)
+        self._video_props_refresh_timer.setSingleShot(True)
+        self._video_props_refresh_timer.timeout.connect(
+            self._flush_selected_make_video_properties_refresh
+        )
+        self._debug_ui_perf = (
+            str(os.getenv("NAPARI_FLOW_DEBUG_UI", "0")).strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        self._ui_watchdog_last = time.perf_counter()
+        self._ui_watchdog_timer = QTimer(self)
+        self._ui_watchdog_timer.setInterval(250)
+        self._ui_watchdog_timer.timeout.connect(self._ui_watchdog_tick)
+        if self._debug_ui_perf:
+            self._ui_watchdog_timer.start()
         self.macro_groups = {}  # group_id -> {"title","member_uids","collapsed","item"}
         self._active_macro_id = None
         
@@ -1542,6 +1589,12 @@ class FlowEditor(QWidget):
         self.btn_run.clicked.connect(self.run_pipeline)
         self.scene.selectionChanged.connect(self.on_selection)
         self._position_floating_buttons()
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.focusChanged.connect(self._on_application_focus_changed)
+            except Exception:
+                pass
 
     def _position_floating_buttons(self):
         btn = getattr(self, "btn_back_macro_floating", None)
@@ -1564,6 +1617,94 @@ class FlowEditor(QWidget):
         if visible:
             self._position_floating_buttons()
             btn.raise_()
+
+    def _is_editing_properties_widget(self):
+        focused = QApplication.focusWidget()
+        return (
+            focused is not None
+            and self.props_group is not None
+            and self.props_group.isAncestorOf(focused)
+            and isinstance(
+                focused,
+                (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget),
+            )
+        )
+
+    def _flush_deferred_props_refresh(self):
+        if not self._pending_props_refresh:
+            return
+        if self._is_editing_properties_widget():
+            return
+        self._pending_props_refresh = False
+        self.on_selection(force=True)
+
+    def _schedule_selected_make_video_properties_refresh(self, delay_ms=220):
+        if self._is_editing_properties_widget():
+            self._pending_props_refresh = True
+            return
+        if self._video_props_refresh_timer.isActive():
+            self._video_props_refresh_timer.stop()
+        self._video_props_refresh_timer.start(max(50, int(delay_ms)))
+
+    def _flush_selected_make_video_properties_refresh(self):
+        if self._is_editing_properties_widget():
+            self._pending_props_refresh = True
+            return
+        self._refresh_selected_make_video_properties()
+
+    def _on_application_focus_changed(self, _old, _new):
+        if self._debug_ui_perf:
+            old_name = _old.__class__.__name__ if _old is not None else "None"
+            new_name = _new.__class__.__name__ if _new is not None else "None"
+            print(f"[FlowEditor][UI] focusChanged: {old_name} -> {new_name}")
+        if not self._pending_props_refresh:
+            return
+        if self._is_editing_properties_widget():
+            return
+        self._pending_props_refresh = False
+        self.on_selection(force=True)
+
+    def _bind_viewer_refresh_events(self):
+        """
+        Keep make-video dynamic UI (e.g. sweep axis idx options) synchronized
+        when viewer data/layout changes.
+        """
+        def _safe_refresh(_event=None):
+            self._schedule_selected_make_video_properties_refresh()
+
+        try:
+            self.viewer.layers.events.inserted.connect(_safe_refresh)
+            self.viewer.layers.events.removed.connect(_safe_refresh)
+        except Exception:
+            pass
+
+    def _ui_watchdog_tick(self):
+        now = time.perf_counter()
+        dt_ms = (now - self._ui_watchdog_last) * 1000.0
+        self._ui_watchdog_last = now
+        lag_ms = dt_ms - 250.0
+        if lag_ms < 500.0:
+            return
+        focused = QApplication.focusWidget()
+        focus_name = focused.__class__.__name__ if focused is not None else "None"
+        print(
+            f"[FlowEditor][UI] event-loop lag detected: +{lag_ms:.1f} ms "
+            f"(focus={focus_name})"
+        )
+
+        try:
+            self.viewer.layers.selection.events.changed.connect(_safe_refresh)
+        except Exception:
+            pass
+
+        try:
+            self.viewer.dims.events.order.connect(_safe_refresh)
+        except Exception:
+            pass
+        try:
+            self.viewer.dims.events.ndisplay.connect(_safe_refresh)
+        except Exception:
+            pass
 
     # HELPER TO GET UNIQUE NODE TITLE
     def get_unique_title(self, base_title):
@@ -2143,8 +2284,31 @@ class FlowEditor(QWidget):
         self.on_selection()
     
     # --- Node Selection Handler ---
-    def on_selection(self):
+    def on_selection(self, force=False):
         """Rebuilds the property panel based on selection."""
+        t0 = time.perf_counter()
+        sel = self.scene.selectedItems()
+        sel_sig = tuple(
+            sorted(
+                (
+                    f"node:{item.uid}"
+                    if isinstance(item, Node)
+                    else f"macro:{item.group_id}"
+                    if isinstance(item, MacroGroupItem)
+                    else f"other:{id(item)}"
+                )
+                for item in sel
+            )
+        )
+
+        if not force:
+            if self._is_editing_properties_widget():
+                # Avoid rebuilding form widgets while user is typing.
+                self._pending_props_refresh = True
+                return
+
+        self._last_props_selection_sig = sel_sig
+        self._pending_props_refresh = False
         self.scene.update()
         self.view.viewport().update()
         # 1. Clear current widgets
@@ -2153,7 +2317,6 @@ class FlowEditor(QWidget):
             if child.widget(): child.widget().deleteLater()
 
         # 2. Get selected node
-        sel = self.scene.selectedItems()
         if len(sel) == 1 and isinstance(sel[0], MacroGroupItem):
             macro_item = sel[0]
             group = self.macro_groups.get(macro_item.group_id, {})
@@ -2305,7 +2468,7 @@ class FlowEditor(QWidget):
                             if not ch:
                                 return
                             self._set_pending_layer_choice(nuid, ch)
-                            self.on_selection()
+                            self.on_selection(force=True)
 
                         widget.currentIndexChanged.connect(_on_choice_change)
                     self.props_layout.addRow("Select Layer:", widget)
@@ -2359,14 +2522,28 @@ class FlowEditor(QWidget):
                     widget.setRange(conf.get("min", -9999.0), conf.get("max", 9999.0))
                     widget.setSingleStep(conf.get("step", 0.1))
                     widget.setValue(float(current_val))
+                    # Avoid firing graph-invalidations on every keystroke.
+                    widget.setKeyboardTracking(False)
                     widget.valueChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    widget.editingFinished.connect(
+                        lambda w=widget, n=node, k=param_name: self.update_param(
+                            n, k, float(w.value())
+                        )
+                    )
                 
                 # INT
                 elif conf["type"] == "int":
                     widget = QSpinBox()
                     widget.setRange(conf.get("min", -9999), conf.get("max", 9999))
                     widget.setValue(int(current_val))
+                    # Make keyboard editing responsive in large graphs.
+                    widget.setKeyboardTracking(False)
                     widget.valueChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    widget.editingFinished.connect(
+                        lambda w=widget, n=node, k=param_name: self.update_param(
+                            n, k, int(w.value())
+                        )
+                    )
                 
                 # BOOL
                 elif conf["type"] == "bool":
@@ -2376,8 +2553,11 @@ class FlowEditor(QWidget):
                 
                 # ENUM (Standard static dropdowns from library)
                 elif conf["type"] == "enum":
+                    enum_conf = conf
+                    if node.node_type == "make_video" and param_name == "axis":
+                        enum_conf = self._prepare_video_axis_enum_config(conf, current_val)
                     widget = QComboBox()
-                    widget.addItems(conf.get("options", []))
+                    widget.addItems(enum_conf.get("options", []))
                     widget.setCurrentText(str(current_val))
                     widget.currentTextChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                 
@@ -2388,6 +2568,7 @@ class FlowEditor(QWidget):
                     layout.setContentsMargins(0, 0, 0, 0)
                     
                     line_edit = QLineEdit(str(current_val))
+                    line_edit.setClearButtonEnabled(True)
                     browse_btn = QPushButton("...")
                     browse_btn.setFixedWidth(30)
                     
@@ -2396,41 +2577,77 @@ class FlowEditor(QWidget):
                     
                     # --- FIX 2: Pass 'conf' (c=conf) to capture the loop variable properly ---
                     def open_file_dialog(le=line_edit, n=node, k=param_name, c=conf):
-                        mode = c.get("mode", "file") 
+                        mode = str(c.get("mode", "file")).strip().lower()
                         if mode == "directory":
-                            path = QFileDialog.getExistingDirectory(self, "Select Directory")
+                            path = QFileDialog.getExistingDirectory(
+                                self, "Select Directory"
+                            )
                         else:
-                            path, _ = QFileDialog.getOpenFileName(self, "Select File")
+                            file_filter = (
+                                str(c.get("filter", "All Files (*)")).strip()
+                                or "All Files (*)"
+                            )
+                            path, _ = QFileDialog.getOpenFileName(
+                                self,
+                                "Select File",
+                                "",
+                                file_filter,
+                            )
                             
                         if path:
                             le.setText(path)
                             self.update_param(n, k, path)
 
                     browse_btn.clicked.connect(lambda _: open_file_dialog())
-                    line_edit.textChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    line_edit.textEdited.connect(
+                        lambda val, n=node, k=param_name: self._update_param_live(
+                            n, k, val
+                        )
+                    )
+                    line_edit.editingFinished.connect(
+                        lambda le=line_edit, n=node, k=param_name: self.update_param(
+                            n, k, le.text()
+                        )
+                    )
+                    line_edit.returnPressed.connect(
+                        lambda le=line_edit, n=node, k=param_name: self.update_param(
+                            n, k, le.text()
+                        )
+                    )
                     
                     widget = widget_container
                 
                 # TABLE
                 elif conf["type"] == "table":
-                    limit = conf.get('max_rows', None) 
+                    table_conf = conf
+                    if node.node_type == "make_video" and param_name == "instructions":
+                        table_conf = self._prepare_video_instructions_table_config(
+                            conf, current_val
+                        )
+
+                    limit = table_conf.get('max_rows', None) 
                     
-                    is_row_unique = conf.get('row_unique', False)
-                    allow_list = conf.get('allow_duplicates', [])
+                    is_row_unique = table_conf.get('row_unique', False)
+                    allow_list = table_conf.get('allow_duplicates', [])
                     # Pass 'limit' to the class here:
                     widget = DynamicTableWidget(
-                        conf.get('columns', []), 
+                        table_conf.get('columns', []), 
                         max_rows=limit, 
                         row_unique=is_row_unique,
                         allow_duplicates=allow_list
                     )
 
                     # Load Data
-                    val_to_load = current_val if current_val is not None else conf.get('value', [])
+                    val_to_load = current_val if current_val is not None else table_conf.get('value', [])
                     widget.set_value(val_to_load)
 
-                    # Connect Signal
-                    widget.valueChanged.connect(lambda data, n=node, k=param_name: self.update_param(n, k, data))
+                    # Connect Signal (debounced): table edits can emit many
+                    # updates while user is still interacting.
+                    widget.valueChanged.connect(
+                        lambda data, n=node, k=param_name: self._schedule_param_update(
+                            n, k, data, delay_ms=260
+                        )
+                    )
                     
                     self.props_layout.addRow(param_name.capitalize(), widget)
                     continue
@@ -2440,7 +2657,22 @@ class FlowEditor(QWidget):
                 # STRING / OTHER
                 else:
                     widget = QLineEdit(str(current_val))
-                    widget.textChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    widget.setClearButtonEnabled(True)
+                    widget.textEdited.connect(
+                        lambda val, n=node, k=param_name: self._update_param_live(
+                            n, k, val
+                        )
+                    )
+                    widget.editingFinished.connect(
+                        lambda w=widget, n=node, k=param_name: self.update_param(
+                            n, k, w.text()
+                        )
+                    )
+                    widget.returnPressed.connect(
+                        lambda w=widget, n=node, k=param_name: self.update_param(
+                            n, k, w.text()
+                        )
+                    )
 
                 self.props_layout.addRow(param_name.capitalize(), widget)
 
@@ -2562,6 +2794,15 @@ class FlowEditor(QWidget):
             else:
                 self.props_layout.addRow(QLabel("<em>No cached result.</em>"))
 
+        if self._debug_ui_perf:
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            if elapsed_ms >= 80.0:
+                try:
+                    target = node.title if "node" in locals() else "(none)"
+                except Exception:
+                    target = "(unknown)"
+                print(f"[FlowEditor][UI] on_selection({target}) took {elapsed_ms:.1f} ms")
+
     def _remove_edge(self, edge):
         if edge.start_socket and edge in edge.start_socket.connected_edges:
             edge.start_socket.connected_edges.remove(edge)
@@ -2646,13 +2887,684 @@ class FlowEditor(QWidget):
         if (any_socket_type_changed or disconnected_messages) and len(selected) == 1 and selected[0] is node:
             self.on_selection()
 
+    def _prepare_video_axis_enum_config(self, conf, current_val):
+        """
+        Build robust axis choices for Make Video based on current viewer dims.
+
+        Values are plain strings so they remain JSON/pipeline-friendly:
+        - none
+        - t/z/y/x aliases when resolvable
+        - idx:N for explicit axis addressing
+        """
+        if not isinstance(conf, dict):
+            return conf
+
+        enum_conf = copy.deepcopy(conf)
+        options = []
+        seen = set()
+
+        def _add(value):
+            v = str(value).strip()
+            if not v or v in seen:
+                return
+            seen.add(v)
+            options.append(v)
+
+        _add("none")
+
+        dims = getattr(self.viewer, "dims", None)
+        if dims is None:
+            enum_conf["options"] = options
+            return enum_conf
+
+        labels = [str(lbl).strip() for lbl in getattr(dims, "axis_labels", ())]
+        labels_l = [lbl.lower() for lbl in labels]
+        nsteps = tuple(int(s) for s in getattr(dims, "nsteps", ()) or ())
+        ndim = int(getattr(dims, "ndim", max(len(labels), len(nsteps), 0)) or 0)
+        ndim = max(ndim, len(labels), len(nsteps))
+
+        alias_idx = {}
+
+        def _set_alias(alias, idx):
+            if alias not in alias_idx and idx is not None and 0 <= idx < ndim:
+                alias_idx[alias] = int(idx)
+
+        for i, label in enumerate(labels_l):
+            if label in ("t", "time"):
+                _set_alias("t", i)
+            elif label in ("z", "depth"):
+                _set_alias("z", i)
+            elif label == "y":
+                _set_alias("y", i)
+            elif label == "x":
+                _set_alias("x", i)
+
+        if ndim >= 1:
+            _set_alias("x", ndim - 1)
+        if ndim >= 2:
+            _set_alias("y", ndim - 2)
+        if ndim >= 3:
+            _set_alias("z", ndim - 3)
+
+        if "t" not in alias_idx:
+            for i in range(max(0, ndim - 2)):
+                steps = nsteps[i] if i < len(nsteps) else 0
+                if int(steps) > 1:
+                    _set_alias("t", i)
+                    break
+            if "t" not in alias_idx and ndim >= 3:
+                _set_alias("t", 0)
+
+        for key in ("t", "z", "y", "x"):
+            if key in alias_idx:
+                _add(key)
+
+        for i in range(ndim):
+            label = labels[i] if i < len(labels) and labels[i] else f"axis_{i}"
+            steps = nsteps[i] if i < len(nsteps) else "?"
+            _add(f"idx:{i} ({label}, n={steps})")
+
+        current = str(current_val if current_val is not None else "").strip()
+        if current:
+            _add(current)
+
+        enum_conf["options"] = options
+        return enum_conf
+
+    def _video_axis_index_options(self):
+        dims = getattr(self.viewer, "dims", None)
+        if dims is None:
+            return ["idx:0"]
+        labels = [str(lbl).strip() for lbl in getattr(dims, "axis_labels", ())]
+        nsteps = tuple(int(s) for s in getattr(dims, "nsteps", ()) or ())
+        ndim = int(getattr(dims, "ndim", max(len(labels), len(nsteps), 0)) or 0)
+        ndim = max(ndim, len(labels), len(nsteps), 1)
+
+        out = []
+        for i in range(ndim):
+            label = labels[i] if i < len(labels) and labels[i] else f"axis_{i}"
+            steps = nsteps[i] if i < len(nsteps) else "?"
+            out.append(f"idx:{i} ({label}, n={steps})")
+        return out or ["idx:0"]
+
+    def _prepare_video_instructions_table_config(self, conf, current_val):
+        if not isinstance(conf, dict):
+            return conf
+        table_conf = copy.deepcopy(conf)
+        columns = table_conf.get("columns", [])
+        axis_col = next(
+            (
+                c
+                for c in columns
+                if isinstance(c, dict) and c.get("name") == "axis"
+            ),
+            None,
+        )
+        if axis_col is None:
+            return table_conf
+
+        options = self._video_axis_index_options()
+        if isinstance(current_val, list):
+            # Keep rows in sync with currently valid dims options.
+            default_axis = options[0] if options else "idx:0"
+            for row in current_val:
+                if not isinstance(row, dict):
+                    continue
+                op = str(row.get("op", "")).strip().lower()
+                if op != "sweep":
+                    continue
+                axis_val = str(row.get("axis", "")).strip()
+                if not axis_val or axis_val not in options:
+                    row["axis"] = default_axis
+        axis_col["options"] = options
+        return table_conf
+
+    def _build_video_value_sequence(self, start, end, step):
+        step_abs = abs(float(step))
+        if step_abs < 1e-12:
+            return []
+        start_f = float(start)
+        end_f = float(end)
+        values = []
+        if end_f >= start_f:
+            v = start_f
+            while v <= (end_f + 1e-9):
+                values.append(float(v))
+                v += step_abs
+        else:
+            v = start_f
+            while v >= (end_f - 1e-9):
+                values.append(float(v))
+                v -= step_abs
+        if not values:
+            return [end_f]
+        if abs(values[-1] - end_f) > 1e-8:
+            values.append(end_f)
+        return values
+
+    def _parse_video_instructions(self, instructions):
+        if instructions is None:
+            instructions = []
+        if isinstance(instructions, str):
+            text = instructions.strip()
+            if text:
+                try:
+                    instructions = json.loads(text)
+                except Exception:
+                    # Keep original value for downstream type check/error.
+                    pass
+        if isinstance(instructions, dict):
+            instructions = [instructions]
+        if not isinstance(instructions, list):
+            return None, "instructions must be a list."
+
+        dims = self.viewer.dims
+        nsteps = tuple(getattr(dims, "nsteps", ()))
+        actions = []
+        segment_info = []
+        needs_3d = False
+        needs_2d_rotate = False
+
+        for row_idx, row in enumerate(instructions, start=1):
+            if not isinstance(row, dict):
+                continue
+            op = str(row.get("op", "rotate")).strip().lower()
+            if not op:
+                op = "rotate"
+            if op not in ("rotate", "sweep"):
+                return None, f"row {row_idx}: unknown operation '{op}'."
+            view_mode = str(row.get("view", "keep")).strip().lower()
+            if view_mode not in ("keep", "2d", "3d"):
+                view_mode = "keep"
+            if view_mode == "3d":
+                needs_3d = True
+
+            try:
+                start_raw = row.get("start", 0.0)
+                if start_raw in ("", None):
+                    start_raw = 0.0
+                start = float(start_raw)
+
+                end_default = 360.0 if op == "rotate" else start
+                end_raw = row.get("end", end_default)
+                if end_raw in ("", None):
+                    end_raw = end_default
+                end = float(end_raw)
+
+                step_raw = row.get("step", 1.0)
+                if step_raw in ("", None):
+                    step_raw = 1.0
+                step = float(step_raw)
+            except Exception:
+                return None, f"row {row_idx}: start/end/step must be numeric."
+            if abs(step) < 1e-12:
+                return None, f"row {row_idx}: step must be non-zero."
+            values = self._build_video_value_sequence(start, end, step)
+            if not values:
+                return None, f"row {row_idx}: empty value sequence."
+
+            if op == "sweep":
+                axis_name = str(row.get("axis", "")).strip().lower()
+                if not axis_name or axis_name in ("none", "off"):
+                    axis_opts = self._video_axis_index_options()
+                    axis_name = axis_opts[0] if axis_opts else "idx:0"
+                axis_idx = self._resolve_video_axis_index(axis_name)
+                if axis_idx is None:
+                    return None, f"row {row_idx}: invalid sweep axis '{axis_name}'."
+                if axis_idx >= len(nsteps) or int(nsteps[axis_idx]) <= 0:
+                    return None, f"row {row_idx}: sweep axis {axis_idx} has no steps."
+                axis_max = int(nsteps[axis_idx]) - 1
+                for value in values:
+                    actions.append(
+                        {
+                            "op": "sweep",
+                            "row": row_idx,
+                            "view_mode": view_mode,
+                            "axis_idx": axis_idx,
+                            "axis_max": axis_max,
+                            "value": int(round(value)),
+                        }
+                    )
+                segment_info.append(
+                    f"row {row_idx}: sweep axis={axis_name} view={view_mode} start={start} end={end} step={step}"
+                )
+                continue
+
+            # rotate
+            direction = str(row.get("direction", "clockwise")).strip().lower()
+            if direction not in ("clockwise", "counterclockwise"):
+                direction = "clockwise"
+            dir_sign = -1.0 if direction == "clockwise" else 1.0
+            space = str(row.get("space", "3d")).strip().lower()
+            if space not in ("2d", "3d"):
+                space = "3d"
+
+            if space == "2d":
+                needs_2d_rotate = True
+                for value in values:
+                    actions.append(
+                        {
+                            "op": "rotate2d",
+                            "row": row_idx,
+                            "view_mode": view_mode,
+                            "value": dir_sign * float(value),
+                        }
+                    )
+                segment_info.append(
+                    f"row {row_idx}: rotate2d view={view_mode} dir={direction} start={start} end={end} step={step}"
+                )
+            else:
+                rot_axis = str(row.get("rot_axis", "z")).strip().lower()
+                axis_map = {
+                    # Preferred options in current UI.
+                    "x": "x",
+                    "y": "y",
+                    "z": "z",
+                    # Back-compat aliases from previous UI labels.
+                    "pitch": "x",
+                    "roll": "y",
+                    "yaw": "z",
+                }
+                if rot_axis not in axis_map:
+                    rot_axis = "z"
+                needs_3d = True
+                rot_axis_camera = axis_map[rot_axis]
+                for value in values:
+                    actions.append(
+                        {
+                            "op": "rotate3d",
+                            "row": row_idx,
+                            "view_mode": view_mode,
+                            "rot_axis_camera": rot_axis_camera,
+                            "value": dir_sign * float(value),
+                        }
+                    )
+                segment_info.append(
+                    f"row {row_idx}: rotate3d axis={rot_axis_camera} view={view_mode} dir={direction} start={start} end={end} step={step}"
+                )
+
+        if not actions:
+            return None, "no valid instruction rows."
+
+        return {
+            "actions": actions,
+            "segments": segment_info,
+            "needs_3d": needs_3d,
+            "needs_2d_rotate": needs_2d_rotate,
+        }, None
+
+    def _resolve_video_axis_index(self, axis_name):
+        key = str(axis_name or "none").strip().lower()
+        if key in ("none", "", "off"):
+            return None
+
+        m = re.search(r"idx\s*:\s*(-?\d+)", key)
+        if m:
+            try:
+                idx = int(m.group(1))
+                return idx if idx >= 0 else None
+            except Exception:
+                return None
+        if key.lstrip("-").isdigit():
+            try:
+                idx = int(key)
+                return idx if idx >= 0 else None
+            except Exception:
+                return None
+
+        labels = [
+            str(label).strip().lower()
+            for label in getattr(self.viewer.dims, "axis_labels", ())
+        ]
+        for i, label in enumerate(labels):
+            if label == key:
+                return i
+
+        alias_map = {
+            "t": {"t", "time"},
+            "z": {"z", "depth"},
+            "y": {"y"},
+            "x": {"x"},
+        }
+        aliases = alias_map.get(key, {key})
+        for i, label in enumerate(labels):
+            if label in aliases:
+                return i
+
+        ndim = int(getattr(self.viewer.dims, "ndim", len(labels) or 0))
+        fallback = {
+            "x": ndim - 1,
+            "y": ndim - 2 if ndim >= 2 else None,
+            "z": ndim - 3 if ndim >= 3 else None,
+            "t": 0 if ndim >= 3 else None,
+        }
+        idx = fallback.get(key)
+        if idx is None or idx < 0 or idx >= ndim:
+            return None
+        return idx
+
+    def _snapshot_viewer_state(self):
+        dims = self.viewer.dims
+        camera = self.viewer.camera
+        return {
+            "current_step": tuple(getattr(dims, "current_step", ())),
+            "ndisplay": int(getattr(dims, "ndisplay", 2)),
+            "camera_angles": tuple(getattr(camera, "angles", (0.0, 0.0, 0.0))),
+            "camera_center": tuple(getattr(camera, "center", (0.0, 0.0, 0.0))),
+            "camera_zoom": float(getattr(camera, "zoom", 1.0)),
+            "layer_visibility": {
+                str(getattr(layer, "name", "")): bool(getattr(layer, "visible", True))
+                for layer in list(self.viewer.layers)
+            },
+        }
+
+    def _restore_viewer_state(self, state):
+        if not isinstance(state, dict):
+            return
+
+        dims = self.viewer.dims
+        camera = self.viewer.camera
+
+        try:
+            dims.ndisplay = int(state.get("ndisplay", getattr(dims, "ndisplay", 2)))
+        except Exception:
+            pass
+
+        saved_steps = tuple(state.get("current_step", ()))
+        current_steps = tuple(getattr(dims, "current_step", ()))
+        if len(saved_steps) == len(current_steps):
+            for axis, step in enumerate(saved_steps):
+                try:
+                    dims.set_current_step(axis, int(step))
+                except Exception:
+                    pass
+
+        for layer in list(self.viewer.layers):
+            name = str(getattr(layer, "name", ""))
+            if name in state.get("layer_visibility", {}):
+                try:
+                    layer.visible = bool(state["layer_visibility"][name])
+                except Exception:
+                    pass
+
+        try:
+            camera.angles = tuple(state.get("camera_angles", camera.angles))
+        except Exception:
+            pass
+        try:
+            camera.center = tuple(state.get("camera_center", camera.center))
+        except Exception:
+            pass
+        try:
+            camera.zoom = float(state.get("camera_zoom", camera.zoom))
+        except Exception:
+            pass
+
+        QApplication.processEvents()
+
+    def _normalize_video_frame(self, frame):
+        arr = np.asarray(frame)
+        if arr.ndim == 2:
+            arr = np.stack([arr, arr, arr], axis=-1)
+        if arr.ndim == 3 and arr.shape[-1] == 4:
+            arr = arr[..., :3]
+        if arr.ndim != 3 or arr.shape[-1] != 3:
+            raise ValueError(f"Unexpected screenshot shape: {arr.shape}")
+
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.float32, copy=False)
+            max_val = float(np.nanmax(arr)) if arr.size else 0.0
+            if max_val <= 1.0:
+                arr = arr * 255.0
+            arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
+        return arr
+
+    def _next_available_video_path(self, folder, filename, ext):
+        base = str(filename or "napari_video").strip() or "napari_video"
+        ext = str(ext or ".mp4").strip().lower()
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+
+        candidate = os.path.join(folder, f"{base}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+
+        idx = 1
+        while True:
+            candidate = os.path.join(folder, f"{base}_{idx:03d}{ext}")
+            if not os.path.exists(candidate):
+                return candidate
+            idx += 1
+
+    def _render_video_interaction(self, pending):
+        config = pending.get("config", {}) if isinstance(pending, dict) else {}
+        video_params = dict(config.get("video_params", {}) or {})
+
+        instructions = video_params.get("instructions", [])
+        fps = int(video_params.get("fps", 20))
+        out_format = str(video_params.get("format", ".mp4")).strip().lower()
+        folder = str(video_params.get("folder", "")).strip()
+        filename = str(video_params.get("filename", "napari_video")).strip()
+
+        if fps <= 0 or fps > 120:
+            self.append_log("❌ Make Video: 'fps' must be between 1 and 120.")
+            return None
+        if not folder:
+            self.append_log("❌ Make Video: select a save folder.")
+            return None
+
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as exc:
+            self.append_log(f"❌ Make Video: cannot create folder '{folder}': {exc}")
+            return None
+
+        if out_format not in (".mp4", ".gif"):
+            self.append_log("❌ Make Video: format must be .mp4 or .gif.")
+            return None
+
+        if out_format == ".mp4" and importlib.util.find_spec("imageio_ffmpeg") is None:
+            self.append_log(
+                "❌ Make Video: MP4 export requires imageio-ffmpeg. "
+                "Install it or switch format to .gif."
+            )
+            return None
+
+        parsed, parse_error = self._parse_video_instructions(instructions)
+        if parse_error:
+            self.append_log(f"❌ Make Video: {parse_error}")
+            return None
+
+        actions = parsed["actions"]
+        total_frames = len(actions)
+        if total_frames <= 0:
+            self.append_log("❌ Make Video: no frames generated from instructions.")
+            return None
+
+        if parsed["needs_3d"]:
+            ndim = int(getattr(self.viewer.dims, "ndim", 2))
+            if ndim < 3:
+                self.append_log("❌ Make Video: 3D rotate rows require ndim >= 3.")
+                return None
+
+        output_path = self._next_available_video_path(folder, filename, out_format)
+        meta_path = os.path.splitext(output_path)[0] + "_meta.json"
+
+        import imageio.v2 as iio
+        sk_rotate = None
+        if parsed["needs_2d_rotate"]:
+            try:
+                from skimage.transform import rotate as sk_rotate
+            except Exception as exc:
+                self.append_log(f"❌ Make Video: 2D rotation unavailable ({exc}).")
+                return None
+
+        self.append_log(
+            f"🎬 Make Video: rendering {total_frames} frames at {fps} FPS -> {output_path}"
+        )
+        for segment in parsed["segments"]:
+            self.append_log(f"   - {segment}")
+        self.append_log("   - visibility: using current viewer state")
+
+        state = self._snapshot_viewer_state()
+        run_enabled = self.btn_interaction_run.isEnabled()
+        cancel_enabled = self.btn_interaction_cancel.isEnabled()
+        self.btn_interaction_run.setEnabled(False)
+        self.btn_interaction_cancel.setEnabled(False)
+        try:
+            writer_kwargs = {"fps": fps}
+            if out_format == ".mp4":
+                writer_kwargs.update(
+                    {
+                        "codec": "libx264",
+                        "ffmpeg_params": ["-pix_fmt", "yuv420p"],
+                    }
+                )
+            else:
+                writer_kwargs = {"mode": "I", "duration": 1.0 / float(fps), "loop": 0}
+
+            first_shape = None
+            progress_every = max(1, total_frames // 10)
+            rotate3d_row_base = {}
+            current_ndisplay = int(getattr(self.viewer.dims, "ndisplay", 2))
+            with iio.get_writer(output_path, **writer_kwargs) as writer:
+                for i, action in enumerate(actions):
+                    view_mode = str(action.get("view_mode", "keep")).strip().lower()
+                    target_ndisplay = None
+                    if view_mode == "2d":
+                        target_ndisplay = 2
+                    elif view_mode == "3d":
+                        target_ndisplay = 3
+                    if target_ndisplay is not None and target_ndisplay != current_ndisplay:
+                        try:
+                            self.viewer.dims.ndisplay = target_ndisplay
+                            current_ndisplay = target_ndisplay
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+                    op = action["op"]
+                    if op == "sweep":
+                        target = max(0, min(int(action["axis_max"]), int(action["value"])))
+                        self.viewer.dims.set_current_step(int(action["axis_idx"]), target)
+                    elif op == "rotate3d":
+                        try:
+                            row_id = int(action.get("row", -1))
+                            if row_id not in rotate3d_row_base:
+                                row_angles = list(getattr(self.viewer.camera, "angles", (0.0, 0.0, 0.0)))
+                                while len(row_angles) < 3:
+                                    row_angles.append(0.0)
+                                rotate3d_row_base[row_id] = [float(v) for v in row_angles]
+
+                            axis_idx = {
+                                "x": 0,
+                                "y": 1,
+                                "z": 2,
+                            }.get(str(action.get("rot_axis_camera", "z")), 2)
+                            theta_deg = float(action["value"])
+                            base = list(rotate3d_row_base[row_id])
+                            new_angles = list(base)
+                            new_angles[axis_idx] = float(base[axis_idx]) + theta_deg
+                            self.viewer.camera.angles = tuple(float(v) for v in new_angles[:3])
+                        except Exception:
+                            pass
+
+                    QApplication.processEvents()
+                    frame = self.viewer.screenshot(canvas_only=True, flash=False)
+                    frame_rgb = self._normalize_video_frame(frame)
+                    if op == "rotate2d":
+                        frame_rgb = sk_rotate(
+                            frame_rgb,
+                            angle=float(action["value"]),
+                            resize=False,
+                            mode="edge",
+                            preserve_range=True,
+                        ).astype(np.uint8)
+
+                    if first_shape is None:
+                        first_shape = frame_rgb.shape
+                    elif frame_rgb.shape != first_shape:
+                        raise ValueError(
+                            f"Frame size changed during capture: {frame_rgb.shape} != {first_shape}"
+                        )
+
+                    writer.append_data(frame_rgb)
+                    if (i + 1) % progress_every == 0 or i == total_frames - 1:
+                        self.append_log(f"   - frame {i + 1}/{total_frames}")
+
+            meta_payload = {
+                "created_at": datetime.datetime.now().isoformat(),
+                "output_path": output_path,
+                "format": out_format,
+                "frames": total_frames,
+                "fps": fps,
+                "instructions": instructions,
+                "segments": parsed["segments"],
+            }
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_payload, f, indent=2)
+
+            self.append_log(f"✅ Make Video: saved {output_path}")
+            return {
+                "output_path": output_path,
+                "meta_path": meta_path,
+                "frames": total_frames,
+                "fps": fps,
+                "format": out_format,
+            }
+        except Exception as exc:
+            self.append_log(f"❌ Make Video failed: {exc}")
+            return None
+        finally:
+            self._restore_viewer_state(state)
+            self.btn_interaction_run.setEnabled(run_enabled)
+            self.btn_interaction_cancel.setEnabled(cancel_enabled)
+
     def update_param(self, node, param_name, value):
         """Updates a parameter and invalidates the node."""
+        old_value = node.parameters.get(param_name)
+        try:
+            if old_value == value:
+                return
+        except Exception:
+            pass
         node.parameters[param_name] = value
         # When a parameter changes, this node and all downstream nodes become "stale"
         self.set_node_status_recursive(node, "gray")
         self._refresh_dynamic_output_types(node, changed_param=param_name)
-        self.scene.update() 
+        self.scene.update()
+        if self._pending_props_refresh and not self._is_editing_properties_widget():
+            self._pending_props_refresh = False
+            self.on_selection(force=True)
+
+    def _schedule_param_update(self, node, param_name, value, delay_ms=120):
+        """
+        Debounce text updates so typing stays responsive while still keeping
+        node parameters in sync.
+        """
+        self._pending_param_updates[(node.uid, param_name)] = (node, param_name, value)
+        self._param_update_timer.start(max(30, int(delay_ms)))
+
+    def _update_param_live(self, node, param_name, value):
+        """
+        Lightweight live update for text fields while typing.
+        Keeps editor state in sync without triggering expensive graph
+        invalidation/repaint on every key.
+        """
+        try:
+            node.parameters[param_name] = value
+        except Exception:
+            pass
+
+    def _flush_pending_param_updates(self):
+        if not self._pending_param_updates:
+            return
+        pending = list(self._pending_param_updates.values())
+        self._pending_param_updates.clear()
+        for node, param_name, value in pending:
+            if isinstance(node, Node):
+                self.update_param(node, param_name, value)
 
     def set_node_status_recursive(self, node, status):
         """Sets status of a node and recursively updates all downstream nodes."""
@@ -3154,6 +4066,9 @@ class FlowEditor(QWidget):
 
     # --- Run Pipeline Method ---
     def run_pipeline(self):
+        # Ensure debounced parameter edits (especially table edits) are committed
+        # before validation/execution starts.
+        self._flush_pending_param_updates()
         # 1. Validate graph before creating worker/thread.
         self.console.clear()
         errors, warnings = self.validate_pipeline_graph()
@@ -3360,6 +4275,12 @@ class FlowEditor(QWidget):
         pending = self._pending_interaction
         if not pending:
             return
+        if pending.get("interaction_type") == "video_render":
+            payload = self._render_video_interaction(pending)
+            if payload is None:
+                return
+            self._finish_pending_interaction(data=payload, notify_worker=True)
+            return
         if pending.get("interaction_type") == "layer_choice":
             selected = pending.get("selected_choice")
             if not selected:
@@ -3422,6 +4343,16 @@ class FlowEditor(QWidget):
           3. Run/Cancel in the panel calls ``worker.provide_interaction_result``.
         """
         interaction_type = str(config.get("interaction_type", "shapes")).strip().lower()
+        if interaction_type == "video_render":
+            self._pending_interaction = {
+                "node_uid": node_uid,
+                "config": config,
+                "interaction_type": "video_render",
+            }
+            self._update_interaction_bar()
+            self._select_node_for_properties(node_uid)
+            return
+
         if interaction_type == "layer_choice":
             choices = list(config.get("choices", []) or [])
             if not choices:
@@ -3496,6 +4427,18 @@ class FlowEditor(QWidget):
         }
         self._update_interaction_bar()
         self._select_node_for_properties(node_uid)
+
+    def _refresh_selected_make_video_properties(self):
+        sel = self.scene.selectedItems()
+        if len(sel) != 1:
+            return
+        node = sel[0]
+        if not isinstance(node, Node):
+            return
+        if getattr(node, "node_type", "") != "make_video":
+            return
+        # Never force while user may be editing fields.
+        self.on_selection()
 
     def handle_execution_result(self, node_title, output_name, data):
         # 1. Update Cache

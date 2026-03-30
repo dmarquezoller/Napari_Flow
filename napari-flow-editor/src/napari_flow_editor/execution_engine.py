@@ -634,6 +634,10 @@ class ExecutionWorker(QObject):
 
                 prepared_interactive_config["choices"] = choices
                 prepared_interactive_config["default_index"] = default_index
+            elif interaction_type == "video_render":
+                # Video rendering is performed on the main thread (UI-side),
+                # but it must use the current node parameter values.
+                prepared_interactive_config["video_params"] = dict(clean_params)
 
             self.log_signal.emit(
                 f"⏳ Waiting for user interaction on '{node.title}'..."

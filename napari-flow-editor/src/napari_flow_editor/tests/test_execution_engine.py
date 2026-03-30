@@ -198,3 +198,66 @@ def test_execute_node_logic_preserves_name_for_input_category_nodes(worker):
     result = worker.execute_node_logic(node, library_def)
     _, meta = result["out"]
     assert meta["name"] == "nuclei"
+
+
+def test_execute_node_logic_video_render_injects_current_params(worker):
+    captured = {}
+
+    def _fake_request(node_uid, config):
+        captured["node_uid"] = node_uid
+        captured["config"] = config
+        return {"output_path": "/tmp/demo.mp4", "frames": 5}
+
+    worker._request_interaction = _fake_request
+
+    node = FakeNode(
+        node_type="video_node",
+        title="Make Video",
+        params={
+            "instructions": [
+                {
+                    "op": "rotate",
+                    "space": "3d",
+                    "rot_axis": "z",
+                    "direction": "clockwise",
+                    "start": 0.0,
+                    "end": 10.0,
+                    "step": 1.0,
+                    "axis": None,
+                }
+            ],
+            "fps": 12,
+            "format": ".gif",
+            "folder": "/tmp",
+            "filename": "demo",
+        },
+        inputs=[],
+        outputs=[],
+    )
+
+    def _video_sink(
+        instructions=None,
+        fps=20,
+        format=".mp4",
+        folder="",
+        filename="video",
+        interaction=None,
+    ):
+        assert isinstance(interaction, dict)
+        assert interaction["frames"] == 5
+        return None
+
+    library_def = {
+        "video_node": {
+            "outputs": [],
+            "interactive": {"interaction_type": "video_render"},
+            "executable": _video_sink,
+        }
+    }
+
+    result = worker.execute_node_logic(node, library_def)
+    assert result == {}
+    assert captured["config"]["interaction_type"] == "video_render"
+    assert isinstance(captured["config"]["video_params"]["instructions"], list)
+    assert captured["config"]["video_params"]["fps"] == 12
+    assert captured["config"]["video_params"]["instructions"][0]["op"] == "rotate"
