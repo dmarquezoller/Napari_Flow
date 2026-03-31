@@ -86,6 +86,37 @@ def open_ome_zarr(path: str = ""):
 
 
 
+@register_node(
+    label="Open Image File",
+    category="Input",
+    outputs=["data"],
+    output_types={"data": "layers"},
+    params_config={
+        "path": {
+            "type": "path",
+            "mode": "file",
+            "filter": (
+                "Image Files (*.tif *.tiff *.ome.tif *.ome.tiff *.png *.jpg *.jpeg *.bmp);;"
+                "All Files (*)"
+            ),
+        },
+    },
+)
+def open_image_file(path: str = ""):
+    """
+    Open a regular image file (e.g. TIFF) using napari's reader plugins.
+    Returns a list of LayerDataTuples, same contract as Open Ome-Zarr.
+    """
+    if not path or not os.path.exists(path):
+        raise ValueError("Path does not exist")
+
+    # napari reader API expects a list of paths and returns (layers, hookimpl)
+    layers, _ = read_data_with_plugins([path], plugin=None, stack=False)
+    if not layers:
+        raise ValueError("No layers were read from file.")
+    return layers
+
+
 # LOAD CSV NODE #
 
 @register_node(

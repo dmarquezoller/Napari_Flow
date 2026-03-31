@@ -17,6 +17,35 @@ def begin():
     """Entry point for the exec thread."""
     return None
 
+
+@register_node(
+    label="Begin Batch",
+    category="Control Flow",
+    outputs=[],
+    logic={
+        "in": False,
+        "out": True,
+        "allow_multi_in": False,
+        "allow_multi_out": False,
+    },
+    params_config={
+        "csv_path": {
+            "type": "path",
+            "mode": "file",
+            "filter": "CSV Files (*.csv);;All Files (*)",
+        }
+    },
+)
+def begin_batch(csv_path: str = ""):
+    """
+    Entry point for batch execution.
+
+    The execution engine reads one CSV row at a time and runs the connected
+    exec thread for each row.
+    """
+    return None
+
+
 # --- LOOP NODE (Control-Flow) ---
 @register_node(
     label="Loop",

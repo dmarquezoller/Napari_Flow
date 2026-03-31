@@ -1,4 +1,5 @@
 import importlib
+import csv
 import numpy as np
 import traceback
 import json
@@ -58,6 +59,9 @@ class ExecutionWorker(QObject):
         self._interaction_result = None   # set by main thread
         self._loop_stop_requested = False
         self._stop_sentinel = object()
+        self._batch_row = None
+        self._batch_index = None
+        self._batch_total = 0
 
     # Called from the **main thread** (via signal/slot) to unblock the worker.
     def provide_interaction_result(self, data):
@@ -127,6 +131,130 @@ class ExecutionWorker(QObject):
         node.last_signature = None
         node.cached_results = {}
 
+    @staticmethod
+    def _is_empty_csv_value(value):
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() == ""
+        return False
+
+    @staticmethod
+    def _coerce_csv_value(value, param_def):
+        if value is None:
+            return None
+        param_type = str((param_def or {}).get("type", "string")).strip().lower()
+        raw = value
+        if isinstance(raw, str):
+            raw = raw.strip()
+        if param_type == "int":
+            return int(float(raw))
+        if param_type == "float":
+            return float(raw)
+        if param_type == "bool":
+            if isinstance(raw, bool):
+                return raw
+            token = str(raw).strip().lower()
+            if token in ("1", "true", "yes", "y", "on"):
+                return True
+            if token in ("0", "false", "no", "n", "off"):
+                return False
+            raise ValueError(f"Cannot parse boolean value '{value}'.")
+        # enum/string/path/table fall back to raw textual value.
+        return raw
+
+    def _apply_dynamic_param_bindings(self, node, func_params, library_def):
+        if not isinstance(self._batch_row, dict):
+            return func_params
+
+        bindings = getattr(node, "dynamic_param_bindings", {}) or {}
+        if not isinstance(bindings, dict) or not bindings:
+            return func_params
+
+        params_def = (
+            (library_def.get(getattr(node, "node_type", ""), {}) or {}).get(
+                "parameters", {}
+            )
+            or {}
+        )
+        for param_name, column_name in bindings.items():
+            col = str(column_name).strip()
+            if not col:
+                continue
+            if col not in self._batch_row:
+                raise ValueError(
+                    f"Batch column '{col}' not found for "
+                    f"node '{node.title}' parameter '{param_name}'."
+                )
+            raw = self._batch_row.get(col)
+            if self._is_empty_csv_value(raw):
+                # Empty cell -> keep node's current/static parameter value.
+                continue
+            param_def = params_def.get(param_name, {})
+            try:
+                func_params[param_name] = self._coerce_csv_value(raw, param_def)
+            except Exception as exc:
+                raise ValueError(
+                    f"Invalid batch value '{raw}' for "
+                    f"node '{node.title}' parameter '{param_name}': {exc}"
+                ) from exc
+
+        return func_params
+
+    @staticmethod
+    def _detect_csv_dialect(sample_text):
+        try:
+            return csv.Sniffer().sniff(sample_text, delimiters=",;\t|")
+        except Exception:
+            return csv.excel
+
+    def _read_batch_rows(self, csv_path):
+        rows = []
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as fh:
+            sample = fh.read(4096)
+            fh.seek(0)
+            dialect = self._detect_csv_dialect(sample)
+            reader = csv.DictReader(fh, dialect=dialect)
+            fieldnames = [str(x).strip() for x in (reader.fieldnames or []) if str(x).strip()]
+            if not fieldnames:
+                raise ValueError("CSV header is empty.")
+
+            for row in reader:
+                normalized = {}
+                for key, val in (row or {}).items():
+                    k = str(key).strip()
+                    if not k:
+                        continue
+                    normalized[k] = val
+                if not normalized:
+                    continue
+                if all(self._is_empty_csv_value(v) for v in normalized.values()):
+                    continue
+                rows.append(normalized)
+
+        if not rows:
+            raise ValueError("CSV has no data rows.")
+        return rows
+
+    def _set_batch_context(self, row, index, total):
+        self._batch_row = dict(row or {})
+        self._batch_index = int(index)
+        self._batch_total = int(total)
+
+    def _clear_batch_context(self):
+        self._batch_row = None
+        self._batch_index = None
+        self._batch_total = 0
+
+    def _reset_all_nodes_for_batch(self, nodes):
+        for node in nodes:
+            try:
+                self._reset_node_cache(node)
+                node.status = "gray"
+                self.node_status_signal.emit(node.uid, "gray")
+            except Exception:
+                pass
+
     def _execute_single_node(self, node, library_def, force_recompute=False):
         try:
             current_signature = self.calculate_signature(node)
@@ -195,7 +323,7 @@ class ExecutionWorker(QObject):
                 current = self._execute_loop_node(current, library_def)
                 continue
 
-            if current.node_type == "begin":
+            if current.node_type in ("begin", "begin_batch"):
                 next_node, out_name = self._next_logic_step(current)
                 if next_node is not None and out_name is not None:
                     self.exec_transition_signal.emit(current.uid, out_name)
@@ -321,24 +449,59 @@ class ExecutionWorker(QObject):
                 self.finished_signal.emit()
                 return
 
-            begin_nodes = [n for n in nodes if getattr(n, "node_type", "") == "begin"]
+            begin_nodes = [
+                n
+                for n in nodes
+                if getattr(n, "node_type", "") in ("begin", "begin_batch")
+            ]
             if not begin_nodes:
                 raise RuntimeError(
-                    "No Begin node found. Add a Begin node and connect its exec output."
+                    "No Begin node found. Add a Begin or Begin Batch node and connect its exec output."
                 )
             if len(begin_nodes) > 1:
                 raise RuntimeError(
-                    "Multiple Begin nodes found. Use a single Begin node for execution."
+                    "Multiple Begin nodes found. Use a single Begin/Begin Batch node for execution."
                 )
 
             begin_node = begin_nodes[0]
             first_exec, begin_out = self._next_logic_step(begin_node)
+            begin_type = getattr(begin_node, "node_type", "")
+            begin_label = "Begin Batch" if begin_type == "begin_batch" else "Begin"
+
             if first_exec is None:
-                self.log_signal.emit("Begin node is not connected to any exec thread.")
+                self.log_signal.emit(
+                    f"{begin_label} node is not connected to any exec thread."
+                )
             else:
-                if begin_out is not None:
-                    self.exec_transition_signal.emit(begin_node.uid, begin_out)
-                self._execute_exec_path(first_exec, NODE_LIBRARY)
+                if begin_type == "begin_batch":
+                    csv_path = str(
+                        (getattr(begin_node, "parameters", {}) or {}).get("csv_path", "")
+                    ).strip()
+                    if not csv_path:
+                        raise RuntimeError(
+                            "Begin Batch requires a CSV path."
+                        )
+                    batch_rows = self._read_batch_rows(csv_path)
+                    total_rows = len(batch_rows)
+                    self.log_signal.emit(
+                        f"📦 Begin Batch: loaded {total_rows} row(s) from {csv_path}"
+                    )
+                    try:
+                        for i, row in enumerate(batch_rows, start=1):
+                            self._set_batch_context(row=row, index=i, total=total_rows)
+                            self._reset_all_nodes_for_batch(nodes)
+                            self.log_signal.emit(f"📄 Batch row {i}/{total_rows}")
+                            if begin_out is not None:
+                                self.exec_transition_signal.emit(begin_node.uid, begin_out)
+                            self._execute_exec_path(
+                                first_exec, NODE_LIBRARY, force_recompute=True
+                            )
+                    finally:
+                        self._clear_batch_context()
+                else:
+                    if begin_out is not None:
+                        self.exec_transition_signal.emit(begin_node.uid, begin_out)
+                    self._execute_exec_path(first_exec, NODE_LIBRARY)
 
             self.log_signal.emit("--- Execution Finished ---")
 
@@ -549,6 +712,7 @@ class ExecutionWorker(QObject):
         func_params = getattr(node, 'params', {}).copy()
         if not func_params and hasattr(node, 'parameters'):
              func_params = node.parameters.copy()
+        func_params = self._apply_dynamic_param_bindings(node, func_params, library_def)
         
         # --- SPECIAL CASE: GET LAYER (RESTORED EXACTLY AS WAS) ---
         # This accesses self.viewer directly, just like your old code.

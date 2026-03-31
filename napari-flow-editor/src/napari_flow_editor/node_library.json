@@ -14,6 +14,28 @@
       "allow_multi_out": false
     }
   },
+  "begin_batch": {
+    "label": "Begin Batch",
+    "category": "Control Flow",
+    "inputs": [],
+    "outputs": [],
+    "parameters": {
+      "csv_path": {
+        "type": "path",
+        "default": "",
+        "mode": "file",
+        "filter": "CSV Files (*.csv);;All Files (*)"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.control_flow.begin_batch",
+    "description": "Entry point for batch execution.\n\nThe execution engine reads one CSV row at a time and runs the connected\nexec thread for each row.",
+    "logic": {
+      "in": false,
+      "out": true,
+      "allow_multi_in": false,
+      "allow_multi_out": false
+    }
+  },
   "loop_control": {
     "label": "Loop",
     "category": "Control Flow",
@@ -1833,6 +1855,33 @@
       "csv_data": "table"
     }
   },
+  "open_image_file": {
+    "label": "Open Image File",
+    "category": "Input",
+    "inputs": [],
+    "outputs": [
+      "data"
+    ],
+    "parameters": {
+      "path": {
+        "type": "path",
+        "default": "",
+        "mode": "file",
+        "filter": "Image Files (*.tif *.tiff *.ome.tif *.ome.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.inputs.open_image_file",
+    "description": "Open a regular image file (e.g. TIFF) using napari's reader plugins.\nReturns a list of LayerDataTuples, same contract as Open Ome-Zarr.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "output_types": {
+      "data": "layers"
+    }
+  },
   "open_ome_zarr": {
     "label": "Open Ome-Zarr",
     "category": "Input",
@@ -3004,6 +3053,184 @@
     },
     "execution_path": "napari_flow_editor.flow_nodes.transform.warp_polar",
     "description": "Remaps image to polar coordinates (Theta x Radius).\nUseful for analyzing circular objects (like clocks, irises, or radial patterns).",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    }
+  },
+  "make_video": {
+    "label": "Make Video",
+    "category": "Video",
+    "inputs": [],
+    "outputs": [],
+    "parameters": {
+      "instructions": {
+        "type": "table",
+        "default": null,
+        "value": [
+          {
+            "op": "rotate",
+            "view": "3d",
+            "space": "3d",
+            "rot_axis": "z",
+            "direction": "clockwise",
+            "axis": null,
+            "start": 0.0,
+            "end": 360.0,
+            "step": 1.0
+          }
+        ],
+        "columns": [
+          {
+            "name": "op",
+            "label": "Op",
+            "type": "enum",
+            "options": [
+              "rotate",
+              "sweep"
+            ],
+            "width": 90
+          },
+          {
+            "name": "view",
+            "label": "View",
+            "type": "enum",
+            "options": [
+              "keep",
+              "2d",
+              "3d"
+            ],
+            "width": 75
+          },
+          {
+            "name": "space",
+            "label": "Space",
+            "type": "enum",
+            "options": [
+              "2d",
+              "3d"
+            ],
+            "show_if": {
+              "op": [
+                "rotate"
+              ]
+            },
+            "width": 80
+          },
+          {
+            "name": "rot_axis",
+            "label": "Rot",
+            "type": "enum",
+            "options": [
+              "x",
+              "y",
+              "z"
+            ],
+            "show_if": {
+              "op": [
+                "rotate"
+              ],
+              "space": [
+                "3d"
+              ]
+            },
+            "width": 95
+          },
+          {
+            "name": "direction",
+            "label": "Dir",
+            "type": "enum",
+            "options": [
+              "clockwise",
+              "counterclockwise"
+            ],
+            "show_if": {
+              "op": [
+                "rotate"
+              ]
+            },
+            "width": 105
+          },
+          {
+            "name": "axis",
+            "label": "Axis",
+            "type": "enum",
+            "options": [
+              "idx:0"
+            ],
+            "show_if": {
+              "op": [
+                "sweep"
+              ]
+            },
+            "width": 120
+          },
+          {
+            "name": "start",
+            "label": "Start",
+            "type": "float",
+            "value": 0.0,
+            "step": 1.0,
+            "width": 85
+          },
+          {
+            "name": "end",
+            "label": "End",
+            "type": "float",
+            "value": 360.0,
+            "step": 1.0,
+            "width": 85
+          },
+          {
+            "name": "step",
+            "label": "Step",
+            "type": "float",
+            "value": 1.0,
+            "min": -3600.0,
+            "max": 3600.0,
+            "step": 0.5,
+            "width": 85
+          }
+        ]
+      },
+      "fps": {
+        "type": "int",
+        "default": 20,
+        "value": 20,
+        "min": 1,
+        "max": 120,
+        "label": "FPS"
+      },
+      "format": {
+        "type": "enum",
+        "default": ".mp4",
+        "options": [
+          ".mp4",
+          ".gif"
+        ],
+        "label": "Format"
+      },
+      "folder": {
+        "type": "path",
+        "default": "",
+        "mode": "directory",
+        "label": "Save Folder"
+      },
+      "filename": {
+        "type": "text",
+        "default": "napari_video",
+        "value": "napari_video",
+        "label": "Filename"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.video.make_video",
+    "description": "Renders a viewer animation to MP4/GIF.\nUse instruction rows to chain rotate/sweep segments.\nFor sweep, use axis idx options (idx:N).",
+    "interactive": {
+      "interaction_type": "video_render",
+      "prompt": "Click Run to render the video from the current viewer state."
+    },
     "logic": {
       "in": true,
       "out": true,

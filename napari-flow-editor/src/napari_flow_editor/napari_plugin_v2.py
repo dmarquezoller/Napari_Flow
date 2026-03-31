@@ -14,6 +14,7 @@ from qtpy.QtGui import (
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time
+import csv
 import html
 import numpy as np
 import dask.array as da
@@ -538,6 +539,7 @@ class Node(QGraphicsRectItem):
         self.category = "Uncategorized"
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
+        self.dynamic_param_bindings = {}
         self.description = ""
         self.logic_config = _normalize_logic_config(None)
         self.dynamic_output_types = {}
@@ -635,7 +637,7 @@ class Node(QGraphicsRectItem):
         # - Loop: exec_in + (loop_body, completed) exec_outs
         # - Source Inputs (no data inputs): no exec pins
         # - Everything else: exec_in + exec_out
-        is_begin = self.node_type == "begin"
+        is_begin = self.node_type in ("begin", "begin_batch")
         is_loop = self.node_type == "loop_control"
         is_source_input = (
             self.category in ("Inputs", "Input")
@@ -697,7 +699,7 @@ class Node(QGraphicsRectItem):
         if socket.socket_type == "logic_in":
             return "IN"
 
-        if self.node_type == "begin":
+        if self.node_type in ("begin", "begin_batch"):
             if name == "exec_out":
                 return "START"
             return "OUT"
@@ -1335,6 +1337,8 @@ class FlowEditor(QWidget):
         self._ui_watchdog_timer = QTimer(self)
         self._ui_watchdog_timer.setInterval(250)
         self._ui_watchdog_timer.timeout.connect(self._ui_watchdog_tick)
+        self._batch_interactive_warning_message = None
+        self._batch_columns_cache = {}
         if self._debug_ui_perf:
             self._ui_watchdog_timer.start()
         self.macro_groups = {}  # group_id -> {"title","member_uids","collapsed","item"}
@@ -2161,11 +2165,11 @@ class FlowEditor(QWidget):
             return
 
         for node in selected_nodes:
-            if node.node_type == "begin":
+            if node.node_type in ("begin", "begin_batch"):
                 QMessageBox.warning(
                     self,
                     "Cannot Collapse",
-                    "Begin node cannot be collapsed into a macro.",
+                    "Begin/Begin Batch nodes cannot be collapsed into a macro.",
                 )
                 return
             if self._group_for_node_uid(node.uid):
@@ -2409,6 +2413,7 @@ class FlowEditor(QWidget):
             self.props_layout.addRow(QLabel("No parameters defined."))
         else:
             params_def = NODE_LIBRARY[node.node_type]["parameters"]
+            batch_columns = self._get_batch_columns()
             pending = self._pending_interaction
             pending_layer_choice = (
                 pending
@@ -2510,8 +2515,11 @@ class FlowEditor(QWidget):
 
                     # Connect signal
                     widget.currentTextChanged.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
-                    
-                    self.props_layout.addRow("Select Layer:", widget)
+
+                    wrapped_widget = self._wrap_with_dynamic_binding_controls(
+                        node, param_name, widget, conf, batch_columns
+                    )
+                    self.props_layout.addRow("Select Layer:", wrapped_widget)
                     continue  # Skip the standard logic below for this specific parameter
                 
                 # --- B. STANDARD WIDGETS ---
@@ -2674,6 +2682,9 @@ class FlowEditor(QWidget):
                         )
                     )
 
+                widget = self._wrap_with_dynamic_binding_controls(
+                    node, param_name, widget, conf, batch_columns
+                )
                 self.props_layout.addRow(param_name.capitalize(), widget)
 
         # --- INTERACTIVE CARD (inline in parameters panel) ---
@@ -3629,6 +3640,9 @@ class FlowEditor(QWidget):
                     "label": item.title,
                     "position": {"x": item.pos().x(), "y": item.pos().y()},
                     "parameters": item.parameters,
+                    "dynamic_param_bindings": getattr(
+                        item, "dynamic_param_bindings", {}
+                    ),
                     "input_connections": input_connections,
                     "exec_connections": exec_connections,
                 }
@@ -3692,6 +3706,7 @@ class FlowEditor(QWidget):
                 node_type=n_data.get("type", "generic"),
                 pos=QPointF(pos["x"], pos["y"]),
                 loaded_params=n_data.get("parameters", {}),
+                loaded_dynamic_bindings=n_data.get("dynamic_param_bindings", {}),
                 loaded_uid=n_data.get("id"),
                 loaded_title=n_data.get("label")
             )
@@ -3825,7 +3840,15 @@ class FlowEditor(QWidget):
             action.setEnabled(False)
 
     # 2. The Creation Logic (Scene Manipulation)
-    def add_node(self, node_type, pos=None, loaded_params=None, loaded_uid=None, loaded_title=None):
+    def add_node(
+        self,
+        node_type,
+        pos=None,
+        loaded_params=None,
+        loaded_dynamic_bindings=None,
+        loaded_uid=None,
+        loaded_title=None,
+    ):
         if not pos:
             view_rect = self.view.viewport().rect()
             pos = self.view.mapToScene(view_rect.center())
@@ -3842,6 +3865,12 @@ class FlowEditor(QWidget):
         
         if loaded_params:
             node.parameters.update(loaded_params)
+        if isinstance(loaded_dynamic_bindings, dict):
+            node.dynamic_param_bindings = {
+                str(k): str(v).strip()
+                for k, v in loaded_dynamic_bindings.items()
+                if str(v).strip()
+            }
             
         self.scene.addItem(node)
         self._refresh_dynamic_output_types(node)
@@ -3953,6 +3982,163 @@ class FlowEditor(QWidget):
     def _get_all_nodes(self):
         return [item for item in self.scene.items() if isinstance(item, Node)]
 
+    def _get_begin_batch_nodes(self):
+        return [
+            n for n in self._get_all_nodes()
+            if getattr(n, "node_type", "") == "begin_batch"
+        ]
+
+    @staticmethod
+    def _detect_csv_dialect(sample_text):
+        try:
+            return csv.Sniffer().sniff(sample_text, delimiters=",;\t|")
+        except Exception:
+            return csv.excel
+
+    def _read_batch_csv_columns(self, csv_path):
+        path = str(csv_path or "").strip()
+        if not path:
+            return []
+
+        mtime = None
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            mtime = None
+
+        cached = self._batch_columns_cache.get(path)
+        if cached and cached.get("mtime") == mtime:
+            return list(cached.get("columns", []))
+
+        with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+            sample = fh.read(4096)
+            fh.seek(0)
+            dialect = self._detect_csv_dialect(sample)
+            reader = csv.reader(fh, dialect=dialect)
+            header = next(reader, [])
+            columns = [str(x).strip() for x in header if str(x).strip()]
+
+        self._batch_columns_cache[path] = {"mtime": mtime, "columns": list(columns)}
+        return columns
+
+    def _get_batch_columns(self):
+        begin_batch_nodes = self._get_begin_batch_nodes()
+        if len(begin_batch_nodes) != 1:
+            return []
+        csv_path = str(begin_batch_nodes[0].parameters.get("csv_path", "")).strip()
+        if not csv_path or not os.path.exists(csv_path):
+            return []
+        try:
+            return self._read_batch_csv_columns(csv_path)
+        except Exception:
+            return []
+
+    def _set_dynamic_param_binding(self, node, param_name, column_name):
+        if not isinstance(node, Node):
+            return
+        if not hasattr(node, "dynamic_param_bindings") or not isinstance(
+            node.dynamic_param_bindings, dict
+        ):
+            node.dynamic_param_bindings = {}
+
+        old_value = node.dynamic_param_bindings.get(param_name)
+        new_value = str(column_name).strip() if column_name is not None else ""
+        if new_value:
+            node.dynamic_param_bindings[param_name] = new_value
+        else:
+            node.dynamic_param_bindings.pop(param_name, None)
+
+        if old_value == node.dynamic_param_bindings.get(param_name):
+            return
+
+        self.set_node_status_recursive(node, "gray")
+        self.scene.update()
+
+    def _wrap_with_dynamic_binding_controls(
+        self,
+        node,
+        param_name,
+        base_widget,
+        conf,
+        batch_columns,
+    ):
+        if not isinstance(base_widget, QWidget):
+            return base_widget
+        if str(conf.get("type", "")).strip().lower() == "table":
+            return base_widget
+
+        if not hasattr(node, "dynamic_param_bindings") or not isinstance(
+            node.dynamic_param_bindings, dict
+        ):
+            node.dynamic_param_bindings = {}
+
+        stored_column = str(node.dynamic_param_bindings.get(param_name, "")).strip()
+        has_columns = bool(batch_columns)
+
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(base_widget, 1)
+
+        dyn_check = QCheckBox("Dyn")
+        dyn_check.setToolTip(
+            "Bind this parameter to a Begin Batch CSV column."
+        )
+        dyn_combo = QComboBox()
+        dyn_combo.setMinimumWidth(120)
+
+        if has_columns:
+            dyn_combo.addItems(batch_columns)
+            if stored_column:
+                idx = dyn_combo.findText(stored_column)
+                if idx >= 0:
+                    dyn_combo.setCurrentIndex(idx)
+                    dyn_check.setChecked(True)
+                else:
+                    dyn_combo.insertItem(0, stored_column)
+                    dyn_combo.setCurrentIndex(0)
+                    dyn_check.setChecked(True)
+        else:
+            dyn_combo.addItem("No batch columns")
+            dyn_combo.setEnabled(False)
+            dyn_check.setEnabled(False)
+            if stored_column:
+                dyn_check.setToolTip(
+                    "Stored binding is inactive until a valid Begin Batch CSV is set."
+                )
+
+        def _apply_enabled_state():
+            active = dyn_check.isChecked() and has_columns
+            base_widget.setEnabled(not active)
+            dyn_combo.setEnabled(active)
+
+        def _on_toggle(checked):
+            if not has_columns:
+                return
+            if checked:
+                self._set_dynamic_param_binding(
+                    node, param_name, dyn_combo.currentText()
+                )
+            else:
+                self._set_dynamic_param_binding(node, param_name, None)
+            _apply_enabled_state()
+
+        def _on_column_change(_text):
+            if dyn_check.isChecked() and has_columns:
+                self._set_dynamic_param_binding(
+                    node, param_name, dyn_combo.currentText()
+                )
+
+        dyn_check.toggled.connect(_on_toggle)
+        dyn_combo.currentTextChanged.connect(_on_column_change)
+
+        _apply_enabled_state()
+
+        layout.addWidget(dyn_check)
+        layout.addWidget(dyn_combo)
+        return container
+
     def _get_exec_successors(self, node):
         successors = []
         for socket in getattr(node, "logic_outputs", []):
@@ -3999,6 +4185,7 @@ class FlowEditor(QWidget):
         Validate graph structure before execution.
         Returns (errors, warnings) where errors block execution.
         """
+        self._batch_interactive_warning_message = None
         errors = []
         warnings = []
         nodes = self._get_all_nodes()
@@ -4007,22 +4194,29 @@ class FlowEditor(QWidget):
             warnings.append("Pipeline is empty.")
             return errors, warnings
 
-        begin_nodes = [n for n in nodes if getattr(n, "node_type", "") == "begin"]
+        begin_nodes = [
+            n
+            for n in nodes
+            if getattr(n, "node_type", "") in ("begin", "begin_batch")
+        ]
         if not begin_nodes:
-            errors.append("No Begin node found.")
+            errors.append("No Begin node found. Add a Begin or Begin Batch node.")
             return errors, warnings
         if len(begin_nodes) > 1:
-            errors.append("Multiple Begin nodes found. Keep only one Begin node.")
+            errors.append(
+                "Multiple Begin nodes found. Keep only one Begin/Begin Batch node."
+            )
             return errors, warnings
 
         begin = begin_nodes[0]
+        begin_label = "Begin Batch" if begin.node_type == "begin_batch" else "Begin"
         reachable = self._collect_exec_reachable(begin)
         reachable_nodes = [n for n in nodes if n.uid in reachable]
 
         if len(reachable) == 1:
             errors.append(
-                "Begin node is not connected to any exec thread. "
-                "Connect Begin exec_out to the first processing node."
+                f"{begin_label} node is not connected to any exec thread. "
+                f"Connect {begin_label} exec_out to the first processing node."
             )
             return errors, warnings
 
@@ -4040,13 +4234,63 @@ class FlowEditor(QWidget):
 
         for node in reachable_nodes:
             node_type = getattr(node, "node_type", "")
-            if node_type in ("begin", "loop_control"):
+            if node_type in ("begin", "begin_batch", "loop_control"):
                 continue
             for socket in getattr(node, "inputs", []):
                 if not socket.connected_edges:
                     errors.append(
                         f"Node '{node.title}' is missing required input '{socket.name}'."
                     )
+
+        batch_columns = []
+        if begin.node_type == "begin_batch":
+            csv_path = str(begin.parameters.get("csv_path", "")).strip()
+            if not csv_path:
+                errors.append("Begin Batch requires a CSV path.")
+            elif not os.path.exists(csv_path):
+                errors.append(f"Begin Batch CSV does not exist: {csv_path}")
+            else:
+                try:
+                    batch_columns = self._read_batch_csv_columns(csv_path)
+                except Exception as exc:
+                    errors.append(f"Begin Batch CSV could not be read: {exc}")
+                if not batch_columns:
+                    errors.append(
+                        "Begin Batch CSV has no header columns. Add a valid header row."
+                    )
+
+            for node in reachable_nodes:
+                bindings = getattr(node, "dynamic_param_bindings", {}) or {}
+                if not isinstance(bindings, dict):
+                    continue
+                for param_name, col_name in bindings.items():
+                    col = str(col_name).strip()
+                    if not col:
+                        continue
+                    if col not in batch_columns:
+                        errors.append(
+                            f"Node '{node.title}' dynamic param '{param_name}' "
+                            f"uses missing CSV column '{col}'."
+                        )
+
+            interactive_nodes = []
+            for node in reachable_nodes:
+                if node.node_type in ("begin", "begin_batch"):
+                    continue
+                node_def = NODE_LIBRARY.get(node.node_type, {})
+                if node_def.get("interactive"):
+                    interactive_nodes.append(node)
+
+            if interactive_nodes:
+                preview = ", ".join(n.title for n in interactive_nodes[:4])
+                suffix = "..." if len(interactive_nodes) > 4 else ""
+                msg = (
+                    "Batch mode includes interactive nodes. "
+                    "You will need to confirm each row manually. "
+                    f"Nodes: {preview}{suffix}"
+                )
+                warnings.append(msg)
+                self._batch_interactive_warning_message = msg
 
         for loop in [n for n in reachable_nodes if getattr(n, "node_type", "") == "loop_control"]:
             has_body = any(
@@ -4085,6 +4329,17 @@ class FlowEditor(QWidget):
                 "\n".join(errors),
             )
             return
+
+        if self._batch_interactive_warning_message:
+            reply = QMessageBox.question(
+                self,
+                "Batch + Interactive Nodes",
+                self._batch_interactive_warning_message + "\n\nContinue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self.append_log("⏹️ Execution cancelled by user.")
+                return
 
         # 2. Disable UI
         self.set_ui_enabled(False)
