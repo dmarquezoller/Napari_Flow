@@ -1682,20 +1682,6 @@ class FlowEditor(QWidget):
         except Exception:
             pass
 
-    def _ui_watchdog_tick(self):
-        now = time.perf_counter()
-        dt_ms = (now - self._ui_watchdog_last) * 1000.0
-        self._ui_watchdog_last = now
-        lag_ms = dt_ms - 250.0
-        if lag_ms < 500.0:
-            return
-        focused = QApplication.focusWidget()
-        focus_name = focused.__class__.__name__ if focused is not None else "None"
-        print(
-            f"[FlowEditor][UI] event-loop lag detected: +{lag_ms:.1f} ms "
-            f"(focus={focus_name})"
-        )
-
         try:
             self.viewer.layers.selection.events.changed.connect(_safe_refresh)
         except Exception:
@@ -1709,6 +1695,20 @@ class FlowEditor(QWidget):
             self.viewer.dims.events.ndisplay.connect(_safe_refresh)
         except Exception:
             pass
+
+    def _ui_watchdog_tick(self):
+        now = time.perf_counter()
+        dt_ms = (now - self._ui_watchdog_last) * 1000.0
+        self._ui_watchdog_last = now
+        lag_ms = dt_ms - 250.0
+        if lag_ms < 500.0:
+            return
+        focused = QApplication.focusWidget()
+        focus_name = focused.__class__.__name__ if focused is not None else "None"
+        print(
+            f"[FlowEditor][UI] event-loop lag detected: +{lag_ms:.1f} ms "
+            f"(focus={focus_name})"
+        )
 
     # HELPER TO GET UNIQUE NODE TITLE
     def get_unique_title(self, base_title):
