@@ -1,0 +1,46 @@
+site_name: Napari Flow Editor
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - First Pipeline: getting-started/first-pipeline.md
+  - Core Concepts:
+      - User Interface: concepts/user-interface.md
+      - Graph Model: concepts/graph-model.md
+      - Execution Flow: concepts/execution-flow.md
+      - Parameters and Cache: concepts/parameters-and-cache.md
+      - Interactive Nodes: concepts/interactive-nodes.md
+      - Loops and Control Flow: concepts/loops-and-control-flow.md
+      - Macros: concepts/macros.md
+      - Batch Processing: concepts/batch-processing.md
+      - Video Rendering: concepts/video-rendering.md
+  - Examples:
+      - Layers and Inputs: guides/layers-and-inputs.md
+      - OME-Zarr Workflows: guides/ome-zarr-workflows.md
+      - Save and Load Pipelines: guides/save-and-load-pipelines.md
+      - Plotting: guides/plotting.md
+      - Export Script: guides/export-script.md
+      - Best Practices: guides/best-practices.md
+  - API Reference:
+      - Catalog Overview: nodes/catalog.md
+      - Input Nodes: nodes/input-nodes.md
+      - Processing Nodes: nodes/processing-nodes.md
+      - Control Flow Nodes: nodes/control-flow-nodes.md
+      - Output and Visualization Nodes: nodes/output-and-visualization-nodes.md
+  - Troubleshooting:
+      - Common Errors: troubleshooting/common-errors.md
+      - Performance: troubleshooting/performance.md
+      - FAQ: troubleshooting/faq.md
+  - API Developer:
+      - Architecture: developer/architecture.md
+      - Adding Nodes: developer/adding-nodes.md
+      - Execution Engine Notes: developer/execution-engine-notes.md
+      - Testing: developer/testing.md
+      - Release Checklist: developer/release-checklist.md
+  - Reference:
+      - Glossary: reference/glossary.md
+      - Changelog: reference/changelog.md
+      - Roadmap: reference/roadmap.md
