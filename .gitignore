@@ -38,3 +38,6 @@ htmlcov/
 
 # Napari specific
 .napari/
+
+# Benchmark outputs
+napari-flow-editor/benchmarks/results/

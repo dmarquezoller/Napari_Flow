@@ -16,6 +16,7 @@ from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time
 import csv
 import html
+import hashlib
 import numpy as np
 import dask.array as da
 import matplotlib.pyplot as plt
@@ -1339,6 +1340,12 @@ class FlowEditor(QWidget):
         self._ui_watchdog_timer.timeout.connect(self._ui_watchdog_tick)
         self._batch_interactive_warning_message = None
         self._batch_columns_cache = {}
+        self.thread = None
+        self.worker = None
+        self._active_run_mode = None
+        self._step_state = None
+        self._step_graph_signature = None
+        self._step_loop_active = False
         if self._debug_ui_perf:
             self._ui_watchdog_timer.start()
         self.macro_groups = {}  # group_id -> {"title","member_uids","collapsed","item"}
@@ -1511,7 +1518,10 @@ class FlowEditor(QWidget):
         interaction_layout.addWidget(self.btn_interaction_run)
         button_layout.addWidget(self.interaction_bar)
 
-        # Run Button
+        # Run buttons (75/25 split): full run + single-step run
+        run_row = QHBoxLayout()
+        run_row.setSpacing(6)
+
         self.btn_run = QPushButton("RUN PIPELINE")
         self.btn_run.setFixedHeight(40)
         self.btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1523,7 +1533,25 @@ class FlowEditor(QWidget):
             QPushButton:hover { background-color: #388E3C; }
             QPushButton:pressed { background-color: #1B5E20; }
         """)
-        button_layout.addWidget(self.btn_run)
+        run_row.addWidget(self.btn_run, 3)
+
+        self.btn_run_next = QPushButton("RUN NEXT")
+        self.btn_run_next.setFixedHeight(40)
+        self.btn_run_next.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_run_next.setStyleSheet("""
+            QPushButton {
+                background-color: #356A9A;
+                color: white;
+                font-weight: bold;
+                font-size: 12px;
+                border-radius: 4px;
+                border: 1px solid #254a6c;
+            }
+            QPushButton:hover { background-color: #3f7cb4; }
+            QPushButton:pressed { background-color: #254a6c; }
+        """)
+        run_row.addWidget(self.btn_run_next, 1)
+        button_layout.addLayout(run_row)
         
         # Add buttons to the top of the bottom container
         bottom_layout.addLayout(button_layout)
@@ -1591,6 +1619,7 @@ class FlowEditor(QWidget):
         self.btn_interaction_cancel.clicked.connect(self._on_inline_interaction_cancel)
         self.btn_interaction_run.clicked.connect(self._on_inline_interaction_run)
         self.btn_run.clicked.connect(self.run_pipeline)
+        self.btn_run_next.clicked.connect(self.run_next_step)
         self.scene.selectionChanged.connect(self.on_selection)
         self._position_floating_buttons()
         app = QApplication.instance()
@@ -4308,11 +4337,112 @@ class FlowEditor(QWidget):
 
         return errors, warnings
 
+    def _worker_is_running(self):
+        return self.thread is not None and self.thread.isRunning()
+
+    def _compute_step_graph_signature(self):
+        nodes = [item for item in self.scene.items() if isinstance(item, Node)]
+        node_rows = sorted((n.uid, n.node_type) for n in nodes)
+        edge_rows = []
+        for node in nodes:
+            for socket in getattr(node, "logic_outputs", []):
+                if socket.connected_edges and socket.connected_edges[0].end_socket is not None:
+                    target_socket = socket.connected_edges[0].end_socket
+                    edge_rows.append(
+                        (
+                            node.uid,
+                            socket.name,
+                            target_socket.node.uid,
+                            target_socket.name,
+                        )
+                    )
+                else:
+                    edge_rows.append((node.uid, socket.name, "", ""))
+
+        payload = {"nodes": node_rows, "edges": sorted(edge_rows)}
+        raw = json.dumps(payload, sort_keys=True)
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    def _reset_step_state(self, reason=None):
+        self._step_state = None
+        self._step_graph_signature = None
+        self._step_loop_active = False
+        if reason:
+            self.append_log(reason)
+        self.btn_stop_loop.setVisible(False)
+        self.btn_stop_loop.setEnabled(False)
+        self.btn_stop_loop.setText("Stop Loop")
+
+    def _on_step_state_updated(self, step_state):
+        if isinstance(step_state, dict):
+            self._step_state = step_state
+            self._step_graph_signature = self._compute_step_graph_signature()
+            loop_stack = step_state.get("loop_stack", []) or []
+            self._step_loop_active = any(
+                str(f.get("mode", "")) == "Until confirm" for f in loop_stack
+            )
+        else:
+            self._step_state = None
+            self._step_graph_signature = None
+            self._step_loop_active = False
+
+        if self._step_loop_active:
+            self.btn_stop_loop.setVisible(True)
+            self.btn_stop_loop.setEnabled(True)
+            self.btn_stop_loop.setText("Stop Loop")
+        elif self._active_run_mode != "full":
+            self.btn_stop_loop.setVisible(False)
+            self.btn_stop_loop.setEnabled(False)
+            self.btn_stop_loop.setText("Stop Loop")
+
+    def _on_worker_finished(self):
+        if self._active_run_mode == "full":
+            self._reset_step_state()
+        self.set_ui_enabled(True)
+
+    def _on_thread_finished_cleanup(self):
+        self.thread = None
+        self.worker = None
+        self._active_run_mode = None
+
+    def _start_worker(self, run_mode):
+        self._active_run_mode = run_mode
+        worker_step_state = self._step_state if run_mode == "step" else None
+        self.thread = QThread()
+        self.worker = ExecutionWorker(
+            self.scene,
+            self.viewer,
+            run_mode=run_mode,
+            step_state=worker_step_state,
+        )
+        self.worker.moveToThread(self.thread)
+
+        self.thread.started.connect(self.worker.run)
+        self.worker.node_status_signal.connect(self.update_node_status)
+        self.worker.log_signal.connect(self.append_log)
+        self.worker.result_signal.connect(self.handle_execution_result)
+        self.worker.interaction_request_signal.connect(self.handle_interaction_request)
+        self.worker.loop_control_state_signal.connect(self.handle_loop_control_state)
+        self.worker.step_state_signal.connect(self._on_step_state_updated)
+
+        self.worker.finished_signal.connect(self.thread.quit)
+        self.worker.finished_signal.connect(self.worker.deleteLater)
+        self.worker.finished_signal.connect(self._on_worker_finished)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self._on_thread_finished_cleanup)
+        self.thread.start()
+
     # --- Run Pipeline Method ---
     def run_pipeline(self):
+        if self._worker_is_running():
+            self.append_log("⚠️ Execution is already running.")
+            return
+
         # Ensure debounced parameter edits (especially table edits) are committed
         # before validation/execution starts.
         self._flush_pending_param_updates()
+        self._reset_step_state()
+
         # 1. Validate graph before creating worker/thread.
         self.console.clear()
         errors, warnings = self.validate_pipeline_graph()
@@ -4341,46 +4471,62 @@ class FlowEditor(QWidget):
                 self.append_log("⏹️ Execution cancelled by user.")
                 return
 
-        # 2. Disable UI
-        self.set_ui_enabled(False)
-        # 3. Setup Thread
-        self.thread = QThread()
-        self.worker = ExecutionWorker(self.scene, self.viewer)
-        self.worker.moveToThread(self.thread)
-        
-        # 4. Connect Signals
-        self.thread.started.connect(self.worker.run)
-        self.worker.node_status_signal.connect(self.update_node_status)
-        
-        # LOGGING
-        self.worker.log_signal.connect(self.append_log)
-        
-        # RESULTS (Critical Fix: GUI updates happen here in Main Thread)
-        self.worker.result_signal.connect(self.handle_execution_result)
+        self.set_ui_enabled(False, run_mode="full")
+        self._start_worker(run_mode="full")
 
-        # INTERACTIVE NODES – dialog on the main thread
-        self.worker.interaction_request_signal.connect(
-            self.handle_interaction_request
-        )
-        self.worker.loop_control_state_signal.connect(
-            self.handle_loop_control_state
-        )
-        
-        # CLEANUP
-        self.worker.finished_signal.connect(self.thread.quit)
-        self.worker.finished_signal.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        
-        # RE-ENABLE UI
-        self.worker.finished_signal.connect(lambda: self.set_ui_enabled(True))
-        
-        # 5. Start
-        self.thread.start()
+    # --- Run Next Method ---
+    def run_next_step(self):
+        if self._worker_is_running():
+            self.append_log("⚠️ Execution is already running.")
+            return
+
+        self._flush_pending_param_updates()
+
+        current_sig = self._compute_step_graph_signature()
+        if (
+            self._step_state is not None
+            and self._step_graph_signature is not None
+            and current_sig != self._step_graph_signature
+        ):
+            self._reset_step_state("↺ Graph changed. Step cursor reset.")
+
+        errors, warnings = self.validate_pipeline_graph()
+        for warning in warnings:
+            self.append_log(f"⚠️ Validation: {warning}")
+        if errors:
+            for error in errors:
+                self.append_log(f"❌ Validation: {error}")
+            QMessageBox.critical(
+                self,
+                "Pipeline Validation Failed",
+                "\n".join(errors),
+            )
+            return
+
+        begin_nodes = [
+            n for n in self.scene.items()
+            if isinstance(n, Node) and getattr(n, "node_type", "") in ("begin", "begin_batch")
+        ]
+        if len(begin_nodes) == 1 and getattr(begin_nodes[0], "node_type", "") == "begin_batch":
+            QMessageBox.information(
+                self,
+                "Run Next Not Available",
+                "Run Next currently supports Begin pipelines only.\n"
+                "Use RUN PIPELINE for Begin Batch.",
+            )
+            return
+
+        self.set_ui_enabled(False, run_mode="step")
+        self._start_worker(run_mode="step")
 
     def on_stop_loop_clicked(self):
         """Signal the worker to stop the active 'Until confirm' loop."""
         if hasattr(self, "worker") and self.worker is not None:
             self.worker.request_loop_stop()
+            self.btn_stop_loop.setEnabled(False)
+            self.btn_stop_loop.setText("Stopping...")
+        elif isinstance(self._step_state, dict):
+            self._step_state["stop_loop_requested"] = True
             self.btn_stop_loop.setEnabled(False)
             self.btn_stop_loop.setText("Stopping...")
         # Also dismiss any pending inline interaction UI/layer immediately.
@@ -4389,10 +4535,14 @@ class FlowEditor(QWidget):
     def handle_loop_control_state(self, active, loop_node_uid):
         """Show/hide the loop stop button while an 'Until confirm' loop is active."""
         if active:
+            self._step_loop_active = (
+                self._active_run_mode == "step" or self._step_state is not None
+            )
             self.btn_stop_loop.setVisible(True)
             self.btn_stop_loop.setEnabled(True)
             self.btn_stop_loop.setText("Stop Loop")
         else:
+            self._step_loop_active = False
             self.btn_stop_loop.setVisible(False)
             self.btn_stop_loop.setEnabled(False)
             self.btn_stop_loop.setText("Stop Loop")
@@ -4881,9 +5031,11 @@ class FlowEditor(QWidget):
         sb = self.console.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    def set_ui_enabled(self, enabled: bool):
+    def set_ui_enabled(self, enabled: bool, run_mode: str = "full"):
         """Locks/Unlocks buttons during execution."""
         self.btn_run.setEnabled(enabled)
+        if hasattr(self, "btn_run_next"):
+            self.btn_run_next.setEnabled(enabled)
         self.btn_add.setEnabled(enabled)
         self.btn_add_control.setEnabled(enabled)
         self.btn_remove.setEnabled(enabled)
@@ -4898,9 +5050,14 @@ class FlowEditor(QWidget):
         if hasattr(self, "btn_back_macro_floating"):
             self.btn_back_macro_floating.setEnabled(enabled)
         if enabled:
-            self.btn_stop_loop.setVisible(False)
-            self.btn_stop_loop.setEnabled(False)
-            self.btn_stop_loop.setText("Stop Loop")
+            if self._step_loop_active:
+                self.btn_stop_loop.setVisible(True)
+                self.btn_stop_loop.setEnabled(True)
+                self.btn_stop_loop.setText("Stop Loop")
+            else:
+                self.btn_stop_loop.setVisible(False)
+                self.btn_stop_loop.setEnabled(False)
+                self.btn_stop_loop.setText("Stop Loop")
             # Safety: if execution ended unexpectedly while waiting for interaction,
             # clear the inline interaction state/layer.
             self._finish_pending_interaction(data=None, notify_worker=False)
@@ -4923,10 +5080,31 @@ class FlowEditor(QWidget):
                     background-color: #1B5E20;
                 }
             """)
+            if hasattr(self, "btn_run_next"):
+                self.btn_run_next.setText("RUN NEXT")
+                self.btn_run_next.setStyleSheet("""
+                    QPushButton {
+                        background-color: #356A9A;
+                        color: white;
+                        font-weight: bold;
+                        font-size: 12px;
+                        border-radius: 4px;
+                        border: 1px solid #254a6c;
+                    }
+                    QPushButton:hover { background-color: #3f7cb4; }
+                    QPushButton:pressed { background-color: #254a6c; }
+                """)
 
         else:
-            self.btn_run.setText("Running...")
+            self.btn_run.setText("Running..." if run_mode == "full" else "RUN PIPELINE")
             self.btn_run.setStyleSheet("background-color: #555; color: #aaa;") # Grayed out
+            if hasattr(self, "btn_run_next"):
+                self.btn_run_next.setText(
+                    "Stepping..." if run_mode == "step" else "RUN NEXT"
+                )
+                self.btn_run_next.setStyleSheet(
+                    "background-color: #555; color: #aaa;"
+                )
 
     # --- Import Custom Module Method ---
     def import_custom_module(self):

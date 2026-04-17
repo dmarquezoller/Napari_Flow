@@ -129,3 +129,118 @@ def test_run_starts_exec_path_from_begin_output(monkeypatch):
 
     assert not errors
     assert called == ["step"]
+
+
+def _run_step_once(monkeypatch, nodes, step_state=None):
+    _install_fake_plugin_module(monkeypatch)
+    worker = ExecutionWorker(
+        SimpleNamespace(items=lambda: nodes),
+        SimpleNamespace(layers={}),
+        run_mode="step",
+        step_state=step_state,
+    )
+
+    executed = []
+    errors = []
+    states = []
+
+    worker.error_signal.connect(errors.append)
+    worker.step_state_signal.connect(states.append)
+    worker._execute_single_node = lambda node, _lib, force_recompute=False: executed.append(
+        (node.uid, force_recompute)
+    )
+
+    worker.run()
+    return executed, states[-1] if states else None, errors
+
+
+def test_run_next_executes_one_node_per_click(monkeypatch):
+    begin = _Node("begin", node_type="begin")
+    a = _Node("a")
+    b = _Node("b")
+    _with_exec_outputs(begin, ["exec_out"])
+    _with_exec_input(a)
+    _with_exec_outputs(a, ["exec_out"])
+    _with_exec_input(b)
+    _with_exec_outputs(b, ["exec_out"])
+    _connect_exec(begin, "exec_out", a)
+    _connect_exec(a, "exec_out", b)
+
+    executed_1, state_1, errors_1 = _run_step_once(monkeypatch, [begin, a, b])
+    assert not errors_1
+    assert executed_1 == [("a", False)]
+    assert isinstance(state_1, dict)
+    assert state_1["current_uid"] == "b"
+
+    executed_2, state_2, errors_2 = _run_step_once(
+        monkeypatch, [begin, a, b], step_state=state_1
+    )
+    assert not errors_2
+    assert executed_2 == [("b", False)]
+    assert state_2 is None
+
+
+def test_run_next_steps_through_loop_iterations(monkeypatch):
+    begin = _Node("begin", node_type="begin")
+    loop = _Node("loop", node_type="loop_control")
+    loop.parameters = {"mode": "N times", "iterations": 2}
+    body = _Node("body")
+    done = _Node("done")
+
+    _with_exec_outputs(begin, ["exec_out"])
+    _with_exec_input(loop)
+    _with_exec_outputs(loop, ["loop_body", "completed"])
+    _with_exec_input(body)
+    _with_exec_outputs(body, ["exec_out"])  # unconnected => returns to loop frame
+    _with_exec_input(done)
+    _with_exec_outputs(done, ["exec_out"])
+
+    _connect_exec(begin, "exec_out", loop)
+    _connect_exec(loop, "loop_body", body)
+    _connect_exec(loop, "completed", done)
+
+    executed_1, state_1, errors_1 = _run_step_once(
+        monkeypatch, [begin, loop, body, done]
+    )
+    assert not errors_1
+    assert executed_1 == [("body", True)]
+    assert isinstance(state_1, dict)
+    assert state_1["current_uid"] == "loop"
+
+    executed_2, state_2, errors_2 = _run_step_once(
+        monkeypatch, [begin, loop, body, done], step_state=state_1
+    )
+    assert not errors_2
+    assert executed_2 == [("body", True)]
+    assert isinstance(state_2, dict)
+    assert state_2["current_uid"] == "loop"
+
+    executed_3, state_3, errors_3 = _run_step_once(
+        monkeypatch, [begin, loop, body, done], step_state=state_2
+    )
+    assert not errors_3
+    assert executed_3 == [("done", False)]
+    assert state_3 is None
+
+
+def test_run_next_rejects_begin_batch(monkeypatch):
+    _install_fake_plugin_module(monkeypatch)
+    begin_batch = _Node("bb", node_type="begin_batch")
+    step = _Node("step")
+    _with_exec_outputs(begin_batch, ["exec_out"])
+    _with_exec_input(step)
+    _with_exec_outputs(step, ["exec_out"])
+    _connect_exec(begin_batch, "exec_out", step)
+
+    worker = ExecutionWorker(
+        SimpleNamespace(items=lambda: [begin_batch, step]),
+        SimpleNamespace(layers={}),
+        run_mode="step",
+    )
+    errors = []
+    worker.error_signal.connect(errors.append)
+
+    worker.run()
+
+    assert errors
+    assert "Run Next does not support Begin Batch" in errors[0]

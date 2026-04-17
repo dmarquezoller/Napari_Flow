@@ -46,13 +46,16 @@ class ExecutionWorker(QObject):
     loop_control_state_signal = Signal(bool, str)    # (active, loop_node_uid)
     # Exec trace signal: transition from node via named exec output.
     exec_transition_signal = Signal(str, str)        # (from_node_uid, output_socket_name)
+    # Step-mode state snapshot emitted after each RUN NEXT click.
+    step_state_signal = Signal(object)
     # The main thread calls ``provide_interaction_result`` which sets the
     # threading.Event so the worker thread can continue.
 
-    def __init__(self, scene, viewer):
+    def __init__(self, scene, viewer, run_mode="full", step_state=None):
         super().__init__()
         self.scene = scene
         self.viewer = viewer
+        self.run_mode = str(run_mode or "full").strip().lower()
 
         # Interaction synchronisation primitives
         self._interaction_event = threading.Event()
@@ -62,6 +65,7 @@ class ExecutionWorker(QObject):
         self._batch_row = None
         self._batch_index = None
         self._batch_total = 0
+        self._step_state = self._sanitize_step_state(step_state)
 
     # Called from the **main thread** (via signal/slot) to unblock the worker.
     def provide_interaction_result(self, data):
@@ -245,6 +249,82 @@ class ExecutionWorker(QObject):
         self._batch_row = None
         self._batch_index = None
         self._batch_total = 0
+
+    @staticmethod
+    def _sanitize_step_state(step_state):
+        if not isinstance(step_state, dict):
+            return None
+
+        loop_stack = []
+        for raw in step_state.get("loop_stack", []) or []:
+            if not isinstance(raw, dict):
+                continue
+            frame = {
+                "loop_uid": str(raw.get("loop_uid", "")).strip(),
+                "mode": str(raw.get("mode", "N times")),
+                "iterations": max(1, int(raw.get("iterations", 1) or 1)),
+                "iteration": max(0, int(raw.get("iteration", 0) or 0)),
+                "body_uid": str(raw.get("body_uid", "")).strip() or None,
+                "completed_uid": str(raw.get("completed_uid", "")).strip() or None,
+            }
+            if frame["loop_uid"]:
+                loop_stack.append(frame)
+
+        state = {
+            "begin_uid": str(step_state.get("begin_uid", "")).strip() or None,
+            "current_uid": str(step_state.get("current_uid", "")).strip() or None,
+            "current_force_recompute": bool(
+                step_state.get("current_force_recompute", False)
+            ),
+            "finished": bool(step_state.get("finished", False)),
+            "loop_stack": loop_stack,
+            "stop_loop_requested": bool(step_state.get("stop_loop_requested", False)),
+        }
+        if not state["begin_uid"]:
+            return None
+        return state
+
+    @staticmethod
+    def _serialize_step_state(step_state):
+        if not isinstance(step_state, dict):
+            return None
+        return json.loads(json.dumps(step_state))
+
+    @staticmethod
+    def _node_by_uid(uid_map, uid):
+        if not uid:
+            return None
+        return uid_map.get(uid)
+
+    def _active_loop_frame(self, step_state):
+        stack = (step_state or {}).get("loop_stack", [])
+        if not stack:
+            return None
+        return stack[-1]
+
+    def _make_initial_step_state(self, begin_node):
+        first_exec, begin_out = self._next_logic_step(begin_node)
+        if begin_out is not None and first_exec is not None:
+            self.exec_transition_signal.emit(begin_node.uid, begin_out)
+
+        if first_exec is None:
+            return {
+                "begin_uid": begin_node.uid,
+                "current_uid": None,
+                "current_force_recompute": False,
+                "finished": True,
+                "loop_stack": [],
+                "stop_loop_requested": False,
+            }
+
+        return {
+            "begin_uid": begin_node.uid,
+            "current_uid": first_exec.uid,
+            "current_force_recompute": False,
+            "finished": False,
+            "loop_stack": [],
+            "stop_loop_requested": False,
+        }
 
     def _reset_all_nodes_for_batch(self, nodes):
         for node in nodes:
@@ -437,8 +517,263 @@ class ExecutionWorker(QObject):
             self.exec_transition_signal.emit(loop_node.uid, "completed")
         return completed_start
 
+    def _prepare_step_state(self, begin_node, uid_map):
+        state = self._sanitize_step_state(self._step_state)
+        if state is None or state.get("begin_uid") != begin_node.uid:
+            state = self._make_initial_step_state(begin_node)
+            self._loop_stop_requested = False
+            return state
+
+        # If graph changed and the stored pointer no longer exists, restart.
+        current_uid = state.get("current_uid")
+        if current_uid and current_uid not in uid_map:
+            state = self._make_initial_step_state(begin_node)
+            self._loop_stop_requested = False
+            return state
+
+        # Drop stale loop frames (e.g. loop node removed).
+        cleaned_stack = []
+        for frame in state.get("loop_stack", []):
+            if frame.get("loop_uid") in uid_map:
+                cleaned_stack.append(frame)
+        state["loop_stack"] = cleaned_stack
+        self._loop_stop_requested = bool(state.pop("stop_loop_requested", False))
+
+        return state
+
+    def _handle_loop_control_step(self, loop_node, step_state, uid_map):
+        stack = step_state.setdefault("loop_stack", [])
+        frame = stack[-1] if stack and stack[-1].get("loop_uid") == loop_node.uid else None
+
+        if frame is None:
+            params = getattr(loop_node, "parameters", {}) or {}
+            mode = str(params.get("mode", "N times"))
+            try:
+                iterations = int(params.get("iterations", 1))
+            except Exception:
+                iterations = 1
+            iterations = max(1, iterations)
+
+            body_start, _ = self._next_logic_step(loop_node, "loop_body")
+            completed_start, _ = self._next_logic_step(loop_node, "completed")
+            frame = {
+                "loop_uid": loop_node.uid,
+                "mode": mode,
+                "iterations": iterations,
+                "iteration": 0,
+                "body_uid": getattr(body_start, "uid", None),
+                "completed_uid": getattr(completed_start, "uid", None),
+            }
+            stack.append(frame)
+            if mode == "Until confirm":
+                self._loop_stop_requested = False
+                self.loop_control_state_signal.emit(True, loop_node.uid)
+
+        body_uid = frame.get("body_uid")
+        completed_uid = frame.get("completed_uid")
+        mode = frame.get("mode", "N times")
+
+        if not body_uid:
+            self.log_signal.emit(
+                f"⚠️ Loop '{loop_node.title}' has no Loop Body connection."
+            )
+            if mode == "Until confirm":
+                self.loop_control_state_signal.emit(False, loop_node.uid)
+                self._loop_stop_requested = False
+            stack.pop()
+            if completed_uid:
+                self.exec_transition_signal.emit(loop_node.uid, "completed")
+            step_state["current_uid"] = completed_uid
+            step_state["current_force_recompute"] = False
+            if completed_uid is None and not stack:
+                step_state["finished"] = True
+            return
+
+        if mode == "Until confirm":
+            if self._loop_stop_requested:
+                self.loop_control_state_signal.emit(False, loop_node.uid)
+                self._loop_stop_requested = False
+                stack.pop()
+                if completed_uid:
+                    self.exec_transition_signal.emit(loop_node.uid, "completed")
+                step_state["current_uid"] = completed_uid
+                step_state["current_force_recompute"] = False
+                if completed_uid is None and not stack:
+                    step_state["finished"] = True
+                return
+
+            frame["iteration"] = int(frame.get("iteration", 0)) + 1
+            body_node = self._node_by_uid(uid_map, body_uid)
+            body_nodes = self._collect_linear_exec_nodes(
+                body_node, stop_uids={loop_node.uid}
+            ) if body_node is not None else []
+            self._set_nodes_gray(body_nodes)
+            self.log_signal.emit(
+                f"🔁 Loop '{loop_node.title}' iteration {frame['iteration']} (Until confirm)"
+            )
+            self.exec_transition_signal.emit(loop_node.uid, "loop_body")
+            step_state["current_uid"] = body_uid
+            step_state["current_force_recompute"] = True
+            step_state["finished"] = False
+            return
+
+        # N times
+        if int(frame.get("iteration", 0)) >= int(frame.get("iterations", 1)):
+            stack.pop()
+            if completed_uid:
+                self.exec_transition_signal.emit(loop_node.uid, "completed")
+            step_state["current_uid"] = completed_uid
+            step_state["current_force_recompute"] = False
+            if completed_uid is None and not stack:
+                step_state["finished"] = True
+            return
+
+        frame["iteration"] = int(frame.get("iteration", 0)) + 1
+        body_node = self._node_by_uid(uid_map, body_uid)
+        body_nodes = self._collect_linear_exec_nodes(
+            body_node, stop_uids={loop_node.uid}
+        ) if body_node is not None else []
+        self._set_nodes_gray(body_nodes)
+        self.log_signal.emit(
+            f"🔁 Loop '{loop_node.title}' iteration {frame['iteration']}/{frame['iterations']}"
+        )
+        self.exec_transition_signal.emit(loop_node.uid, "loop_body")
+        step_state["current_uid"] = body_uid
+        step_state["current_force_recompute"] = True
+        step_state["finished"] = False
+
+    def _execute_single_step(self, step_state, uid_map, library_def):
+        if step_state.get("finished", False):
+            return False
+
+        executed_any = False
+        guard = 0
+
+        while guard < 4096:
+            guard += 1
+
+            current_uid = step_state.get("current_uid")
+            if not current_uid:
+                frame = self._active_loop_frame(step_state)
+                if frame is not None:
+                    step_state["current_uid"] = frame.get("loop_uid")
+                    step_state["current_force_recompute"] = False
+                    continue
+                step_state["finished"] = True
+                return executed_any
+
+            current = self._node_by_uid(uid_map, current_uid)
+            if current is None:
+                step_state["finished"] = True
+                return executed_any
+
+            if current.node_type in ("begin", "begin_batch"):
+                next_node, out_name = self._next_logic_step(current)
+                if next_node is not None and out_name is not None:
+                    self.exec_transition_signal.emit(current.uid, out_name)
+                step_state["current_uid"] = getattr(next_node, "uid", None)
+                step_state["current_force_recompute"] = False
+                if next_node is None and not step_state.get("loop_stack"):
+                    step_state["finished"] = True
+                    return executed_any
+                continue
+
+            if current.node_type == "loop_control":
+                self._handle_loop_control_step(current, step_state, uid_map)
+                if step_state.get("finished", False):
+                    return executed_any
+                continue
+
+            force_recompute = bool(step_state.get("current_force_recompute", False))
+            try:
+                self._execute_single_node(
+                    current, library_def, force_recompute=force_recompute
+                )
+            except InterruptedError:
+                if self._loop_stop_requested:
+                    frame = self._active_loop_frame(step_state)
+                    if frame is not None:
+                        step_state["current_uid"] = frame.get("loop_uid")
+                        step_state["current_force_recompute"] = False
+                        continue
+                    step_state["finished"] = True
+                    return executed_any
+                raise
+
+            next_node, out_name = self._next_logic_step(current)
+            if next_node is not None and out_name is not None:
+                self.exec_transition_signal.emit(current.uid, out_name)
+                step_state["current_uid"] = next_node.uid
+                # Keep force_recompute while traversing loop body.
+                step_state["current_force_recompute"] = force_recompute
+                step_state["finished"] = False
+            else:
+                frame = self._active_loop_frame(step_state)
+                if frame is not None:
+                    step_state["current_uid"] = frame.get("loop_uid")
+                    step_state["current_force_recompute"] = False
+                    step_state["finished"] = False
+                else:
+                    step_state["current_uid"] = None
+                    step_state["current_force_recompute"] = False
+                    step_state["finished"] = True
+
+            executed_any = True
+            return executed_any
+
+        raise RuntimeError("Step execution exceeded guard limit (possible cycle).")
+
+    def run_next_step(self):
+        from .napari_plugin_v2 import Node, NODE_LIBRARY
+
+        nodes = [item for item in self.scene.items() if isinstance(item, Node)]
+        if not nodes:
+            self.log_signal.emit("Pipeline is empty.")
+            self._step_state = None
+            self.step_state_signal.emit(None)
+            return
+
+        begin_nodes = [n for n in nodes if getattr(n, "node_type", "") in ("begin", "begin_batch")]
+        if not begin_nodes:
+            raise RuntimeError(
+                "No Begin node found. Add a Begin node and connect its exec output."
+            )
+        if len(begin_nodes) > 1:
+            raise RuntimeError(
+                "Multiple Begin nodes found. Use a single Begin node for step execution."
+            )
+
+        begin_node = begin_nodes[0]
+        if getattr(begin_node, "node_type", "") == "begin_batch":
+            raise RuntimeError(
+                "Run Next does not support Begin Batch. Use RUN PIPELINE for batch execution."
+            )
+
+        uid_map = {n.uid: n for n in nodes}
+        step_state = self._prepare_step_state(begin_node, uid_map)
+        executed = self._execute_single_step(step_state, uid_map, NODE_LIBRARY)
+
+        if step_state.get("finished", False):
+            if not executed:
+                self.log_signal.emit("Step mode: pipeline is complete.")
+            # Ensure loop-stop UI is closed if an until-confirm loop ended.
+            frame = self._active_loop_frame(step_state)
+            if frame and frame.get("mode") == "Until confirm":
+                self.loop_control_state_signal.emit(False, frame.get("loop_uid", ""))
+            self._loop_stop_requested = False
+            self._step_state = None
+            self.step_state_signal.emit(None)
+            return
+
+        self._step_state = step_state
+        self.step_state_signal.emit(self._serialize_step_state(step_state))
+
     def run(self):
         try:
+            if self.run_mode == "step":
+                self.run_next_step()
+                return
+
             self.log_signal.emit("--- Starting Smart Execution ---")
             
             from .napari_plugin_v2 import Node, NODE_LIBRARY
