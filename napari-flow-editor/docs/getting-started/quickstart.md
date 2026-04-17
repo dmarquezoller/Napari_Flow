@@ -27,19 +27,19 @@ A minimal pipeline:
 2. Add `Get Layer`.
 3. Add `Gaussian Blur`.
 
-`<screenshot: graph with three nodes, not connected>`
+![Quickstart_1](../images/quickstart1.png)
 
 ## Step 3: Connect Exec Flow
 
 1. Connect `Begin` exec output to `Gaussian Blur` exec input.
 
-`<screenshot: white exec edge connected>`
+![Quickstart_2](../images/quickstart2.png)
 
 ## Step 4: Connect Data Flow
 
 1. Connect `Get Layer:data_out` to `Gaussian Blur:image`.
 
-`<screenshot: data edge connected>`
+![Quickstart_3](../images/quickstart3.png)
 
 ## Step 5: Set Parameters
 

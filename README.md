@@ -59,6 +59,43 @@ Then open:
 
 - `Plugins > Flow Editor`
 
+## Docker (optional)
+
+The repository includes Docker scaffolding in `napari-flow-editor/` for reproducible environments.
+
+### Build image
+
+```bash
+cd Napari_Flow/napari-flow-editor
+docker compose build
+```
+
+### Run tests in container
+
+```bash
+docker compose --profile tests run --rm tests
+```
+
+### Run MkDocs in container
+
+```bash
+docker compose --profile docs up docs
+```
+
+Then open `http://127.0.0.1:8000`.
+
+### Run napari GUI in container (Linux/X11)
+
+```bash
+xhost +local:docker
+docker compose --profile gui run --rm gui
+xhost -local:docker
+```
+
+Notes:
+- GUI forwarding depends on host display setup (X11/Wayland).
+- For CI or headless usage, prefer `tests` and `docs` profiles.
+
 ## Quick Start
 
 Build a first pipeline:

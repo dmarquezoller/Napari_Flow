@@ -211,9 +211,16 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
 def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
     out = dispatch(
         default=skimage.filters.gaussian,
-        cuda_func=None,
         args=(image,),
         kwargs={"sigma": sigma, "mode": mode, "preserve_range": True},
+        # Inline CUDA mapping: dispatch resolves this callable lazily and
+        # maps only the selected parameters from this node call.
+        cuda_function="cupyx.scipy.ndimage.gaussian_filter",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["sigma", "mode"],
+        cuda_output_dtype=np.float64,
+        backend="auto",
+        gpu_min_nbytes=0,
         # Generic dask strategy for neighborhood filters:
         # - map_overlap with halo from sigma
         # - boundary inferred from mode

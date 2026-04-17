@@ -1,0 +1,39 @@
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: napari-flow-editor:dev
+  working_dir: /workspace
+  volumes:
+    - .:/workspace
+  stdin_open: true
+  tty: true
+
+services:
+  dev:
+    <<: *common
+    command: bash
+
+  tests:
+    <<: *common
+    profiles: ["tests"]
+    command: python -m pytest src/napari_flow_editor/tests -q
+
+  docs:
+    <<: *common
+    profiles: ["docs"]
+    command: mkdocs serve -a 0.0.0.0:8000
+    ports:
+      - "8000:8000"
+
+  gui:
+    <<: *common
+    profiles: ["gui"]
+    environment:
+      DISPLAY: ${DISPLAY}
+      QT_X11_NO_MITSHM: "1"
+      QT_QPA_PLATFORM: xcb
+    volumes:
+      - .:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    command: napari

@@ -1,6 +1,9 @@
 import numpy as np
 import dask.array as da
+from dask import delayed
 import skimage.filters
+import sys
+import types
 
 from napari_flow_editor.flow_nodes.decorator import (
     dispatch,
@@ -161,6 +164,176 @@ def test_dispatch_promotes_numpy_to_dask_when_backend_available():
     assert calls["dask"] == 1
 
 
+def test_dispatch_auto_prefers_cuda_for_numpy_when_available(monkeypatch):
+    image = np.arange(64, dtype=np.float32).reshape(8, 8)
+
+    fake_cp = types.SimpleNamespace(
+        ndarray=np.ndarray,
+        asarray=lambda x: np.asarray(x),
+        asnumpy=lambda x: np.asarray(x),
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    out = dispatch(
+        default=lambda x: x + 1,
+        cuda_func=lambda x: x + 5,
+        args=(image,),
+        kwargs={},
+        backend="auto",
+    )
+
+    assert isinstance(out, np.ndarray)
+    np.testing.assert_allclose(out, image + 5)
+
+
+def test_dispatch_cuda_fallback_logs_message_when_gpu_unavailable(capsys, monkeypatch):
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+
+    monkeypatch.delitem(sys.modules, "cupy", raising=False)
+    out = dispatch(
+        default=lambda x: x + 1,
+        cuda_func=lambda x: x + 5,
+        args=(image,),
+        kwargs={},
+        backend="cuda",
+    )
+
+    assert isinstance(out, np.ndarray)
+    np.testing.assert_allclose(out, image + 1)
+    captured = capsys.readouterr().out
+    assert "requested=cuda, selected=cpu" in captured
+
+
+def test_dispatch_dask_cuda_runs_gpu_adapter_per_block(monkeypatch):
+    image = np.arange(64, dtype=np.float32).reshape(8, 8)
+    dask_image = da.from_array(image, chunks=(4, 4))
+
+    fake_cp = types.SimpleNamespace(
+        ndarray=np.ndarray,
+        asarray=lambda x: np.asarray(x),
+        asnumpy=lambda x: np.asarray(x),
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    out = dispatch(
+        default=lambda x: x + 1,
+        cuda_func=lambda x: x + 7,
+        args=(dask_image,),
+        kwargs={},
+        backend="dask_cuda",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+    )
+
+    assert isinstance(out, da.Array)
+    np.testing.assert_allclose(out.compute(), image + 7)
+
+
+def test_dispatch_cuda_function_mapping_uses_selected_node_params(monkeypatch):
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+
+    fake_cp = types.SimpleNamespace(
+        ndarray=np.ndarray,
+        asarray=lambda x: np.asarray(x),
+        asnumpy=lambda x: np.asarray(x),
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+
+    def cpu_default(image, sigma=1.0, mode="nearest", preserve_range=True):
+        return image + 1
+
+    cuda_like = lambda image, sigma=1.0, mode="nearest": image + 9
+
+    out = dispatch(
+        default=cpu_default,
+        cuda_function=cuda_like,
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["sigma", "mode"],
+        args=(image,),
+        kwargs={"sigma": 1.0, "mode": "nearest", "preserve_range": True},
+        backend="auto",
+    )
+
+    assert isinstance(out, np.ndarray)
+    np.testing.assert_allclose(out, image + 9)
+
+
+def test_dispatch_cuda_falls_back_when_user_kwargs_not_supported(capsys, monkeypatch):
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+
+    fake_cp = types.SimpleNamespace(
+        ndarray=np.ndarray,
+        asarray=lambda x: np.asarray(x),
+        asnumpy=lambda x: np.asarray(x),
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    # CUDA adapter does not accept "mode"
+    def cpu_default(x, sigma=1.0, mode="nearest"):
+        return x + 1
+
+    out = dispatch(
+        default=cpu_default,
+        cuda_func=lambda x, sigma=1.0: x + 5,
+        args=(image,),
+        kwargs={"sigma": 1.0, "mode": "nearest"},
+        backend="cuda",
+    )
+
+    assert isinstance(out, np.ndarray)
+    np.testing.assert_allclose(out, image + 1)
+    captured = capsys.readouterr().out
+    assert "selected=cpu" in captured
+    assert "CUDA cannot preserve current user parameters" in captured
+
+
+def test_dispatch_dask_cuda_falls_back_for_unsupported_user_values(capsys, monkeypatch):
+    image = np.arange(64, dtype=np.float32).reshape(8, 8)
+
+    fake_cp = types.SimpleNamespace(
+        ndarray=np.ndarray,
+        asarray=lambda x: np.asarray(x),
+        asnumpy=lambda x: np.asarray(x),
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+
+    def cuda_like(x, sigma=1.0, mode="reflect"):
+        if mode == "nearest":
+            raise ValueError("nearest mode unsupported on this CUDA path")
+        return x + 7
+
+    def cpu_default(x, sigma=1.0, mode="nearest"):
+        return x + 1
+
+    out = dispatch(
+        default=cpu_default,
+        cuda_func=cuda_like,
+        args=(image,),
+        kwargs={"sigma": 1.0, "mode": "nearest"},
+        backend="dask_cuda",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+    )
+
+    assert isinstance(out, da.Array)
+    np.testing.assert_allclose(out.compute(), image + 1)
+    captured = capsys.readouterr().out
+    assert "selected=dask" in captured
+    assert "CUDA cannot preserve current user parameters" in captured
+
+
 def test_dispatch_can_promote_numpy_to_dask_with_strategy():
     image = np.arange(256 * 256, dtype=np.float32).reshape(256, 256)
 
@@ -174,6 +347,40 @@ def test_dispatch_can_promote_numpy_to_dask_with_strategy():
 
     assert isinstance(out, da.Array)
     np.testing.assert_allclose(out.compute(), image + 1)
+
+
+def test_gaussian_dask_computes_partial_chunks_only():
+    computed_chunks = []
+
+    @delayed
+    def mk_chunk(i, j):
+        computed_chunks.append((i, j))
+        return np.ones((64, 64), dtype=np.float32)
+
+    # Build a lazy 8x8 tiled image (64 total chunks).
+    grid = [
+        [da.from_delayed(mk_chunk(i, j), shape=(64, 64), dtype=np.float32) for j in range(8)]
+        for i in range(8)
+    ]
+    image = da.block(grid)
+
+    out = dispatch(
+        default=skimage.filters.gaussian,
+        args=(image,),
+        kwargs={"sigma": 1.0, "mode": "reflect", "preserve_range": True},
+        dask_strategy="neighborhood",
+        dask_halo_from_param="sigma",
+        dask_boundary_from_param="mode",
+        dask_output_dtype=np.float64,
+    )
+
+    # Graph build should remain lazy: no source chunk executed yet.
+    assert computed_chunks == []
+    assert isinstance(out, da.Array)
+
+    # Compute a tiny ROI; only a subset of chunks should materialize.
+    _ = out[:64, :64].mean().compute()
+    assert 0 < len(computed_chunks) < 64
 
 
 def test_dispatch_neighborhood_matches_skimage_gaussian():
@@ -287,6 +494,43 @@ def test_dispatch_per_level_without_policy_keeps_sigma_constant():
     )
 
     assert [round(v, 6) for v in seen] == [4.0, 4.0, 4.0]
+
+
+def test_pyramid_per_level_only_computes_requested_level():
+    computed_levels = []
+
+    @delayed
+    def mk_level(level_id, shape):
+        computed_levels.append(level_id)
+        return np.full(shape, fill_value=level_id, dtype=np.float32)
+
+    shapes = [(8, 64, 64), (8, 32, 32), (8, 16, 16), (8, 8, 8)]
+    pyramid = [
+        da.from_delayed(mk_level(i, s), shape=s, dtype=np.float32)
+        for i, s in enumerate(shapes)
+    ]
+
+    out = dispatch(
+        default=skimage.filters.gaussian,
+        args=(pyramid,),
+        kwargs={"sigma": 1.0, "mode": "nearest", "preserve_range": True},
+        dask_strategy="neighborhood",
+        dask_halo_from_param="sigma",
+        dask_boundary_from_param="mode",
+        dask_output_dtype=np.float64,
+        pyramid_strategy="per_level",
+        pyramid_param_policy={"sigma": "fixed_world"},
+    )
+
+    assert isinstance(out, list)
+    assert len(out) == 4
+    assert computed_levels == []
+
+    _ = out[3][0, :4, :4].mean().compute()
+    assert computed_levels == [3]
+
+    _ = out[1][0, :4, :4].mean().compute()
+    assert computed_levels == [3, 1]
 
 
 def test_dispatch_accepts_multiscale_sequence_like_container():

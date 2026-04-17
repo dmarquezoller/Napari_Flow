@@ -5,6 +5,38 @@ import numpy as np
 import threading
 from typing import Callable, Optional
 
+
+def _try_import_cupy():
+    try:
+        import cupy as cp  # type: ignore
+        return cp
+    except Exception:
+        return None
+
+
+def _is_cupy_array(value, cp=None):
+    cp_mod = cp or _try_import_cupy()
+    if cp_mod is None:
+        return False
+    try:
+        return isinstance(value, cp_mod.ndarray)
+    except Exception:
+        return False
+
+
+def _convert_cuda_output_to_numpy(value, cp):
+    if cp is None:
+        return value
+    if _is_cupy_array(value, cp):
+        return cp.asnumpy(value)
+    if isinstance(value, list):
+        return [_convert_cuda_output_to_numpy(v, cp) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_convert_cuda_output_to_numpy(v, cp) for v in value)
+    if isinstance(value, dict):
+        return {k: _convert_cuda_output_to_numpy(v, cp) for k, v in value.items()}
+    return value
+
 def _normalize_logic_config(logic):
     # Backward-compatible defaults: every node has both logic sockets and
     # logic sockets accept multiple links unless explicitly constrained.
@@ -347,6 +379,11 @@ def dispatch(
     default: Callable,
     dask_func: Optional[Callable] = None,
     cuda_func: Optional[Callable] = None,
+    cuda_function=None,
+    cuda_arg_names=None,
+    cuda_kwarg_names=None,
+    backend: str = "auto",           # "auto" | "cpu" | "dask" | "cuda" | "dask_cuda"
+    gpu_min_nbytes: int = 0,          # only applies to auto/cuda selection on NumPy inputs
     args=(),
     kwargs=None,
     pyramid_strategy: str = "per_level",  # "per_level" | "from_level0"
@@ -358,6 +395,7 @@ def dispatch(
     dask_halo_factor: float = 4.0,
     dask_boundary_from_param: Optional[str] = None,
     dask_output_dtype=None,
+    cuda_output_dtype=None,
     pyramid_param_policy: Optional[dict] = None,
     numpy_to_dask_chunks="auto",
 ):
@@ -375,6 +413,110 @@ def dispatch(
 
     if kwargs is None:
         kwargs = {}
+
+    backend_requested = str(backend or "auto").strip().lower()
+    valid_backends = {"auto", "cpu", "dask", "cuda", "dask_cuda"}
+    if backend_requested not in valid_backends:
+        raise ValueError(
+            f"Unknown backend={backend!r}. Expected one of: {sorted(valid_backends)}"
+        )
+
+    if cuda_func is not None and cuda_function is not None:
+        raise ValueError("Use either cuda_func or cuda_function, not both.")
+
+    resolved_cuda_target = None
+    cuda_function_path = None
+    cuda_resolve_error = None
+
+    if callable(cuda_function):
+        resolved_cuda_target = cuda_function
+    elif isinstance(cuda_function, str):
+        path = cuda_function.strip()
+        if not path or "." not in path:
+            raise ValueError(
+                f"cuda_function={cuda_function!r} must be a callable or dotted import path."
+            )
+        cuda_function_path = path
+    elif cuda_function is not None:
+        raise TypeError(
+            f"Unsupported cuda_function type: {type(cuda_function)!r}. Expected callable or str."
+        )
+
+    use_cuda_mapping = cuda_function is not None
+    gpu_func = cuda_func or resolved_cuda_target
+    cuda_arg_names_list = [str(n) for n in (cuda_arg_names or [])]
+    cuda_kwarg_names_list = [str(n) for n in (cuda_kwarg_names or [])]
+    try:
+        default_sig = inspect.signature(default)
+    except Exception:
+        default_sig = None
+
+    cp = _try_import_cupy() if (cuda_func is not None or cuda_function is not None) else None
+
+    def _get_cuda_callable():
+        nonlocal gpu_func, resolved_cuda_target, cuda_resolve_error
+        if gpu_func is not None:
+            return gpu_func
+        if resolved_cuda_target is not None:
+            gpu_func = resolved_cuda_target
+            return gpu_func
+        if not cuda_function_path:
+            return None
+        if cp is None:
+            cuda_resolve_error = "CuPy not installed"
+            return None
+        try:
+            import importlib
+            module_name, attr_name = cuda_function_path.rsplit(".", 1)
+            module = importlib.import_module(module_name)
+            target = getattr(module, attr_name)
+            if not callable(target):
+                cuda_resolve_error = f"resolved object {cuda_function_path!r} is not callable"
+                return None
+            resolved_cuda_target = target
+            gpu_func = target
+            return target
+        except Exception as exc:
+            cuda_resolve_error = f"failed to resolve {cuda_function_path!r} ({exc})"
+            return None
+
+    def _cuda_runtime_ready():
+        if (cuda_func is None) and (cuda_function is None):
+            return False, "no CUDA function configured for this node"
+        if cp is None:
+            return False, "CuPy not installed"
+        if _get_cuda_callable() is None:
+            return False, cuda_resolve_error or "unable to resolve CUDA function"
+        try:
+            ndev = int(cp.cuda.runtime.getDeviceCount())
+            if ndev < 1:
+                return False, "no CUDA device detected"
+            return True, f"{ndev} CUDA device(s) available"
+        except Exception as exc:
+            return False, f"CUDA runtime unavailable ({exc})"
+
+    def _estimate_nbytes(sample):
+        if sample is None:
+            return 0
+        try:
+            return int(sample.nbytes)
+        except Exception:
+            pass
+        if hasattr(sample, "shape") and hasattr(sample, "dtype"):
+            try:
+                return int(np.prod(sample.shape)) * int(sample.dtype.itemsize)
+            except Exception:
+                return 0
+        return 0
+
+    backend_message_printed = False
+
+    def _log_backend(message):
+        nonlocal backend_message_printed
+        if backend_message_printed:
+            return
+        print(f"[dispatch:{getattr(default, '__name__', 'func')}] {message}")
+        backend_message_printed = True
 
     runtime_axes = None
     runtime_axis_labels = None
@@ -551,29 +693,130 @@ def dispatch(
                 break
 
     # ---------- Backend selection ----------
-    def pick_backend(sample):
-        # CUDA placeholder (optional later)
-        if cuda_func is not None:
-            try:
-                import cupy as cp  # type: ignore
-                if isinstance(sample, cp.ndarray):
-                    return cuda_func
-            except Exception:
-                pass
-
-        if dask_func is not None and isinstance(sample, da.Array):
-            return dask_func
-
-        return default
-
     def has_dask_backend():
         return dask_func is not None or dask_strategy in ("pointwise", "neighborhood")
 
+    def has_dask_cuda_capability():
+        cuda_ok, _ = _cuda_runtime_ready()
+        return (
+            cuda_ok
+            and has_dask_backend()
+            and dask_strategy in ("pointwise", "neighborhood")
+            and gpu_func is not None
+        )
+
+    def _choose_backend_mode(sample):
+        cuda_ok, cuda_reason = _cuda_runtime_ready()
+        dask_ok = has_dask_backend()
+        dask_cuda_ok = has_dask_cuda_capability()
+        sample_is_dask = isinstance(sample, da.Array)
+        sample_is_numpy = isinstance(sample, np.ndarray)
+        sample_is_cupy = _is_cupy_array(sample, cp)
+        sample_nbytes = _estimate_nbytes(sample)
+        gpu_big_enough = int(gpu_min_nbytes or 0) <= 0 or sample_nbytes >= int(gpu_min_nbytes)
+
+        def fallback_for(mode):
+            if mode == "cuda":
+                if dask_ok:
+                    return "dask", f"requested cuda, fallback dask ({cuda_reason})"
+                return "cpu", f"requested cuda, fallback cpu ({cuda_reason})"
+            if mode == "dask":
+                return "cpu", "requested dask, fallback cpu (no dask strategy/function)"
+            if mode == "dask_cuda":
+                if dask_cuda_ok:
+                    return "dask_cuda", "requested dask_cuda"
+                if dask_ok:
+                    return "dask", f"requested dask_cuda, fallback dask ({cuda_reason})"
+                if cuda_ok and (sample_is_numpy or sample_is_cupy):
+                    return "cuda", "requested dask_cuda, fallback cuda (no dask strategy/function)"
+                return "cpu", f"requested dask_cuda, fallback cpu ({cuda_reason})"
+            return "cpu", "fallback cpu"
+
+        if backend_requested == "cpu":
+            return "cpu", "forced cpu backend"
+        if backend_requested == "dask":
+            if dask_ok:
+                return "dask", "forced dask backend"
+            return fallback_for("dask")
+        if backend_requested == "cuda":
+            if cuda_ok and (sample_is_numpy or sample_is_cupy):
+                if not gpu_big_enough:
+                    if dask_ok:
+                        return "dask", (
+                            f"requested cuda but input below gpu_min_nbytes={gpu_min_nbytes}, "
+                            "fallback dask"
+                        )
+                    return "cpu", (
+                        f"requested cuda but input below gpu_min_nbytes={gpu_min_nbytes}, "
+                        "fallback cpu"
+                    )
+                return "cuda", "forced cuda backend"
+            return fallback_for("cuda")
+        if backend_requested == "dask_cuda":
+            return fallback_for("dask_cuda")
+
+        # auto
+        if sample_is_dask:
+            if dask_cuda_ok:
+                return "dask_cuda", "auto backend selected dask_cuda"
+            if dask_ok:
+                if gpu_func is not None and not cuda_ok:
+                    return "dask", f"auto fallback dask ({cuda_reason})"
+                return "dask", "auto backend selected dask"
+            return "cpu", "auto fallback cpu (no dask backend)"
+
+        if sample_is_numpy or sample_is_cupy:
+            if cuda_ok and gpu_big_enough:
+                return "cuda", "auto backend selected cuda"
+            if cuda_ok and not gpu_big_enough:
+                if dask_ok:
+                    return "dask", (
+                        f"auto: input below gpu_min_nbytes={gpu_min_nbytes}, selected dask"
+                    )
+                return "cpu", (
+                    f"auto: input below gpu_min_nbytes={gpu_min_nbytes}, selected cpu"
+                )
+            if dask_ok:
+                if gpu_func is not None:
+                    return "dask", f"auto fallback dask ({cuda_reason})"
+                return "dask", "auto backend selected dask"
+            if gpu_func is not None and not cuda_ok:
+                return "cpu", f"auto fallback cpu ({cuda_reason})"
+            return "cpu", "auto backend selected cpu"
+
+        if dask_ok:
+            return "dask", "auto backend selected dask"
+        return "cpu", "auto backend selected cpu"
+
+    def maybe_promote_numpy_to_cuda(args_in, kwargs_in, sample):
+        if not isinstance(sample, np.ndarray):
+            return args_in, kwargs_in, sample
+        if cp is None:
+            return args_in, kwargs_in, sample
+
+        def convert(v):
+            if isinstance(v, np.ndarray):
+                return cp.asarray(v)
+            return v
+
+        promoted_args = [convert(v) for v in args_in]
+        promoted_kwargs = {k: convert(v) for k, v in kwargs_in.items()}
+
+        promoted_sample = sample
+        for v in promoted_args:
+            if _is_cupy_array(v, cp):
+                promoted_sample = v
+                break
+        if not _is_cupy_array(promoted_sample, cp):
+            for v in promoted_kwargs.values():
+                if _is_cupy_array(v, cp):
+                    promoted_sample = v
+                    break
+
+        return promoted_args, promoted_kwargs, promoted_sample
+
     def maybe_promote_numpy_to_dask(args_in, kwargs_in, sample):
-        if (
-            not has_dask_backend()
-            or not isinstance(sample, np.ndarray)
-        ):
+        if not isinstance(sample, np.ndarray):
             return args_in, kwargs_in, sample
 
         def convert(v):
@@ -607,6 +850,104 @@ def dispatch(
             else:
                 k2[loc_key] = sample_value
         return a2, k2
+
+    def _bind_default_call(args_in, kwargs_in):
+        if default_sig is None:
+            return None
+        try:
+            bound = default_sig.bind_partial(*args_in, **kwargs_in)
+            bound.apply_defaults()
+            return dict(bound.arguments)
+        except TypeError:
+            return None
+
+    def _execute_cuda(args_in, kwargs_in):
+        target = _get_cuda_callable()
+        if target is None:
+            raise RuntimeError("CUDA path selected but no CUDA function is configured.")
+
+        # Legacy mode: explicit cuda_func receives the same args/kwargs.
+        if not use_cuda_mapping:
+            return target(*args_in, **kwargs_in)
+
+        # If no explicit mapping is provided, pass through.
+        if not cuda_arg_names_list and not cuda_kwarg_names_list:
+            return target(*args_in, **kwargs_in)
+
+        # Mapping mode: build CUDA call from default-function argument names.
+        bound_map = _bind_default_call(args_in, kwargs_in)
+        if bound_map is None:
+            raise TypeError(
+                "Unable to bind runtime call to default function signature "
+                "for CUDA argument mapping."
+            )
+
+        cuda_args_resolved = []
+        for name in cuda_arg_names_list:
+            if name not in bound_map:
+                raise TypeError(
+                    f"cuda_arg_names contains unknown parameter {name!r} for this call."
+                )
+            cuda_args_resolved.append(bound_map[name])
+
+        cuda_kwargs_resolved = {}
+        for name in cuda_kwarg_names_list:
+            if name not in bound_map:
+                raise TypeError(
+                    f"cuda_kwarg_names contains unknown parameter {name!r} for this call."
+                )
+            cuda_kwargs_resolved[name] = bound_map[name]
+
+        return target(*cuda_args_resolved, **cuda_kwargs_resolved)
+
+    def _small_probe_shape(shape):
+        dims = []
+        for dim in tuple(shape):
+            try:
+                n = int(dim)
+            except Exception:
+                n = 1
+            dims.append(max(1, min(n, 2)))
+        return tuple(dims) if dims else (1,)
+
+    def _probe_value_for_cuda(v):
+        if isinstance(v, da.Array):
+            probe = np.zeros(_small_probe_shape(v.shape), dtype=v.dtype)
+            return cp.asarray(probe) if cp is not None else probe
+        if isinstance(v, np.ndarray):
+            probe = np.zeros(_small_probe_shape(v.shape), dtype=v.dtype)
+            return cp.asarray(probe) if cp is not None else probe
+        if _is_cupy_array(v, cp):
+            dtype = getattr(v, "dtype", np.float32)
+            shape = _small_probe_shape(getattr(v, "shape", (1,)))
+            return cp.asarray(np.zeros(shape, dtype=dtype))
+        return v
+
+    def _cuda_preflight(args_in, kwargs_in):
+        """
+        Automatic CUDA compatibility check for the *current* call:
+        Tiny runtime probe (catches unsupported signatures and values).
+        """
+        if gpu_func is None:
+            return False, "no CUDA function configured"
+
+        try:
+            probe_args = [_probe_value_for_cuda(v) for v in args_in]
+            probe_kwargs = {k: _probe_value_for_cuda(v) for k, v in kwargs_in.items()}
+            _execute_cuda(probe_args, probe_kwargs)
+            return True, "CUDA preflight passed"
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            return False, f"CUDA cannot preserve current user parameters ({exc})"
+        except Exception as exc:
+            return False, f"CUDA preflight runtime issue ({exc})"
+
+    def _fallback_after_cuda_preflight_failure(mode):
+        dask_ok = has_dask_backend()
+        if mode in ("cuda", "dask_cuda"):
+            if dask_ok:
+                return "dask", "fallback to dask to preserve user-selected parameters"
+            return "cpu", "fallback to cpu to preserve user-selected parameters"
+        return "cpu", "fallback to cpu"
 
     def _boundary_for_overlap(kwargs_in):
         if dask_boundary_from_param:
@@ -650,7 +991,7 @@ def dispatch(
         # Avoid overlap depth > axis size (common failure on small Z/C dims)
         return tuple(min(r, max(0, int(sz) - 1)) for r, sz in zip(radii, sample_arr.shape))
 
-    def _execute_auto_dask(args_in, kwargs_in, sample_loc, axes):
+    def _execute_auto_dask(args_in, kwargs_in, sample_loc, axes, compute_func, use_gpu=False):
         if dask_strategy not in ("pointwise", "neighborhood"):
             raise ValueError(f"Unknown dask_strategy={dask_strategy!r}")
         sample_exec = None
@@ -659,23 +1000,35 @@ def dispatch(
             sample_exec = args_in[loc_key] if loc_type == "arg" else kwargs_in.get(loc_key)
         if not isinstance(sample_exec, da.Array):
             raise TypeError("Auto dask strategy requires a dask array sample.")
+        if use_gpu and cp is None:
+            raise RuntimeError("dask_cuda path selected but CuPy is unavailable.")
 
         if dask_strategy == "pointwise":
             def block_apply(block):
-                a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
-                return default(*a2, **k2)
+                block_value = cp.asarray(block) if use_gpu else block
+                a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block_value)
+                out = compute_func(*a2, **k2)
+                return _convert_cuda_output_to_numpy(out, cp) if use_gpu else out
 
-            out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
+            if use_gpu and cuda_output_dtype is not None:
+                out_dtype = cuda_output_dtype
+            else:
+                out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
             return da.map_blocks(block_apply, sample_exec, dtype=out_dtype)
 
         # dask_strategy == "neighborhood"
         def overlap_apply(block):
-            a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
-            return default(*a2, **k2)
+            block_value = cp.asarray(block) if use_gpu else block
+            a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block_value)
+            out = compute_func(*a2, **k2)
+            return _convert_cuda_output_to_numpy(out, cp) if use_gpu else out
 
         depth = _depth_for_overlap(sample_exec, axes, kwargs_in)
         boundary = _boundary_for_overlap(kwargs_in)
-        out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
+        if use_gpu and cuda_output_dtype is not None:
+            out_dtype = cuda_output_dtype
+        else:
+            out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
         return sample_exec.map_overlap(
             overlap_apply,
             depth=depth,
@@ -699,8 +1052,40 @@ def dispatch(
                     sample_loc = ("kwarg", k)
                     break
 
-        args_exec, kwargs_exec, sample_exec = maybe_promote_numpy_to_dask(
-            args_in, kwargs_in, sample
+        backend_mode, initial_reason = _choose_backend_mode(sample)
+        reasons = [initial_reason]
+        base_args, base_kwargs, base_sample = list(args_in), dict(kwargs_in), sample
+        args_exec, kwargs_exec, sample_exec = base_args, base_kwargs, base_sample
+
+        # Resolve/validate backend with automatic CUDA compatibility probing.
+        for _ in range(3):
+            args_exec, kwargs_exec, sample_exec = list(base_args), dict(base_kwargs), base_sample
+
+            if backend_mode == "cuda":
+                args_exec, kwargs_exec, sample_exec = maybe_promote_numpy_to_cuda(
+                    args_exec, kwargs_exec, sample_exec
+                )
+            elif backend_mode in ("dask", "dask_cuda"):
+                args_exec, kwargs_exec, sample_exec = maybe_promote_numpy_to_dask(
+                    args_exec, kwargs_exec, sample_exec
+                )
+
+            if backend_mode in ("cuda", "dask_cuda"):
+                ok_cuda, cuda_reason = _cuda_preflight(args_exec, kwargs_exec)
+                reasons.append(cuda_reason)
+                if not ok_cuda:
+                    next_mode, fallback_reason = _fallback_after_cuda_preflight_failure(backend_mode)
+                    reasons.append(fallback_reason)
+                    if next_mode == backend_mode:
+                        backend_mode = "cpu"
+                        break
+                    backend_mode = next_mode
+                    continue
+            break
+
+        backend_reason = "; ".join(reasons)
+        _log_backend(
+            f"requested={backend_requested}, selected={backend_mode}. {backend_reason}"
         )
 
         axes = infer_axes_for_sample(
@@ -712,17 +1097,41 @@ def dispatch(
 
         auto_dask = (
             isinstance(sample_exec, da.Array)
+            and (backend_mode in ("dask", "dask_cuda"))
             and dask_func is None
             and dask_strategy in ("pointwise", "neighborhood")
         )
         if auto_dask:
-            def run_now(a_now, k_now):
-                return _execute_auto_dask(a_now, k_now, sample_loc, axes)
-        else:
-            func = pick_backend(sample_exec)
+            if backend_mode == "dask_cuda":
+                def _compute_cuda(*a_now, **k_now):
+                    return _execute_cuda(a_now, k_now)
+                compute_func = _compute_cuda
+            else:
+                compute_func = default
+            use_gpu = backend_mode == "dask_cuda"
 
             def run_now(a_now, k_now):
-                return func(*a_now, **k_now)
+                return _execute_auto_dask(
+                    a_now, k_now, sample_loc, axes, compute_func, use_gpu=use_gpu
+                )
+        else:
+            if (
+                backend_mode == "dask"
+                and isinstance(sample_exec, da.Array)
+                and dask_func is not None
+            ):
+                func = dask_func
+            else:
+                func = default
+
+            def run_now(a_now, k_now):
+                if backend_mode == "cuda":
+                    out = _execute_cuda(a_now, k_now)
+                else:
+                    out = func(*a_now, **k_now)
+                if backend_mode == "cuda":
+                    return _convert_cuda_output_to_numpy(out, cp)
+                return out
 
         # Fast path: no layout policy or no inferable axes.
         if (
