@@ -12,8 +12,9 @@ from qtpy.QtWidgets import (
 from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
-from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer
+from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer, QStandardPaths
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time
+import tempfile
 import csv
 import html
 import hashlib
@@ -418,6 +419,9 @@ class Connection(QGraphicsPathItem):
             else:
                 self.remove_from_sockets()
                 self.scene_ref.removeItem(self)
+                editor = getattr(self.scene_ref, "editor_ref", None)
+                if editor is not None and hasattr(editor, "_on_pipeline_edited"):
+                    editor._on_pipeline_edited("edge_disconnected")
             self.dragging = False
         else:
             super().mouseReleaseEvent(event)
@@ -1099,6 +1103,8 @@ class FlowScene(QGraphicsScene):
             if handled:
                 return True
         connection.finalize(target_socket)
+        if editor is not None and hasattr(editor, "_on_pipeline_edited"):
+            editor._on_pipeline_edited("edge_connected")
         return True
 
     def find_nearby_socket(self, pos, radius=15, prefer_logic=None):
@@ -1350,6 +1356,14 @@ class FlowEditor(QWidget):
             self._ui_watchdog_timer.start()
         self.macro_groups = {}  # group_id -> {"title","member_uids","collapsed","item"}
         self._active_macro_id = None
+        self._autosave_suspend_depth = 0
+        self._autosave_dirty = False
+        self._autosave_last_reason = ""
+        self._autosave_interval_ms = 1000
+        self._autosave_paths = self._init_autosave_paths()
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self._flush_autosave)
         
         # 1. Main Layout
         self.layout = QVBoxLayout()
@@ -1552,6 +1566,16 @@ class FlowEditor(QWidget):
         """)
         run_row.addWidget(self.btn_run_next, 1)
         button_layout.addLayout(run_row)
+
+        self.lbl_autosave_status = QLabel("Autosave: idle")
+        self.lbl_autosave_status.setStyleSheet(
+            "color: #8a9099; font-size: 11px; padding-left: 2px;"
+        )
+        self.lbl_autosave_status.setToolTip(
+            f"Autosave folder:\n{self._autosave_paths.get('dir', '')}"
+        )
+        button_layout.addWidget(self.lbl_autosave_status)
+        self._set_autosave_status("Autosave: idle", "#8a9099")
         
         # Add buttons to the top of the bottom container
         bottom_layout.addLayout(button_layout)
@@ -1628,6 +1652,7 @@ class FlowEditor(QWidget):
                 app.focusChanged.connect(self._on_application_focus_changed)
             except Exception:
                 pass
+        QTimer.singleShot(0, self._maybe_offer_autosave_recovery)
 
     def _position_floating_buttons(self):
         btn = getattr(self, "btn_back_macro_floating", None)
@@ -1756,6 +1781,198 @@ class FlowEditor(QWidget):
             if new_title not in existing_titles:
                 return new_title
             counter += 1
+
+    def _init_autosave_paths(self):
+        base_dir = ""
+        try:
+            base_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+        except Exception:
+            base_dir = ""
+        if not base_dir:
+            base_dir = os.path.join(tempfile.gettempdir(), "napari_flow_editor")
+
+        autosave_dir = os.path.join(base_dir, "autosave")
+        try:
+            os.makedirs(autosave_dir, exist_ok=True)
+        except Exception:
+            fallback = os.path.join(tempfile.gettempdir(), "napari_flow_editor", "autosave")
+            os.makedirs(fallback, exist_ok=True)
+            autosave_dir = fallback
+
+        return {
+            "dir": autosave_dir,
+            "pipeline": os.path.join(autosave_dir, "pipeline_autosave.json"),
+            "pipeline_bak": os.path.join(autosave_dir, "pipeline_autosave.bak.json"),
+            "meta": os.path.join(autosave_dir, "autosave_meta.json"),
+        }
+
+    def _set_autosave_status(self, text, color="#8a9099"):
+        lbl = getattr(self, "lbl_autosave_status", None)
+        if lbl is None:
+            return
+        lbl.setText(str(text))
+        lbl.setStyleSheet(
+            f"color: {color}; font-size: 11px; padding-left: 2px;"
+        )
+
+    def _read_autosave_meta(self):
+        default_meta = {"dirty": False}
+        meta_path = self._autosave_paths.get("meta", "")
+        if not meta_path or not os.path.exists(meta_path):
+            return default_meta
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                default_meta.update(loaded)
+        except Exception:
+            pass
+        return default_meta
+
+    def _write_autosave_meta(self, **fields):
+        meta_path = self._autosave_paths.get("meta", "")
+        if not meta_path:
+            return
+        meta = self._read_autosave_meta()
+        meta.update(fields)
+        tmp_path = f"{meta_path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(meta, fh, indent=2)
+            os.replace(tmp_path, meta_path)
+        except Exception as exc:
+            print(f"[autosave] failed to write meta: {exc}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    def _on_pipeline_edited(self, reason="edit"):
+        if self._autosave_suspend_depth > 0:
+            return
+        self._autosave_dirty = True
+        self._autosave_last_reason = str(reason)
+        self._set_autosave_status("Autosave: pending...", "#caa25a")
+        if not self._autosave_timer.isActive():
+            self._write_autosave_meta(
+                dirty=True,
+                last_edit_reason=self._autosave_last_reason,
+                last_edit_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            )
+        if self._autosave_timer.isActive():
+            self._autosave_timer.stop()
+        self._autosave_timer.start(self._autosave_interval_ms)
+
+    def _flush_autosave(self, force=False):
+        if self._autosave_suspend_depth > 0 and not force:
+            return
+        try:
+            pipeline = self._build_pipeline_dict()
+        except Exception as exc:
+            print(f"[autosave] failed to build pipeline: {exc}")
+            self._set_autosave_status("Autosave: error building snapshot", "#d66b6b")
+            return
+
+        pipeline_path = self._autosave_paths.get("pipeline", "")
+        backup_path = self._autosave_paths.get("pipeline_bak", "")
+        if not pipeline_path:
+            return
+
+        tmp_path = f"{pipeline_path}.tmp"
+        try:
+            if os.path.exists(pipeline_path) and backup_path:
+                try:
+                    os.replace(pipeline_path, backup_path)
+                except Exception:
+                    pass
+
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(pipeline, fh, indent=2)
+            os.replace(tmp_path, pipeline_path)
+
+            self._write_autosave_meta(
+                dirty=bool(self._autosave_dirty),
+                last_edit_reason=self._autosave_last_reason,
+                last_edit_at=datetime.datetime.now().isoformat(timespec="seconds"),
+                last_autosave_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            )
+            self._set_autosave_status(
+                f"Autosave: saved {datetime.datetime.now().strftime('%H:%M:%S')}",
+                "#5fbf7a",
+            )
+        except Exception as exc:
+            print(f"[autosave] failed to write autosave: {exc}")
+            self._set_autosave_status("Autosave: write error", "#d66b6b")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    def _mark_autosave_clean(self):
+        self._autosave_dirty = False
+        self._autosave_last_reason = ""
+        self._set_autosave_status("Autosave: clean", "#7ea0c8")
+        self._write_autosave_meta(
+            dirty=False,
+            clean_shutdown_at=datetime.datetime.now().isoformat(timespec="seconds"),
+        )
+
+    def _discard_autosave_files(self):
+        for key in ("pipeline", "pipeline_bak", "meta"):
+            path = self._autosave_paths.get(key, "")
+            if not path:
+                continue
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        self._autosave_dirty = False
+        self._autosave_last_reason = ""
+        self._set_autosave_status("Autosave: discarded", "#8a9099")
+
+    def _maybe_offer_autosave_recovery(self):
+        meta = self._read_autosave_meta()
+        autosave_path = self._autosave_paths.get("pipeline", "")
+        if not autosave_path or not os.path.exists(autosave_path):
+            return
+        if not bool(meta.get("dirty", False)):
+            return
+
+        last_edit = str(meta.get("last_edit_at", "unknown"))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Recover Autosave")
+        box.setText("An autosaved pipeline from a previous session was found.")
+        box.setInformativeText(
+            f"Last edit: {last_edit}\nDo you want to recover it?"
+        )
+        recover_btn = box.addButton("Recover", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(recover_btn)
+        box.exec_()
+
+        clicked = box.clickedButton()
+        if clicked is recover_btn:
+            loaded = self._load_pipeline_from_file(
+                autosave_path, from_autosave=True, mark_clean=False
+            )
+            if loaded:
+                self.append_log("♻️ Recovered autosaved pipeline.")
+                self._autosave_dirty = False
+                self._autosave_last_reason = ""
+                self._set_autosave_status("Autosave: recovered", "#7ea0c8")
+                self._write_autosave_meta(
+                    dirty=False,
+                    recovered_at=datetime.datetime.now().isoformat(timespec="seconds"),
+                )
+            return
+
+        if clicked is discard_btn:
+            self._discard_autosave_files()
+            self.append_log("🗑️ Discarded autosaved pipeline.")
 
     def _next_macro_title(self):
         existing = {g.get("title", "") for g in self.macro_groups.values()}
@@ -2088,6 +2305,7 @@ class FlowEditor(QWidget):
         real_conn.finalize(real_target)
         self.scene.addItem(real_conn)
         self._refresh_macro_visibility()
+        self._on_pipeline_edited("edge_connected_macro")
         return True
 
     def _set_node_visible(self, node, visible):
@@ -2243,6 +2461,7 @@ class FlowEditor(QWidget):
         self._refresh_macro_visibility()
         self.on_selection()
         self.append_log(f"📦 Collapsed {len(selected_nodes)} nodes into '{group_title}'.")
+        self._on_pipeline_edited("macro_collapsed")
 
     def enter_macro(self, group_id):
         group = self.macro_groups.get(group_id)
@@ -2277,6 +2496,7 @@ class FlowEditor(QWidget):
         self.macro_groups.pop(group_id, None)
         self._refresh_macro_visibility()
         self.on_selection()
+        self._on_pipeline_edited("macro_expanded")
 
     def expand_selected_macro(self):
         selected_macros = [
@@ -2314,6 +2534,7 @@ class FlowEditor(QWidget):
             item.title = title
             item.update()
         self.append_log(f"✏️ Renamed macro to '{title}'.")
+        self._on_pipeline_edited("macro_renamed")
         self.on_selection()
     
     # --- Node Selection Handler ---
@@ -2850,6 +3071,7 @@ class FlowEditor(QWidget):
             edge.end_socket.connected_edges.remove(edge)
         if edge.scene() is self.scene:
             self.scene.removeItem(edge)
+        self._on_pipeline_edited("edge_removed")
 
     def _resolve_dynamic_output_type(self, node, rule):
         fallback = _normalize_data_type(rule.get("fallback", "any"))
@@ -3574,6 +3796,7 @@ class FlowEditor(QWidget):
         self.set_node_status_recursive(node, "gray")
         self._refresh_dynamic_output_types(node, changed_param=param_name)
         self.scene.update()
+        self._on_pipeline_edited(f"param:{param_name}")
         if self._pending_props_refresh and not self._is_editing_properties_widget():
             self._pending_props_refresh = False
             self.on_selection(force=True)
@@ -3632,9 +3855,7 @@ class FlowEditor(QWidget):
                     child_node = edge.end_socket.node
                     self.set_node_status_recursive(child_node, status)
 
-    # --- Save Pipeline Method ---
-    def save_pipeline(self):
-        # 1. Build the Pipeline Dictionary (Same as before)
+    def _build_pipeline_dict(self):
         pipeline = {
             "schema_version": "0.1",
             "nodes": [],
@@ -3642,40 +3863,38 @@ class FlowEditor(QWidget):
         }
 
         for item in self.scene.items():
-            if isinstance(item, Node):
-                # Map data connections
-                input_connections = {}
-                for socket in item.inputs:
-                    if socket.connected_edges:
-                        edge = socket.connected_edges[0] 
-                        if edge.start_socket:
-                            src_node = edge.start_socket.node
-                            connection_str = f"{src_node.uid}.{edge.start_socket.name}"
-                            input_connections[socket.name] = connection_str
+            if not isinstance(item, Node):
+                continue
 
-                # Map exec connections (exec_in ← exec_out of other nodes)
-                exec_connections = []
-                for socket in item.logic_inputs:
-                    for edge in socket.connected_edges:
-                        if edge.start_socket:
-                            src_node = edge.start_socket.node
-                            exec_connections.append(
-                                f"{src_node.uid}.{edge.start_socket.name}"
-                            )
+            input_connections = {}
+            for socket in item.inputs:
+                if socket.connected_edges:
+                    edge = socket.connected_edges[0]
+                    if edge.start_socket:
+                        src_node = edge.start_socket.node
+                        connection_str = f"{src_node.uid}.{edge.start_socket.name}"
+                        input_connections[socket.name] = connection_str
 
-                node_data = {
-                    "id": item.uid,
-                    "type": item.node_type,
-                    "label": item.title,
-                    "position": {"x": item.pos().x(), "y": item.pos().y()},
-                    "parameters": item.parameters,
-                    "dynamic_param_bindings": getattr(
-                        item, "dynamic_param_bindings", {}
-                    ),
-                    "input_connections": input_connections,
-                    "exec_connections": exec_connections,
-                }
-                pipeline["nodes"].append(node_data)
+            exec_connections = []
+            for socket in item.logic_inputs:
+                for edge in socket.connected_edges:
+                    if edge.start_socket:
+                        src_node = edge.start_socket.node
+                        exec_connections.append(
+                            f"{src_node.uid}.{edge.start_socket.name}"
+                        )
+
+            node_data = {
+                "id": item.uid,
+                "type": item.node_type,
+                "label": item.title,
+                "position": {"x": item.pos().x(), "y": item.pos().y()},
+                "parameters": item.parameters,
+                "dynamic_param_bindings": getattr(item, "dynamic_param_bindings", {}),
+                "input_connections": input_connections,
+                "exec_connections": exec_connections,
+            }
+            pipeline["nodes"].append(node_data)
 
         for group_id, group in self.macro_groups.items():
             item = group.get("item")
@@ -3691,75 +3910,81 @@ class FlowEditor(QWidget):
                 }
             )
 
-        # 2. Open File Browser to Save
-        # Arguments: Parent, Title, Default Name, File Filter
+        return pipeline
+
+    def _write_pipeline_file(self, filename, pipeline):
+        with open(filename, "w", encoding="utf-8") as fh:
+            json.dump(pipeline, fh, indent=2)
+
+    # --- Save Pipeline Method ---
+    def save_pipeline(self):
         filename, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Save Pipeline", 
-            "pipeline.json", 
+            self,
+            "Save Pipeline",
+            "pipeline.json",
             "JSON Files (*.json)"
         )
+        if not filename:
+            return
 
-        # 3. Write to disk if user selected a file
-        if filename:
-            # Ensure .json extension is present
-            if not filename.endswith(".json"):
-                filename += ".json"
-                
-            try:
-                with open(filename, "w") as f:
-                    json.dump(pipeline, f, indent=2)
-                # Optional: Feedback
-                # print(f"Pipeline saved to {filename}")
-            except Exception as e:
-                print(f"Error saving pipeline: {e}")
+        if not filename.endswith(".json"):
+            filename += ".json"
 
-    # --- Load Pipeline ---
-    def load_pipeline(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Open Pipeline", "", "JSON Files (*.json)")
-        if not filename: return
+        try:
+            pipeline = self._build_pipeline_dict()
+            self._write_pipeline_file(filename, pipeline)
+            self._mark_autosave_clean()
+            self._flush_autosave(force=True)
+        except Exception as e:
+            print(f"Error saving pipeline: {e}")
 
-        self._clear_macro_groups()
-        self.scene.clear()
-        with open(filename, "r") as f:
-            pipeline = json.load(f)
+    def _load_pipeline_from_dict(self, pipeline, mark_clean=True):
+        if self._autosave_timer.isActive():
+            self._autosave_timer.stop()
+        self._autosave_suspend_depth += 1
+        try:
+            self._clear_macro_groups()
+            self.scene.clear()
 
-        node_map = {} # Map UUID -> Node Object
+            node_map = {}
 
-        # Pass 1: Create all nodes
-        for n_data in pipeline.get("nodes", []):
-            pos = n_data.get("position", {"x": 0, "y": 0})
-            
-            # Create node with specific UID and Title from save file
-            new_node = self.add_node(
-                node_type=n_data.get("type", "generic"),
-                pos=QPointF(pos["x"], pos["y"]),
-                loaded_params=n_data.get("parameters", {}),
-                loaded_dynamic_bindings=n_data.get("dynamic_param_bindings", {}),
-                loaded_uid=n_data.get("id"),
-                loaded_title=n_data.get("label")
-            )
-            node_map[new_node.uid] = new_node
+            # Pass 1: Create all nodes
+            for n_data in pipeline.get("nodes", []):
+                pos = n_data.get("position", {"x": 0, "y": 0})
+                new_node = self.add_node(
+                    node_type=n_data.get("type", "generic"),
+                    pos=QPointF(pos["x"], pos["y"]),
+                    loaded_params=n_data.get("parameters", {}),
+                    loaded_dynamic_bindings=n_data.get("dynamic_param_bindings", {}),
+                    loaded_uid=n_data.get("id"),
+                    loaded_title=n_data.get("label"),
+                )
+                node_map[new_node.uid] = new_node
 
-        # Pass 2: Reconnect Edges
-        for n_data in pipeline.get("nodes", []):
-            target_node = node_map.get(n_data["id"])
-            if not target_node: continue
-            
-            connections = n_data.get("input_connections", {})
-            
-            # connection format: "target_input_name": "source_uid.source_output_name"
-            for tgt_sock_name, src_string in connections.items():
-                if "." not in src_string: continue
-                
-                src_uid, src_sock_name = src_string.split(".", 1)
-                src_node = node_map.get(src_uid)
-                
-                if src_node:
-                    # Find the actual socket objects
-                    src_socket = next((s for s in src_node.outputs if s.name == src_sock_name), None)
-                    tgt_socket = next((s for s in target_node.inputs if s.name == tgt_sock_name), None)
-                    
+            # Pass 2: Reconnect Edges
+            for n_data in pipeline.get("nodes", []):
+                target_node = node_map.get(n_data["id"])
+                if not target_node:
+                    continue
+
+                connections = n_data.get("input_connections", {})
+
+                for tgt_sock_name, src_string in connections.items():
+                    if "." not in src_string:
+                        continue
+                    src_uid, src_sock_name = src_string.split(".", 1)
+                    src_node = node_map.get(src_uid)
+                    if not src_node:
+                        continue
+
+                    src_socket = next(
+                        (s for s in src_node.outputs if s.name == src_sock_name),
+                        None,
+                    )
+                    tgt_socket = next(
+                        (s for s in target_node.inputs if s.name == tgt_sock_name),
+                        None,
+                    )
                     if (
                         src_socket
                         and tgt_socket
@@ -3769,16 +3994,20 @@ class FlowEditor(QWidget):
                         conn.finalize(tgt_socket)
                         self.scene.addItem(conn)
 
-            # Reconnect Exec edges
-            exec_conn_list = n_data.get("exec_connections", n_data.get("logic_connections", []))
-            for src_string in exec_conn_list:
-                if "." not in src_string:
-                    continue
-                src_uid, src_sock_name = src_string.split(".", 1)
-                src_node = node_map.get(src_uid)
-                if src_node:
+                exec_conn_list = n_data.get(
+                    "exec_connections", n_data.get("logic_connections", [])
+                )
+                for src_string in exec_conn_list:
+                    if "." not in src_string:
+                        continue
+                    src_uid, src_sock_name = src_string.split(".", 1)
+                    src_node = node_map.get(src_uid)
+                    if not src_node:
+                        continue
+
                     src_socket = next(
-                        (s for s in src_node.logic_outputs if s.name == src_sock_name), None
+                        (s for s in src_node.logic_outputs if s.name == src_sock_name),
+                        None,
                     )
                     tgt_socket = target_node.logic_inputs[0] if target_node.logic_inputs else None
                     if src_socket and tgt_socket:
@@ -3786,38 +4015,64 @@ class FlowEditor(QWidget):
                         conn.finalize(tgt_socket)
                         self.scene.addItem(conn)
 
-        # Pass 3: Restore macro groups (if present)
-        for g_data in pipeline.get("macro_groups", []):
-            group_id = g_data.get("id", str(uuid.uuid4()))
-            title = g_data.get("label", self._next_macro_title())
-            pos = g_data.get("position", {"x": 0, "y": 0})
-            members = {
-                uid for uid in g_data.get("members", [])
-                if uid in node_map
-            }
-            if not members:
-                continue
-            item = MacroGroupItem(
-                pos.get("x", 0),
-                pos.get("y", 0),
-                group_id=group_id,
-                title=title,
-                node_count=len(members),
-                on_open=self.enter_macro,
-                scene=self.scene,
-            )
-            self.scene.addItem(item)
-            self.macro_groups[group_id] = {
-                "id": group_id,
-                "title": title,
-                "member_uids": set(members),
-                "collapsed": bool(g_data.get("collapsed", True)),
-                "item": item,
-            }
+            # Pass 3: Restore macro groups (if present)
+            for g_data in pipeline.get("macro_groups", []):
+                group_id = g_data.get("id", str(uuid.uuid4()))
+                title = g_data.get("label", self._next_macro_title())
+                pos = g_data.get("position", {"x": 0, "y": 0})
+                members = {uid for uid in g_data.get("members", []) if uid in node_map}
+                if not members:
+                    continue
+                item = MacroGroupItem(
+                    pos.get("x", 0),
+                    pos.get("y", 0),
+                    group_id=group_id,
+                    title=title,
+                    node_count=len(members),
+                    on_open=self.enter_macro,
+                    scene=self.scene,
+                )
+                self.scene.addItem(item)
+                self.macro_groups[group_id] = {
+                    "id": group_id,
+                    "title": title,
+                    "member_uids": set(members),
+                    "collapsed": bool(g_data.get("collapsed", True)),
+                    "item": item,
+                }
 
-        self._active_macro_id = None
-        self._set_back_macro_button_visible(False)
-        self._refresh_macro_visibility()
+            self._active_macro_id = None
+            self._set_back_macro_button_visible(False)
+            self._refresh_macro_visibility()
+            self.on_selection(force=True)
+        finally:
+            self._autosave_suspend_depth = max(0, self._autosave_suspend_depth - 1)
+
+        if mark_clean:
+            self._mark_autosave_clean()
+            self._flush_autosave(force=True)
+        return True
+
+    def _load_pipeline_from_file(self, filename, from_autosave=False, mark_clean=True):
+        try:
+            with open(filename, "r", encoding="utf-8") as fh:
+                pipeline = json.load(fh)
+        except Exception as exc:
+            if not from_autosave:
+                QMessageBox.critical(self, "Load Error", f"Could not load pipeline:\n{exc}")
+            else:
+                print(f"[autosave] failed to load autosave: {exc}")
+            return False
+        return self._load_pipeline_from_dict(pipeline, mark_clean=mark_clean)
+
+    # --- Load Pipeline ---
+    def load_pipeline(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Open Pipeline", "", "JSON Files (*.json)"
+        )
+        if not filename:
+            return
+        self._load_pipeline_from_file(filename, from_autosave=False, mark_clean=True)
 
 
     # --- Add Node Method ---
@@ -3906,6 +4161,7 @@ class FlowEditor(QWidget):
         if self._active_macro_id and self._active_macro_id in self.macro_groups:
             self.macro_groups[self._active_macro_id]["member_uids"].add(node.uid)
             self._refresh_macro_visibility()
+        self._on_pipeline_edited("node_added")
         return node
     
     # --- Remove Node Method ---
@@ -3969,6 +4225,7 @@ class FlowEditor(QWidget):
         for group_id in empty_groups:
             self._expand_macro_group(group_id)
         self._refresh_macro_visibility()
+        self._on_pipeline_edited("node_deleted")
 
     def delete_selected_nodes(self):
         """Delete currently selected nodes (used by Delete/Backspace shortcut)."""
@@ -4082,6 +4339,7 @@ class FlowEditor(QWidget):
 
         self.set_node_status_recursive(node, "gray")
         self.scene.update()
+        self._on_pipeline_edited(f"dynamic_param:{param_name}")
 
     def _wrap_with_dynamic_binding_controls(
         self,
@@ -5030,6 +5288,17 @@ class FlowEditor(QWidget):
         self.console.append(text)
         sb = self.console.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def closeEvent(self, event):
+        try:
+            self._flush_pending_param_updates()
+            if self._autosave_timer.isActive():
+                self._autosave_timer.stop()
+            self._flush_autosave(force=True)
+            self._mark_autosave_clean()
+        except Exception as exc:
+            print(f"[autosave] closeEvent warning: {exc}")
+        super().closeEvent(event)
 
     def set_ui_enabled(self, enabled: bool, run_mode: str = "full"):
         """Locks/Unlocks buttons during execution."""
