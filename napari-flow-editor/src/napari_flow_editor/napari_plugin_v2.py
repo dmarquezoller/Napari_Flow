@@ -5,6 +5,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout, QPushButton, QMenu, QWidget, QGroupBox, QFormLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea, QBoxLayout,
     QFrame, QMessageBox, QTextEdit, QSplitter, QDialog, QTableWidget, QHeaderView, QAbstractItemView,
+    QTabWidget, QTableWidgetItem,
     QToolTip,
     QListWidget, QListWidgetItem
 )
@@ -1346,6 +1347,8 @@ class FlowEditor(QWidget):
         self._ui_watchdog_timer.timeout.connect(self._ui_watchdog_tick)
         self._batch_interactive_warning_message = None
         self._batch_columns_cache = {}
+        self._backend_rows_by_uid = {}
+        self._backend_row_order = []
         self.thread = None
         self.worker = None
         self._active_run_mode = None
@@ -1613,15 +1616,60 @@ class FlowEditor(QWidget):
         self.plot_dashboard = PlotDashboard()
         self.inner_splitter.addWidget(self.plot_dashboard)
         
-        # 3. Console (Restored name 'self.console')
+        # 3. Bottom tabs (Log + Backends)
+        self.bottom_tabs = QTabWidget()
+
+        # Log tab (keeps existing QTextEdit API)
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setFixedHeight(100)
-        self.console.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: Monospace;")
+        self.console.setStyleSheet(
+            "background-color: #1e1e1e; color: #00ff00; font-family: Monospace;"
+        )
         self.console.setPlaceholderText("Execution log...")
-        self.inner_splitter.addWidget(self.console)
+        self.bottom_tabs.addTab(self.console, "Log")
+
+        # Backends tab
+        self.backend_tab = QWidget()
+        backend_layout = QVBoxLayout(self.backend_tab)
+        backend_layout.setContentsMargins(6, 6, 6, 6)
+        backend_layout.setSpacing(6)
+
+        self.backend_summary_label = QLabel("No backend data yet.")
+        self.backend_summary_label.setStyleSheet("color: #b9c4d0; font-size: 11px;")
+        backend_layout.addWidget(self.backend_summary_label)
+
+        self.backend_table = QTableWidget(0, 5)
+        self.backend_table.setHorizontalHeaderLabels(
+            ["Node", "Requested", "Selected", "Reason", "Time (ms)"]
+        )
+        self.backend_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.backend_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.backend_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.backend_table.verticalHeader().setVisible(False)
+        self.backend_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.backend_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        self.backend_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.backend_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.Stretch
+        )
+        self.backend_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeToContents
+        )
+        self.backend_table.cellClicked.connect(self._on_backend_table_row_clicked)
+        backend_layout.addWidget(self.backend_table, 1)
+
+        self.bottom_tabs.addTab(self.backend_tab, "Backends")
+        # Keep bottom panel compact by default (similar to old fixed console).
+        self.bottom_tabs.setMinimumHeight(110)
+        self.inner_splitter.addWidget(self.bottom_tabs)
         
-        # Set Ratios: Graph (70%), Plot (0%), Log (30%)
+        # Set Ratios: Graph (70%), Plot (0%), Bottom Tabs (30%)
         self.inner_splitter.setStretchFactor(0, 7) 
         self.inner_splitter.setStretchFactor(1, 0)
         self.inner_splitter.setStretchFactor(2, 3)
@@ -1652,6 +1700,7 @@ class FlowEditor(QWidget):
                 app.focusChanged.connect(self._on_application_focus_changed)
             except Exception:
                 pass
+        QTimer.singleShot(0, self._apply_default_inner_splitter_sizes)
         QTimer.singleShot(0, self._maybe_offer_autosave_recovery)
 
     def _position_floating_buttons(self):
@@ -1666,6 +1715,20 @@ class FlowEditor(QWidget):
         x = max(margin, viewport.width() - btn.width() - margin)
         y = margin
         btn.move(x, y)
+
+    def _apply_default_inner_splitter_sizes(self):
+        """
+        Startup-only size tuning so graph area keeps priority.
+        This restores the pre-backend-tab feel: large graph, compact bottom panel.
+        """
+        splitter = getattr(self, "inner_splitter", None)
+        if splitter is None:
+            return
+        try:
+            # Bias strongly toward graph area at startup.
+            splitter.setSizes([760, 0, 120])
+        except Exception:
+            pass
 
     def _set_back_macro_button_visible(self, visible):
         btn = getattr(self, "btn_back_macro_floating", None)
@@ -3019,7 +3082,70 @@ class FlowEditor(QWidget):
         
         self.props_layout.addRow(QLabel("")) 
 
-        # --- SECTION 3: PREVIEW LAYER ---
+        # --- SECTION 3: EXECUTION DIAGNOSTICS ---
+        self.props_layout.addRow(QLabel("<u>Execution Diagnostics</u>"))
+        diag = self._backend_rows_by_uid.get(getattr(node, "uid", ""), {})
+        if not diag:
+            self.props_layout.addRow(QLabel("<em>No run diagnostics available for this node.</em>"))
+        else:
+            status = str(diag.get("status", "unknown")).strip().lower()
+            status_text = {
+                "ok": "OK",
+                "cached": "Cached",
+                "error": "Failed",
+                "interrupted": "Interrupted",
+            }.get(status, status.title() or "Unknown")
+            status_color = {
+                "ok": "#7fd38f",
+                "cached": "#c5ccd6",
+                "error": "#ff8a80",
+                "interrupted": "#f4d35e",
+            }.get(status, "#c5ccd6")
+
+            status_lbl = QLabel(status_text)
+            status_lbl.setStyleSheet(f"color: {status_color}; font-weight: bold;")
+            self.props_layout.addRow("Status:", status_lbl)
+
+            requested = str(diag.get("requested_backend", "-"))
+            selected = str(diag.get("selected_backend", "-"))
+            elapsed_ms = float(diag.get("elapsed_ms", 0.0) or 0.0)
+            fallback = bool(diag.get("fallback", False))
+            reason = str(diag.get("reason", "")).strip()
+
+            self.props_layout.addRow("Requested backend:", QLabel(requested))
+            self.props_layout.addRow("Selected backend:", QLabel(selected))
+            self.props_layout.addRow("Elapsed (ms):", QLabel(f"{elapsed_ms:.1f}"))
+            self.props_layout.addRow("Fallback:", QLabel("Yes" if fallback else "No"))
+
+            if reason:
+                reason_lbl = QLabel(reason)
+                reason_lbl.setWordWrap(True)
+                reason_lbl.setStyleSheet("color: #c9d2dd;")
+                self.props_layout.addRow("Reason:", reason_lbl)
+
+            if status == "error":
+                err_type = str(diag.get("error_type", "")).strip()
+                err_msg = str(diag.get("error_message", "")).strip()
+                if err_type or err_msg:
+                    err_text = f"{err_type}: {err_msg}" if err_type and err_msg else (err_type or err_msg)
+                    err_lbl = QLabel(err_text)
+                    err_lbl.setWordWrap(True)
+                    err_lbl.setStyleSheet("color: #ffb4ab;")
+                    self.props_layout.addRow("Error:", err_lbl)
+
+                tb = str(diag.get("error_traceback", "")).strip()
+                if tb:
+                    tb_widget = QTextEdit()
+                    tb_widget.setReadOnly(True)
+                    tb_widget.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+                    tb_widget.setMinimumHeight(120)
+                    tb_widget.setMaximumHeight(260)
+                    tb_widget.setPlainText(tb)
+                    self.props_layout.addRow("Traceback:", tb_widget)
+
+        self.props_layout.addRow(QLabel(""))
+
+        # --- SECTION 4: PREVIEW LAYER ---
         self.props_layout.addRow(QLabel("<u>Result Preview</u>"))
         if hasattr(node, "cached_results") and node.cached_results:
             # Just grab the first value found in the dict
@@ -4679,6 +4805,7 @@ class FlowEditor(QWidget):
         self.worker.node_status_signal.connect(self.update_node_status)
         self.worker.log_signal.connect(self.append_log)
         self.worker.result_signal.connect(self.handle_execution_result)
+        self.worker.backend_trace_signal.connect(self._on_backend_trace)
         self.worker.interaction_request_signal.connect(self.handle_interaction_request)
         self.worker.loop_control_state_signal.connect(self.handle_loop_control_state)
         self.worker.step_state_signal.connect(self._on_step_state_updated)
@@ -4700,6 +4827,7 @@ class FlowEditor(QWidget):
         # before validation/execution starts.
         self._flush_pending_param_updates()
         self._reset_step_state()
+        self._reset_backend_panel("Running full pipeline...")
 
         # 1. Validate graph before creating worker/thread.
         self.console.clear()
@@ -4739,6 +4867,7 @@ class FlowEditor(QWidget):
             return
 
         self._flush_pending_param_updates()
+        self._reset_backend_panel("Running single step...")
 
         current_sig = self._compute_step_graph_signature()
         if (
@@ -5283,6 +5412,103 @@ class FlowEditor(QWidget):
 
 
 
+
+    def _reset_backend_panel(self, message="No backend data yet."):
+        self._backend_rows_by_uid = {}
+        self._backend_row_order = []
+        if hasattr(self, "backend_table"):
+            self.backend_table.setRowCount(0)
+        if hasattr(self, "backend_summary_label"):
+            self.backend_summary_label.setText(str(message))
+        sel = self.scene.selectedItems()
+        if len(sel) == 1 and isinstance(sel[0], Node):
+            self.on_selection(force=True)
+
+    def _status_brush_for_backend_row(self, payload):
+        status = str(payload.get("status", "")).strip().lower()
+        fallback = bool(payload.get("fallback", False))
+        if status == "error":
+            return QBrush(QColor("#5b1f24"))
+        if status == "cached":
+            return QBrush(QColor("#2d323a"))
+        if status == "interrupted":
+            return QBrush(QColor("#2a3a46"))
+        if fallback:
+            return QBrush(QColor("#4d4421"))
+        return QBrush(QColor("#1f3f2d"))
+
+    def _refresh_backend_table(self):
+        if not hasattr(self, "backend_table"):
+            return
+
+        rows = [self._backend_rows_by_uid[uid] for uid in self._backend_row_order if uid in self._backend_rows_by_uid]
+        self.backend_table.setRowCount(len(rows))
+
+        ok_count = 0
+        fallback_count = 0
+        error_count = 0
+        cached_count = 0
+
+        for row_idx, payload in enumerate(rows):
+            node_title = str(payload.get("node_title", ""))
+            req = str(payload.get("requested_backend", "-"))
+            sel = str(payload.get("selected_backend", "-"))
+            reason = str(payload.get("reason", ""))
+            elapsed = float(payload.get("elapsed_ms", 0.0) or 0.0)
+            status = str(payload.get("status", "")).strip().lower()
+            fallback = bool(payload.get("fallback", False))
+
+            if status == "error":
+                error_count += 1
+            elif status == "cached":
+                cached_count += 1
+            else:
+                ok_count += 1
+                if fallback:
+                    fallback_count += 1
+
+            values = [
+                node_title,
+                req,
+                sel,
+                reason,
+                f"{elapsed:.1f}",
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, str(payload.get("node_uid", "")))
+                item.setBackground(self._status_brush_for_backend_row(payload))
+                self.backend_table.setItem(row_idx, col, item)
+
+        total = len(rows)
+        self.backend_summary_label.setText(
+            f"Run: {total} node(s) | ok: {ok_count} | fallback: {fallback_count} | cached: {cached_count} | failed: {error_count}"
+        )
+
+    def _on_backend_trace(self, payload):
+        if not isinstance(payload, dict):
+            return
+        uid = str(payload.get("node_uid", "")).strip()
+        if not uid:
+            return
+        if uid not in self._backend_rows_by_uid:
+            self._backend_row_order.append(uid)
+        self._backend_rows_by_uid[uid] = dict(payload)
+        self._refresh_backend_table()
+        sel = self.scene.selectedItems()
+        if len(sel) == 1 and isinstance(sel[0], Node) and str(sel[0].uid) == uid:
+            self.on_selection(force=True)
+
+    def _on_backend_table_row_clicked(self, row, _col):
+        if row < 0:
+            return
+        item = self.backend_table.item(row, 0)
+        if item is None:
+            return
+        node_uid = str(item.data(Qt.UserRole) or "").strip()
+        if not node_uid:
+            return
+        self._select_node_for_properties(node_uid)
 
     def append_log(self, text):
         self.console.append(text)

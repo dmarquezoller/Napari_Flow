@@ -1,5 +1,5 @@
 import numpy as np
-from .conftest import FakeNode, FakeSocket, FakeEdge
+from .conftest import FakeNode, FakeSocket, FakeEdge, unpack_execute_result
 
 
 def test_metadata_merge_priority(worker):
@@ -24,7 +24,7 @@ def test_metadata_merge_priority(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     _, meta = result["out"]
     assert meta["axes"] == "ZYX"
     assert meta["name"] == "Processed"

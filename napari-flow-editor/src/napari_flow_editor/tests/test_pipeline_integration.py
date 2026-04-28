@@ -1,5 +1,5 @@
 import numpy as np
-from .conftest import FakeNode, FakeSocket, FakeEdge
+from .conftest import FakeNode, FakeSocket, FakeEdge, unpack_execute_result
 
 
 def test_simple_pipeline(worker):
@@ -22,7 +22,7 @@ def test_simple_pipeline(worker):
         }
     }
 
-    result = worker.execute_node_logic(node_b, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node_b, library_def))
     data, meta = result["out"]
 
     assert np.all(data == 2)

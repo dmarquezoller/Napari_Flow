@@ -10,7 +10,7 @@ from napari_flow_editor.flow_nodes.decorator import (
     pop_dispatch_context,
     push_dispatch_context,
 )
-from .conftest import FakeEdge, FakeNode, FakeSocket
+from .conftest import FakeEdge, FakeNode, FakeSocket, unpack_execute_result
 
 
 def _run_with_metadata(metadata, fn):
@@ -129,7 +129,7 @@ def test_worker_propagates_axes_metadata_to_dispatch(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     out, meta = result["out"]
 
     assert out.shape == (2, 10, 11)

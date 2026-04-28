@@ -518,6 +518,18 @@ def dispatch(
         print(f"[dispatch:{getattr(default, '__name__', 'func')}] {message}")
         backend_message_printed = True
 
+    def _emit_backend_trace(payload):
+        recorder = None
+        if isinstance(ctx, dict):
+            recorder = ctx.get("backend_recorder")
+        if not callable(recorder):
+            return
+        try:
+            recorder(dict(payload or {}))
+        except Exception:
+            # Backend tracing must never affect node execution.
+            pass
+
     runtime_axes = None
     runtime_axis_labels = None
     runtime_layout_kind = None
@@ -1086,6 +1098,14 @@ def dispatch(
         backend_reason = "; ".join(reasons)
         _log_backend(
             f"requested={backend_requested}, selected={backend_mode}. {backend_reason}"
+        )
+        _emit_backend_trace(
+            {
+                "dispatch_function": getattr(default, "__name__", "func"),
+                "requested_backend": backend_requested,
+                "selected_backend": backend_mode,
+                "reason": backend_reason,
+            }
         )
 
         axes = infer_axes_for_sample(

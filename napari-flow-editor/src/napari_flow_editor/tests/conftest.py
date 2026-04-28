@@ -66,6 +66,29 @@ class FakeNode:
         return self.inputs + self.outputs + self.logic_inputs + self.logic_outputs
 
 
+def unpack_execute_result(result):
+    """
+    Compatibility helper for ExecutionWorker.execute_node_logic return shape.
+
+    Newer engine versions return:
+      (node_outputs: dict, node_trace: dict)
+    while older versions returned:
+      node_outputs: dict
+    """
+    if isinstance(result, dict):
+        return result, {}
+    if (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[0], dict)
+        and isinstance(result[1], dict)
+    ):
+        return result[0], result[1]
+    raise AssertionError(
+        f"Unexpected execute_node_logic result type: {type(result)!r}"
+    )
+
+
 @pytest.fixture
 def viewer():
     data = np.arange(12).reshape(3, 4)

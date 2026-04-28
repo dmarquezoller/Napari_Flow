@@ -37,6 +37,7 @@ class ExecutionWorker(QObject):
     log_signal = Signal(str)
     node_status_signal = Signal(str, str)     # (UID, "green"/"yellow"/"red")
     result_signal = Signal(str, str, object)  # (Title, OutputName, Data)
+    backend_trace_signal = Signal(object)      # per-node backend/timing row
     finished_signal = Signal()
     error_signal = Signal(str)
 
@@ -336,24 +337,112 @@ class ExecutionWorker(QObject):
                 pass
 
     def _execute_single_node(self, node, library_def, force_recompute=False):
+        started_at = time.perf_counter()
+        requested_backend = str(getattr(node, "parameters", {}).get("backend", "-"))
         try:
             current_signature = self.calculate_signature(node)
             if (not force_recompute) and current_signature == node.last_signature:
                 self.log_signal.emit(f"Skipping: {node.title} (Cached)")
                 self.node_status_signal.emit(node.uid, "green")
+                self.backend_trace_signal.emit(
+                    {
+                        "node_uid": node.uid,
+                        "node_title": node.title,
+                        "requested_backend": requested_backend,
+                        "selected_backend": "cache",
+                        "reason": "Node skipped (cached signature match).",
+                        "elapsed_ms": 0.0,
+                        "status": "cached",
+                        "fallback": False,
+                        "error_type": "",
+                        "error_message": "",
+                        "error_traceback": "",
+                    }
+                )
                 return
 
             self.node_status_signal.emit(node.uid, "yellow")
-            results = self.execute_node_logic(node, library_def)
+            exec_out = self.execute_node_logic(node, library_def)
+            node_trace = {}
+            if (
+                isinstance(exec_out, tuple)
+                and len(exec_out) == 2
+                and isinstance(exec_out[1], dict)
+            ):
+                results, node_trace = exec_out
+            else:
+                results = exec_out
             node.cached_results = results
             node.last_signature = current_signature
             self.node_status_signal.emit(node.uid, "green")
+
+            selected_backend = str(node_trace.get("selected_backend", "cpu"))
+            requested = str(node_trace.get("requested_backend", requested_backend))
+            fallback = bool(node_trace.get("fallback", False))
+            if not fallback:
+                req_norm = requested.strip().lower()
+                sel_norm = selected_backend.strip().lower()
+                if req_norm in {"cpu", "dask", "cuda", "dask_cuda"}:
+                    fallback = sel_norm != req_norm
+
+            elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+            self.backend_trace_signal.emit(
+                {
+                    "node_uid": node.uid,
+                    "node_title": node.title,
+                    "requested_backend": requested,
+                    "selected_backend": selected_backend,
+                    "reason": str(node_trace.get("reason", "")),
+                    "elapsed_ms": elapsed_ms,
+                    "status": "ok",
+                    "fallback": fallback,
+                    "dispatch_function": str(
+                        node_trace.get("dispatch_function", "")
+                    ).strip(),
+                    "error_type": "",
+                    "error_message": "",
+                    "error_traceback": "",
+                }
+            )
         except InterruptedError:
             # Expected path when a loop stop interrupts interactive waiting.
             self.node_status_signal.emit(node.uid, "green")
+            elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+            self.backend_trace_signal.emit(
+                {
+                    "node_uid": node.uid,
+                    "node_title": node.title,
+                    "requested_backend": requested_backend,
+                    "selected_backend": "interrupted",
+                    "reason": "Execution interrupted by loop stop.",
+                    "elapsed_ms": elapsed_ms,
+                    "status": "interrupted",
+                    "fallback": False,
+                    "error_type": "",
+                    "error_message": "",
+                    "error_traceback": "",
+                }
+            )
             raise
-        except Exception:
+        except Exception as exc:
             self.node_status_signal.emit(node.uid, "red")
+            elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+            full_tb = traceback.format_exc()
+            self.backend_trace_signal.emit(
+                {
+                    "node_uid": node.uid,
+                    "node_title": node.title,
+                    "requested_backend": requested_backend,
+                    "selected_backend": "error",
+                    "reason": str(exc),
+                    "elapsed_ms": elapsed_ms,
+                    "status": "error",
+                    "fallback": False,
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                    "error_traceback": full_tb,
+                }
+            )
             raise
 
     def _next_logic_node(self, node, output_name=None):
@@ -1054,7 +1143,16 @@ class ExecutionWorker(QObject):
 
         input_result = self.resolve_input_node(node, func_params)
         if input_result is not None:
-            return input_result
+            return (
+                input_result,
+                {
+                    "requested_backend": str(func_params.get("backend", "-")),
+                    "selected_backend": "cpu",
+                    "reason": "Input/source node (no dispatch backend).",
+                    "dispatch_function": "",
+                    "fallback": False,
+                },
+            )
         # --- C. Import & Run Normal Nodes ---
         def_data = library_def.get(node.node_type, {})
         
@@ -1156,11 +1254,18 @@ class ExecutionWorker(QObject):
 
         # RUN
         args = {**func_inputs, **clean_params}
+        dispatch_events = []
+
+        def _record_backend_trace(event):
+            if isinstance(event, dict):
+                dispatch_events.append(dict(event))
+
         dispatch_token = push_dispatch_context(
             {
                 "metadata": current_metadata.copy(),
                 "node_uid": node.uid,
                 "node_type": node.node_type,
+                "backend_recorder": _record_backend_trace,
             }
         )
         try:
@@ -1369,8 +1474,33 @@ class ExecutionWorker(QObject):
         # Emit Results
         for out_name, out_data in node_outputs.items():
             self.result_signal.emit(node.title, out_name, out_data)
-            
-        return node_outputs
+
+        node_trace = {
+            "requested_backend": str(clean_params.get("backend", "-")),
+            "selected_backend": "cpu",
+            "reason": "Node executed without dispatch backend selection.",
+            "dispatch_function": "",
+            "fallback": False,
+        }
+        if dispatch_events:
+            primary = dict(dispatch_events[-1])
+            node_trace["requested_backend"] = str(
+                primary.get("requested_backend", node_trace["requested_backend"])
+            )
+            node_trace["selected_backend"] = str(
+                primary.get("selected_backend", node_trace["selected_backend"])
+            )
+            node_trace["reason"] = str(primary.get("reason", ""))
+            node_trace["dispatch_function"] = str(
+                primary.get("dispatch_function", "")
+            )
+            req = node_trace["requested_backend"].strip().lower()
+            sel = node_trace["selected_backend"].strip().lower()
+            node_trace["fallback"] = (
+                req in {"cpu", "dask", "cuda", "dask_cuda"} and sel != req
+            )
+
+        return node_outputs, node_trace
 
     def topological_sort(self, nodes):
         visited = set()

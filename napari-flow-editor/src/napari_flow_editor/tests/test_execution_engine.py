@@ -1,5 +1,5 @@
 import numpy as np
-from .conftest import FakeNode, FakeSocket, FakeEdge
+from .conftest import FakeNode, FakeSocket, FakeEdge, unpack_execute_result
 
 
 def test_execute_node_logic_wraps_result(worker):
@@ -14,7 +14,7 @@ def test_execute_node_logic_wraps_result(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     data, meta = result["out"]
 
     assert data.shape == (2, 2)
@@ -45,7 +45,7 @@ def test_execute_node_logic_unwraps_input_envelope(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     _, meta = result["out"]
     assert meta["axes"] == "ZYX"
 
@@ -76,7 +76,7 @@ def test_execute_node_logic_preserves_inherited_contrast_limits(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     data, meta = result["out"]
 
     assert data.shape == (8, 8)
@@ -109,7 +109,7 @@ def test_execute_node_logic_computes_contrast_limits_when_missing(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     data, meta = result["out"]
 
     assert data.shape == (8, 8)
@@ -133,7 +133,7 @@ def test_execute_node_logic_keeps_explicit_contrast_limits(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     _, meta = result["out"]
     assert meta["contrast_limits"] == [5.0, 6.0]
 
@@ -164,7 +164,7 @@ def test_execute_node_logic_uses_node_scoped_output_name_for_processed_nodes(wor
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     _, meta = result["out"]
     assert meta["name"] == "Gaussian Blur Output"
 
@@ -195,7 +195,7 @@ def test_execute_node_logic_preserves_name_for_input_category_nodes(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     _, meta = result["out"]
     assert meta["name"] == "nuclei"
 
@@ -255,8 +255,9 @@ def test_execute_node_logic_video_render_injects_current_params(worker):
         }
     }
 
-    result = worker.execute_node_logic(node, library_def)
+    result, trace = unpack_execute_result(worker.execute_node_logic(node, library_def))
     assert result == {}
+    assert isinstance(trace, dict)
     assert captured["config"]["interaction_type"] == "video_render"
     assert isinstance(captured["config"]["video_params"]["instructions"], list)
     assert captured["config"]["video_params"]["fps"] == 12

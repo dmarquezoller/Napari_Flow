@@ -1,6 +1,6 @@
 import numpy as np
 from napari_flow_editor.execution_engine import ExecutionWorker, infer_layout_kind
-from .conftest import FakeLayer, FakeNode, FakeViewer
+from .conftest import FakeLayer, FakeNode, FakeViewer, unpack_execute_result
 
 
 def test_get_layer_axes_injected(worker):
@@ -13,7 +13,7 @@ def test_get_layer_axes_injected(worker):
         },
     )
 
-    result = worker.execute_node_logic(node, library_def={})
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
     data, meta = result["data_out"]
 
     assert isinstance(data, np.ndarray)
@@ -29,7 +29,7 @@ def test_get_layer_without_axes_map(worker):
         params={"layer_name": "LayerA", "axis_map": []},
     )
 
-    result = worker.execute_node_logic(node, library_def={})
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
     _, meta = result["data_out"]
 
     assert "axes" not in meta
@@ -75,7 +75,7 @@ def test_get_layer_normalizes_multiscale_wrapper():
         params={"layer_name": "LayerA", "axis_map": []},
     )
 
-    result = worker.execute_node_logic(node, library_def={})
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
     data, meta = result["data_out"]
 
     assert isinstance(data, list)
@@ -110,7 +110,7 @@ def test_get_layer_includes_visual_metadata_from_layer_data_tuple():
         params={"layer_name": "LayerA", "axis_map": []},
     )
 
-    result = worker.execute_node_logic(node, library_def={})
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
     _, meta = result["data_out"]
 
     assert meta["name"] == "Blue Channel"
@@ -148,7 +148,7 @@ def test_get_layer_default_yx_does_not_override_existing_3d_axes_metadata():
         },
     )
 
-    result = worker.execute_node_logic(node, library_def={})
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
     _, meta = result["data_out"]
 
     assert meta["axes"] == "TYX"
@@ -182,7 +182,7 @@ def test_get_layer_default_yx_infers_tyx_when_3d_axes_missing():
         },
     )
 
-    result = worker.execute_node_logic(node, library_def={})
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
     _, meta = result["data_out"]
 
     assert meta["axes"] == "TYX"
