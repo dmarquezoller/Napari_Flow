@@ -986,7 +986,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.gaussian_blur",
-    "description": "Applies Gaussian smoothing. Uses dask for large arrays.",
+    "description": "Applies Gaussian smoothing. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,

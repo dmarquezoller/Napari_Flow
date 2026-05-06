@@ -1,18 +1,39 @@
+# Core UI + runtime
 napari[all]
 qtpy
 magicgui
-scikit-image
+
+# Scientific stack
 numpy
+scipy
+scikit-image
+pandas
 dask[complete]
+dask-image
 zarr
 ome-zarr
-dask-image
+napari-ome-zarr
 
-#### FOR PYTHON 3.11 ###
+# Plotting / video
+matplotlib
+plotly
+graphviz
+imageio
+imageio-ffmpeg
+tqdm
 
-napari[all]
-scikit-image 
+# Deep learning / tracking nodes
+torch
+tensorflow
+cellpose
 stardist
+csbdeep
 ultrack
-pandas
+
+# Dev / tests / notebooks
+pytest
 notebook
+
+# Optional GPU acceleration for dispatch CUDA path (choose one that matches your CUDA)
+# cupy-cuda12x
+# cupy-cuda11x

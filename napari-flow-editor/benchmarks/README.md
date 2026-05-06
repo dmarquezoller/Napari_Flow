@@ -33,11 +33,40 @@ Large stress-oriented run:
 python benchmarks/run_dispatch_benchmarks.py --preset large --repeats 2 --warmup 1
 ```
 
+Include Dask task-graph images in the markdown report:
+
+```bash
+python benchmarks/run_dispatch_benchmarks.py --preset standard --backends cpu,dask --save-graphs
+```
+
+Graph image rendering uses Dask's visualizer when the Python `graphviz` package
+is installed. If only the Graphviz system `dot` executable is available, the
+benchmark writes a simple task-level DOT graph itself and renders that. If
+neither route works, the report falls back to Mermaid graph source.
+
 Custom backends:
 
 ```bash
 python benchmarks/run_dispatch_benchmarks.py --backends cpu,dask,auto
 ```
+
+Compare Dask chunking policies:
+
+```bash
+python benchmarks/run_dispatch_benchmarks.py --preset standard --backends dask --chunks spatial_auto
+python benchmarks/run_dispatch_benchmarks.py --preset standard --backends dask --chunks 1,512,512
+```
+
+Replicate the tiny notebook `map_overlap` sanity check:
+
+```bash
+python benchmarks/run_dispatch_benchmarks.py --preset notebook --backends cpu,dask --repeats 1 --warmup 0 --save-graphs
+```
+
+`auto` backend selection uses a fixed priority: Dask+CUDA when available, then
+Dask, then CPU. Eager NumPy inputs are promoted to Dask whenever the node has a
+Dask strategy/function. The benchmark defaults to `spatial_auto` chunking so
+timeline/channel axes stay slice-wise instead of becoming one large chunk.
 
 “Prove Dask is active on larger data” run:
 

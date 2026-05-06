@@ -383,7 +383,7 @@ def dispatch(
     cuda_arg_names=None,
     cuda_kwarg_names=None,
     backend: str = "auto",           # "auto" | "cpu" | "dask" | "cuda" | "dask_cuda"
-    gpu_min_nbytes: int = 0,          # only applies to auto/cuda selection on NumPy inputs
+    gpu_min_nbytes: int = 0,          # only applies to forced cuda selection on NumPy inputs
     args=(),
     kwargs=None,
     pyramid_strategy: str = "per_level",  # "per_level" | "from_level0"
@@ -394,14 +394,35 @@ def dispatch(
     dask_halo_from_param: Optional[str] = None,
     dask_halo_factor: float = 4.0,
     dask_boundary_from_param: Optional[str] = None,
+    independent_axes_param: Optional[str] = None,  # Optional param to set zero on independent axes (e.g. sigma)
     dask_output_dtype=None,
     cuda_output_dtype=None,
     pyramid_param_policy: Optional[dict] = None,
     numpy_to_dask_chunks="auto",
+    dask_target_chunk_mb: float = 64.0,
+    dask_options: Optional[dict] = None,
 ):
     """
-    Choose backend (cuda > dask > default), handle pyramids and apply
-    layout-aware execution policies.
+    Choose backend, handle pyramids, and apply layout-aware execution policies.
+
+    By default, ``backend="auto"`` uses one fixed priority order:
+    Dask+CUDA when available, then Dask, then CPU. In-memory NumPy arrays are
+    promoted to Dask whenever a Dask strategy/function is configured.
+
+    ``dask_options`` can be used to keep all Dask-specific controls in one place.
+    It is backward-compatible with the legacy ``dask_*`` parameters and can
+    override them selectively, e.g.:
+
+      {
+        "strategy": "neighborhood",
+        "numpy_chunks": "spatial_auto",
+        "map_overlap": {
+          "depth": {"t": 0, "y": 2, "x": 2},
+          "boundary": "none",
+          "trim": True,
+          "allow_rechunk": True,
+        },
+      }
 
     Layout defaults:
       - time dims (T): independent (no filtering across time)
@@ -420,6 +441,51 @@ def dispatch(
         raise ValueError(
             f"Unknown backend={backend!r}. Expected one of: {sorted(valid_backends)}"
         )
+
+    if dask_options is None:
+        dask_options = {}
+    elif not isinstance(dask_options, dict):
+        raise TypeError(
+            f"dask_options must be a dict when provided, got {type(dask_options)!r}"
+        )
+    else:
+        dask_options = dict(dask_options)
+
+    map_overlap_options = dask_options.get("map_overlap", {})
+    if map_overlap_options is None:
+        map_overlap_options = {}
+    elif not isinstance(map_overlap_options, dict):
+        raise TypeError(
+            "dask_options['map_overlap'] must be a dict when provided, "
+            f"got {type(map_overlap_options)!r}"
+        )
+    else:
+        map_overlap_options = dict(map_overlap_options)
+
+    def _dask_opt(name, legacy_value):
+        return dask_options.get(name, legacy_value)
+
+    dask_strategy = _dask_opt("strategy", dask_strategy)
+    dask_halo_from_param = _dask_opt("halo_from_param", dask_halo_from_param)
+    dask_halo_factor = _dask_opt("halo_factor", dask_halo_factor)
+    dask_boundary_from_param = _dask_opt("boundary_from_param", dask_boundary_from_param)
+    independent_axes_param = _dask_opt("independent_axes_param", independent_axes_param)
+    dask_output_dtype = _dask_opt("output_dtype", dask_output_dtype)
+    numpy_to_dask_chunks = _dask_opt("numpy_chunks", numpy_to_dask_chunks)
+    dask_target_chunk_mb = _dask_opt("target_chunk_mb", dask_target_chunk_mb)
+
+    try:
+        dask_halo_factor = float(dask_halo_factor or 0.0)
+    except Exception:
+        dask_halo_factor = 4.0
+    if dask_halo_factor < 0:
+        dask_halo_factor = abs(dask_halo_factor)
+    try:
+        dask_target_chunk_mb = float(dask_target_chunk_mb or 64.0)
+    except Exception:
+        dask_target_chunk_mb = 64.0
+    if dask_target_chunk_mb <= 0:
+        dask_target_chunk_mb = 64.0
 
     if cuda_func is not None and cuda_function is not None:
         raise ValueError("Use either cuda_func or cuda_function, not both.")
@@ -509,6 +575,114 @@ def dispatch(
                 return 0
         return 0
 
+    def _fit_chunk_tuple_to_sample(raw_chunks, sample, axes=None):
+        shape = tuple(int(s) for s in getattr(sample, "shape", ()) or ())
+        ndim = len(shape)
+        if ndim == 0:
+            return raw_chunks
+
+        try:
+            chunks = [int(c) for c in tuple(raw_chunks)]
+        except Exception:
+            return raw_chunks
+        if not chunks:
+            return "auto"
+
+        if len(chunks) > ndim:
+            chunks = chunks[-ndim:]
+        elif len(chunks) < ndim:
+            prefix = []
+            axes_norm = str(axes or "").upper()
+            for axis_i in range(ndim - len(chunks)):
+                axis_name = axes_norm[axis_i] if len(axes_norm) == ndim else ""
+                if axis_name in ("T", "C"):
+                    prefix.append(1)
+                elif axis_name == "Z":
+                    prefix.append(min(shape[axis_i], 16))
+                else:
+                    prefix.append(shape[axis_i])
+            chunks = prefix + chunks
+
+        return tuple(max(1, min(int(size), int(chunk))) for size, chunk in zip(shape, chunks))
+
+    def _spatial_auto_chunks(sample, axes=None):
+        shape = tuple(int(s) for s in getattr(sample, "shape", ()) or ())
+        ndim = len(shape)
+        if ndim == 0:
+            return "auto"
+
+        dtype = getattr(sample, "dtype", np.dtype(np.float32))
+        try:
+            itemsize = max(1, int(np.dtype(dtype).itemsize))
+        except Exception:
+            itemsize = 4
+
+        axes_norm = str(axes or "").upper()
+        if len(axes_norm) != ndim:
+            if ndim == 2:
+                axes_norm = "YX"
+            elif ndim == 3:
+                axes_norm = "ZYX"
+            elif ndim == 4:
+                axes_norm = "TZYX"
+            else:
+                axes_norm = ("N" * max(0, ndim - 2)) + "YX"
+
+        chunks = [None] * ndim
+        fixed_element_factor = 1
+        spatial_axes = []
+        for axis_i, (axis_name, axis_size) in enumerate(zip(axes_norm, shape)):
+            if axis_name in ("T", "C"):
+                chunks[axis_i] = 1
+                fixed_element_factor *= 1
+            elif axis_name == "Z":
+                chunk = min(axis_size, 16)
+                chunks[axis_i] = chunk
+                fixed_element_factor *= max(1, int(chunk))
+            elif axis_name in ("Y", "X"):
+                spatial_axes.append(axis_i)
+            else:
+                chunk = min(axis_size, 16) if ndim > 2 and axis_i < ndim - 2 else axis_size
+                chunks[axis_i] = chunk
+                fixed_element_factor *= max(1, int(chunk))
+
+        target_bytes = max(1e-6, dask_target_chunk_mb) * (1024.0 ** 2)
+        spatial_ndim = max(1, len(spatial_axes))
+        target_spatial_elements = max(
+            1.0, target_bytes / float(itemsize * max(1, fixed_element_factor))
+        )
+        spatial_edge = int(round(target_spatial_elements ** (1.0 / spatial_ndim)))
+        spatial_edge = max(128, min(1024, spatial_edge))
+
+        for axis_i in spatial_axes:
+            chunks[axis_i] = max(1, min(shape[axis_i], spatial_edge))
+
+        return tuple(int(c if c is not None else s) for c, s in zip(chunks, shape))
+
+    def _resolve_numpy_to_dask_chunks(sample, axes=None):
+        raw = numpy_to_dask_chunks
+        if isinstance(raw, str):
+            value = raw.strip().lower()
+            if value in ("spatial_auto", "spatial-auto", "spatial"):
+                return _spatial_auto_chunks(sample, axes=axes)
+            if value == "auto":
+                return "auto"
+        if isinstance(raw, (tuple, list)):
+            return _fit_chunk_tuple_to_sample(raw, sample, axes=axes)
+        return raw
+
+    def _numpy_to_dask_reason(sample):
+        if not isinstance(sample, np.ndarray):
+            return "input is not a NumPy array"
+        axes = infer_axes_for_sample(
+            sample,
+            axes_hint=runtime_axes,
+            axis_labels_hint=runtime_axis_labels,
+            layout_hint=runtime_layout_kind,
+        )
+        chunks = _resolve_numpy_to_dask_chunks(sample, axes=axes)
+        return f"auto-promoted NumPy input to Dask with chunks={chunks!r}"
+
     backend_message_printed = False
 
     def _log_backend(message):
@@ -589,14 +763,37 @@ def dispatch(
             return False
         return is_array_like(first)
 
-    def axis_labels_to_axes(labels, ndim):
+    def _last_axis_is_channel_like(shape):
+        if not shape:
+            return False
+        try:
+            return 1 <= int(shape[-1]) <= 4
+        except Exception:
+            return False
+
+    def _coerce_axes_to_shape(axes_value, shape):
+        if not isinstance(axes_value, str):
+            return None
+        axes_text = axes_value.strip().upper()
+        ndim = len(shape)
+        if len(axes_text) == ndim:
+            return axes_text
+        if (
+            len(axes_text) == ndim - 1
+            and "C" not in axes_text
+            and _last_axis_is_channel_like(shape)
+        ):
+            return f"{axes_text}C"
+        return None
+
+    def axis_labels_to_axes(labels, ndim=None):
         if labels is None:
             return None
         try:
             seq = list(labels)
         except Exception:
             return None
-        if len(seq) != ndim:
+        if ndim is not None and len(seq) != ndim:
             return None
 
         mapped = []
@@ -619,18 +816,20 @@ def dispatch(
     def infer_axes_for_sample(sample, axes_hint=None, axis_labels_hint=None, layout_hint=None):
         if sample is None or not hasattr(sample, "shape"):
             return None
-        ndim = len(sample.shape)
-        if isinstance(axes_hint, str):
-            ax = axes_hint.upper()
-            if len(ax) == ndim:
-                return ax
-        labels_ax = axis_labels_to_axes(axis_labels_hint, ndim)
+        shape = tuple(sample.shape)
+        ndim = len(shape)
+        ax = _coerce_axes_to_shape(axes_hint, shape)
+        if ax:
+            return ax
+
+        labels_ax = _coerce_axes_to_shape(axis_labels_to_axes(axis_labels_hint), shape)
         if labels_ax:
             return labels_ax
         if isinstance(layout_hint, str):
             mapped = layout_to_axes.get(layout_hint.lower())
-            if mapped and len(mapped) == ndim:
-                return mapped
+            ax = _coerce_axes_to_shape(mapped, shape)
+            if ax:
+                return ax
 
         if ndim == 2:
             return "YX"
@@ -739,8 +938,6 @@ def dispatch(
                     return "dask_cuda", "requested dask_cuda"
                 if dask_ok:
                     return "dask", f"requested dask_cuda, fallback dask ({cuda_reason})"
-                if cuda_ok and (sample_is_numpy or sample_is_cupy):
-                    return "cuda", "requested dask_cuda, fallback cuda (no dask strategy/function)"
                 return "cpu", f"requested dask_cuda, fallback cpu ({cuda_reason})"
             return "cpu", "fallback cpu"
 
@@ -768,36 +965,20 @@ def dispatch(
             return fallback_for("dask_cuda")
 
         # auto
-        if sample_is_dask:
-            if dask_cuda_ok:
-                return "dask_cuda", "auto backend selected dask_cuda"
-            if dask_ok:
+        if dask_cuda_ok and (sample_is_dask or sample_is_numpy):
+            return "dask_cuda", "auto backend selected dask_cuda"
+
+        if dask_ok:
+            if sample_is_numpy:
+                return "dask", f"auto backend selected dask; {_numpy_to_dask_reason(sample)}"
+            if sample_is_dask:
                 if gpu_func is not None and not cuda_ok:
                     return "dask", f"auto fallback dask ({cuda_reason})"
                 return "dask", "auto backend selected dask"
-            return "cpu", "auto fallback cpu (no dask backend)"
-
-        if sample_is_numpy or sample_is_cupy:
-            if cuda_ok and gpu_big_enough:
-                return "cuda", "auto backend selected cuda"
-            if cuda_ok and not gpu_big_enough:
-                if dask_ok:
-                    return "dask", (
-                        f"auto: input below gpu_min_nbytes={gpu_min_nbytes}, selected dask"
-                    )
-                return "cpu", (
-                    f"auto: input below gpu_min_nbytes={gpu_min_nbytes}, selected cpu"
-                )
-            if dask_ok:
-                if gpu_func is not None:
-                    return "dask", f"auto fallback dask ({cuda_reason})"
-                return "dask", "auto backend selected dask"
-            if gpu_func is not None and not cuda_ok:
-                return "cpu", f"auto fallback cpu ({cuda_reason})"
-            return "cpu", "auto backend selected cpu"
-
-        if dask_ok:
             return "dask", "auto backend selected dask"
+
+        if gpu_func is not None and (sample_is_numpy or sample_is_dask or sample_is_cupy):
+            return "cpu", f"auto fallback cpu ({cuda_reason})"
         return "cpu", "auto backend selected cpu"
 
     def maybe_promote_numpy_to_cuda(args_in, kwargs_in, sample):
@@ -830,10 +1011,20 @@ def dispatch(
     def maybe_promote_numpy_to_dask(args_in, kwargs_in, sample):
         if not isinstance(sample, np.ndarray):
             return args_in, kwargs_in, sample
+        axes = infer_axes_for_sample(
+            sample,
+            axes_hint=runtime_axes,
+            axis_labels_hint=runtime_axis_labels,
+            layout_hint=runtime_layout_kind,
+        )
+        resolved_chunks = _resolve_numpy_to_dask_chunks(sample, axes=axes)
 
         def convert(v):
             if isinstance(v, np.ndarray):
-                return da.from_array(v, chunks=numpy_to_dask_chunks)
+                # Avoid hashing large in-memory arrays just to create a Dask name.
+                # Dask's default tokenization can dominate dispatch time on GB-scale
+                # NumPy inputs; a generated name is enough for transient node graphs.
+                return da.from_array(v, chunks=resolved_chunks, name=False)
             return v
 
         promoted_args = [convert(v) for v in args_in]
@@ -953,7 +1144,7 @@ def dispatch(
         except Exception as exc:
             return False, f"CUDA preflight runtime issue ({exc})"
 
-    def _fallback_after_cuda_preflight_failure(mode):
+    def _fallback_after_cuda_preflight_failure(mode, sample=None):
         dask_ok = has_dask_backend()
         if mode in ("cuda", "dask_cuda"):
             if dask_ok:
@@ -961,7 +1152,107 @@ def dispatch(
             return "cpu", "fallback to cpu to preserve user-selected parameters"
         return "cpu", "fallback to cpu"
 
-    def _boundary_for_overlap(kwargs_in):
+    def _axis_key_to_index(axis_key, ndim, axes):
+        if isinstance(axis_key, int):
+            if axis_key < 0:
+                axis_key += int(ndim)
+            return axis_key if 0 <= axis_key < int(ndim) else None
+        token = str(axis_key).strip().lower()
+        if token == "":
+            return None
+        if token.isdigit():
+            idx = int(token)
+            return idx if 0 <= idx < int(ndim) else None
+
+        axis_alias = {
+            "t": "T",
+            "time": "T",
+            "z": "Z",
+            "depth": "Z",
+            "y": "Y",
+            "x": "X",
+            "c": "C",
+            "ch": "C",
+            "channel": "C",
+            "channels": "C",
+        }
+        axis_name = axis_alias.get(token)
+        if axis_name and isinstance(axes, str) and len(axes) == int(ndim):
+            try:
+                return int(axes.index(axis_name))
+            except ValueError:
+                return None
+        return None
+
+    def _normalize_overlap_depth(depth_cfg, sample_arr, axes):
+        ndim = int(getattr(sample_arr, "ndim", 0) or 0)
+        if ndim <= 0:
+            return depth_cfg
+
+        def _as_int_depth(value):
+            try:
+                return max(0, int(np.ceil(abs(float(value)))))
+            except Exception:
+                return 0
+
+        if np.isscalar(depth_cfg):
+            depth = [_as_int_depth(depth_cfg)] * ndim
+        elif isinstance(depth_cfg, dict):
+            depth = [0] * ndim
+            for key, raw_value in depth_cfg.items():
+                axis_i = _axis_key_to_index(key, ndim, axes)
+                if axis_i is None:
+                    continue
+                depth[axis_i] = _as_int_depth(raw_value)
+        else:
+            try:
+                seq = [_as_int_depth(v) for v in list(depth_cfg)]
+            except Exception:
+                return tuple(0 for _ in range(ndim))
+            if not seq:
+                return tuple(0 for _ in range(ndim))
+            if len(seq) == 1:
+                depth = seq * ndim
+            elif len(seq) < ndim:
+                depth = seq + [seq[-1]] * (ndim - len(seq))
+            else:
+                depth = seq[:ndim]
+
+        return tuple(min(int(d), max(0, int(sz) - 1)) for d, sz in zip(depth, sample_arr.shape))
+
+    def _resolve_map_overlap_boundary(sample_arr, axes, kwargs_in):
+        boundary_cfg = map_overlap_options.get("boundary")
+        if boundary_cfg is None:
+            return None
+
+        if callable(boundary_cfg):
+            return boundary_cfg(sample_arr, axes, kwargs_in)
+
+        ndim = int(getattr(sample_arr, "ndim", 0) or 0)
+        if isinstance(boundary_cfg, dict):
+            out = {}
+            for key, raw_value in boundary_cfg.items():
+                axis_i = _axis_key_to_index(key, ndim, axes)
+                if axis_i is None:
+                    continue
+                out[int(axis_i)] = raw_value
+            return out
+
+        return boundary_cfg
+
+    def _resolve_map_overlap_depth(sample_arr, axes, kwargs_in):
+        depth_cfg = map_overlap_options.get("depth")
+        if depth_cfg is None:
+            return None
+        if callable(depth_cfg):
+            depth_cfg = depth_cfg(sample_arr, axes, kwargs_in)
+        return _normalize_overlap_depth(depth_cfg, sample_arr, axes)
+
+    def _boundary_for_overlap(sample_arr, axes, kwargs_in):
+        explicit_boundary = _resolve_map_overlap_boundary(sample_arr, axes, kwargs_in)
+        if explicit_boundary is not None:
+            return explicit_boundary
+
         if dask_boundary_from_param:
             mode = kwargs_in.get(dask_boundary_from_param, "reflect")
         else:
@@ -979,31 +1270,97 @@ def dispatch(
         return "reflect"
 
     def _depth_for_overlap(sample_arr, axes, kwargs_in):
+        explicit_depth = _resolve_map_overlap_depth(sample_arr, axes, kwargs_in)
+        if explicit_depth is not None:
+            return explicit_depth
+
         if not dask_halo_from_param:
             return tuple(0 for _ in range(sample_arr.ndim))
 
         halo_source = kwargs_in.get(dask_halo_from_param, 0)
+        ndim = int(getattr(sample_arr, "ndim", 0) or 0)
         if np.isscalar(halo_source):
-            seq = [float(halo_source)] * sample_arr.ndim
+            seq = [float(halo_source)] * ndim
         else:
             seq = [float(x) for x in list(halo_source)]
-            if len(seq) == 1:
-                seq = seq * sample_arr.ndim
-            elif len(seq) < sample_arr.ndim:
-                seq = seq + [seq[-1]] * (sample_arr.ndim - len(seq))
-            elif len(seq) > sample_arr.ndim:
-                seq = seq[: sample_arr.ndim]
+            # Only expand/adjust if sequence length doesn't already match ndim
+            if len(seq) != ndim:
+                if len(seq) == 1:
+                    seq = seq * ndim
+                elif len(seq) < ndim:
+                    seq = seq + [seq[-1]] * (ndim - len(seq))
+                elif len(seq) > ndim:
+                    seq = seq[:ndim]
 
         radii = [max(0, int(np.ceil(abs(v) * float(dask_halo_factor)))) for v in seq]
 
-        if isinstance(axes, str) and len(axes) == sample_arr.ndim:
+        if isinstance(axes, str) and len(axes) == ndim:
             spatial = {i for i, a in enumerate(axes) if a in ("Z", "Y", "X")}
             radii = [r if i in spatial else 0 for i, r in enumerate(radii)]
 
         # Avoid overlap depth > axis size (common failure on small Z/C dims)
         return tuple(min(r, max(0, int(sz) - 1)) for r, sz in zip(radii, sample_arr.shape))
 
-    def _execute_auto_dask(args_in, kwargs_in, sample_loc, axes, compute_func, use_gpu=False):
+    def _as_axis_sequence(value, ndim):
+        if np.isscalar(value):
+            return [float(value)] * int(ndim)
+        try:
+            seq = [float(x) for x in list(value)]
+        except Exception:
+            return None
+        if not seq:
+            return None
+        if len(seq) == int(ndim):
+            return seq
+        if len(seq) == 1:
+            return seq * int(ndim)
+        if len(seq) < int(ndim):
+            return seq + [seq[-1]] * (int(ndim) - len(seq))
+        return seq[: int(ndim)]
+
+    def _apply_independent_axes_param(kwargs_in, independent_axes, ndim):
+        """
+        Optional optimization: instead of explicit per-index splitting on independent
+        axes (T/C), encode independence in a per-axis parameter vector by setting
+        those axes to zero (e.g. sigma=(0, s, s) for TYX).
+
+        Returns:
+            (new_kwargs, changed_flag, detail_message)
+        """
+        pname = str(independent_axes_param or "").strip()
+        if not pname:
+            return kwargs_in, False, ""
+        if pname not in kwargs_in:
+            return kwargs_in, False, f"independent_axes_param={pname!r} not found in kwargs"
+
+        seq = _as_axis_sequence(kwargs_in[pname], ndim)
+        if seq is None:
+            return kwargs_in, False, f"independent_axes_param={pname!r} could not be broadcast to ndim={ndim}"
+
+        changed = False
+        for axis_i in independent_axes:
+            if axis_i < 0 or axis_i >= ndim:
+                continue
+            if seq[axis_i] != 0.0:
+                seq[axis_i] = 0.0
+                changed = True
+
+        if not changed:
+            return kwargs_in, False, ""
+
+        updated = dict(kwargs_in)
+        updated[pname] = tuple(seq)
+        return updated, True, f"applied {pname} zeroing on independent axes"
+
+    def _execute_auto_dask(
+        args_in,
+        kwargs_in,
+        sample_loc,
+        axes,
+        compute_func,
+        use_gpu=False,
+        depth_kwargs_in=None,
+    ):
         if dask_strategy not in ("pointwise", "neighborhood"):
             raise ValueError(f"Unknown dask_strategy={dask_strategy!r}")
         sample_exec = None
@@ -1026,7 +1383,12 @@ def dispatch(
                 out_dtype = cuda_output_dtype
             else:
                 out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
-            return da.map_blocks(block_apply, sample_exec, dtype=out_dtype)
+            return da.map_blocks(
+                block_apply,
+                sample_exec,
+                dtype=out_dtype,
+                meta=np.array((), dtype=np.dtype(out_dtype)),
+            )
 
         # dask_strategy == "neighborhood"
         def overlap_apply(block):
@@ -1035,8 +1397,12 @@ def dispatch(
             out = compute_func(*a2, **k2)
             return _convert_cuda_output_to_numpy(out, cp) if use_gpu else out
 
-        depth = _depth_for_overlap(sample_exec, axes, kwargs_in)
-        boundary = _boundary_for_overlap(kwargs_in)
+        depth_kwargs = kwargs_in if depth_kwargs_in is None else depth_kwargs_in
+        depth = _depth_for_overlap(sample_exec, axes, depth_kwargs)
+        boundary = _boundary_for_overlap(sample_exec, axes, kwargs_in)
+        trim = bool(map_overlap_options.get("trim", True))
+        allow_rechunk = bool(map_overlap_options.get("allow_rechunk", True))
+        align_arrays = bool(map_overlap_options.get("align_arrays", True))
         if use_gpu and cuda_output_dtype is not None:
             out_dtype = cuda_output_dtype
         else:
@@ -1045,6 +1411,9 @@ def dispatch(
             overlap_apply,
             depth=depth,
             boundary=boundary,
+            trim=trim,
+            allow_rechunk=allow_rechunk,
+            align_arrays=align_arrays,
             dtype=out_dtype,
         )
 
@@ -1086,7 +1455,9 @@ def dispatch(
                 ok_cuda, cuda_reason = _cuda_preflight(args_exec, kwargs_exec)
                 reasons.append(cuda_reason)
                 if not ok_cuda:
-                    next_mode, fallback_reason = _fallback_after_cuda_preflight_failure(backend_mode)
+                    next_mode, fallback_reason = _fallback_after_cuda_preflight_failure(
+                        backend_mode, sample=base_sample
+                    )
                     reasons.append(fallback_reason)
                     if next_mode == backend_mode:
                         backend_mode = "cpu"
@@ -1130,9 +1501,15 @@ def dispatch(
                 compute_func = default
             use_gpu = backend_mode == "dask_cuda"
 
-            def run_now(a_now, k_now):
+            def run_now(a_now, k_now, *, depth_kwargs=None):
                 return _execute_auto_dask(
-                    a_now, k_now, sample_loc, axes, compute_func, use_gpu=use_gpu
+                    a_now,
+                    k_now,
+                    sample_loc,
+                    axes,
+                    compute_func,
+                    use_gpu=use_gpu,
+                    depth_kwargs_in=depth_kwargs,
                 )
         else:
             if (
@@ -1144,7 +1521,7 @@ def dispatch(
             else:
                 func = default
 
-            def run_now(a_now, k_now):
+            def run_now(a_now, k_now, *, depth_kwargs=None):
                 if backend_mode == "cuda":
                     out = _execute_cuda(a_now, k_now)
                 else:
@@ -1179,6 +1556,23 @@ def dispatch(
         core = sorted(set(core))
         independent = [i for i in range(len(axes)) if i not in core]
 
+        # Prefer vectorized independent-axis handling when available (e.g. sigma
+        # for Gaussian) to avoid building one graph branch per T/C index.
+        if independent and sample_exec is not None and hasattr(sample_exec, "shape"):
+            kwargs_adjusted, changed, detail = _apply_independent_axes_param(
+                kwargs_exec, independent, len(sample_exec.shape)
+            )
+            if changed:
+                if detail:
+                    _log_backend(
+                        f"requested={backend_requested}, selected={backend_mode}. {backend_reason}; {detail}"
+                    )
+                return run_now(
+                    args_exec,
+                    kwargs_adjusted,
+                    depth_kwargs=kwargs_exec,
+                )
+
         # Nothing to split => run once on full N-D sample.
         if not independent:
             return run_now(args_exec, kwargs_exec)
@@ -1197,7 +1591,7 @@ def dispatch(
 
         outputs = []
         for idx in np.ndindex(*independent_shape):
-            slicer = [slice(None)] * len(sample.shape)
+            slicer = [slice(None)] * len(sample_exec.shape)
             for local_i, axis_i in enumerate(independent):
                 slicer[axis_i] = idx[local_i]
 

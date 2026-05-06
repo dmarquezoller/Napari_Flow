@@ -157,6 +157,7 @@ def test_dispatch_promotes_numpy_to_dask_when_backend_available():
         dask_func=dask_func,
         args=(image,),
         kwargs={},
+        backend="dask",
     )
 
     assert isinstance(out, da.Array)
@@ -164,7 +165,134 @@ def test_dispatch_promotes_numpy_to_dask_when_backend_available():
     assert calls["dask"] == 1
 
 
-def test_dispatch_auto_prefers_cuda_for_numpy_when_available(monkeypatch):
+def test_dispatch_auto_promotes_small_numpy_to_dask_by_default():
+    calls = {"default": 0, "dask": 0}
+    image = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+
+    def default_func(x):
+        calls["default"] += 1
+        return x + 1
+
+    def dask_func(x):
+        calls["dask"] += 1
+        return x + 5
+
+    out = dispatch(
+        default=default_func,
+        dask_func=dask_func,
+        args=(image,),
+        kwargs={},
+        backend="auto",
+    )
+
+    assert isinstance(out, da.Array)
+    np.testing.assert_allclose(out.compute(), image + 5)
+    assert calls["default"] == 0
+    assert calls["dask"] == 1
+
+
+def test_dispatch_auto_promotes_chunkable_numpy_to_dask_by_default():
+    calls = {"default": 0}
+    image = np.arange(16 * 16, dtype=np.float32).reshape(16, 16)
+
+    def default_func(x):
+        calls["default"] += 1
+        return x + 1
+
+    out = dispatch(
+        default=default_func,
+        args=(image,),
+        kwargs={},
+        backend="auto",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+        numpy_to_dask_chunks=(4, 4),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.numblocks == (4, 4)
+    assert calls["default"] == 0
+    np.testing.assert_allclose(out.compute(), image + 1)
+    assert calls["default"] == out.npartitions
+
+
+def test_dispatch_auto_uses_dask_for_lazy_input():
+    image = np.arange(16 * 16, dtype=np.float32).reshape(16, 16)
+    dask_image = da.from_array(image, chunks=(4, 4))
+
+    out = dispatch(
+        default=lambda x: x + 1,
+        args=(dask_image,),
+        kwargs={},
+        backend="auto",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+    )
+
+    assert isinstance(out, da.Array)
+    np.testing.assert_allclose(out.compute(), image + 1)
+
+
+def test_dispatch_dask_pipeline_stays_lazy_until_compute():
+    computed = []
+
+    @delayed
+    def make_source():
+        computed.append("source")
+        return np.arange(16, dtype=np.float32).reshape(4, 4)
+
+    image = da.from_delayed(make_source(), shape=(4, 4), dtype=np.float32)
+
+    first = dispatch(
+        default=lambda x: x + 1,
+        args=(image,),
+        kwargs={},
+        backend="auto",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+    )
+    second = dispatch(
+        default=lambda x: x * 2,
+        args=(first,),
+        kwargs={},
+        backend="auto",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+    )
+
+    assert isinstance(first, da.Array)
+    assert isinstance(second, da.Array)
+    assert computed == []
+
+    np.testing.assert_allclose(second.compute(), (np.arange(16).reshape(4, 4) + 1) * 2)
+    assert computed == ["source"]
+
+
+def test_dispatch_spatial_auto_chunks_respect_tyx_layout():
+    image = np.zeros((3, 256, 256), dtype=np.float32)
+
+    out = _run_with_metadata(
+        {"axes": "TYX", "layout_kind": "3d_timeline"},
+        lambda: dispatch(
+            default=lambda x: x + 1,
+            args=(image,),
+            kwargs={},
+            backend="dask",
+            dask_strategy="pointwise",
+            dask_output_dtype=np.float32,
+            numpy_to_dask_chunks="spatial_auto",
+            dask_target_chunk_mb=0.0625,
+            layout_policy="full_nd",
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.chunks[0] == (1, 1, 1)
+    assert out.chunks[1] == (128, 128)
+    assert out.chunks[2] == (128, 128)
+
+
+def test_dispatch_auto_prefers_dask_cuda_for_numpy_when_available(monkeypatch):
     image = np.arange(64, dtype=np.float32).reshape(8, 8)
 
     fake_cp = types.SimpleNamespace(
@@ -182,10 +310,13 @@ def test_dispatch_auto_prefers_cuda_for_numpy_when_available(monkeypatch):
         args=(image,),
         kwargs={},
         backend="auto",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+        numpy_to_dask_chunks=(4, 4),
     )
 
-    assert isinstance(out, np.ndarray)
-    np.testing.assert_allclose(out, image + 5)
+    assert isinstance(out, da.Array)
+    np.testing.assert_allclose(out.compute(), image + 5)
 
 
 def test_dispatch_cuda_fallback_logs_message_when_gpu_unavailable(capsys, monkeypatch):
@@ -233,6 +364,33 @@ def test_dispatch_dask_cuda_runs_gpu_adapter_per_block(monkeypatch):
     np.testing.assert_allclose(out.compute(), image + 7)
 
 
+def test_dispatch_auto_prefers_dask_cuda_for_lazy_when_available(monkeypatch):
+    image = np.arange(64, dtype=np.float32).reshape(8, 8)
+    dask_image = da.from_array(image, chunks=(4, 4))
+
+    fake_cp = types.SimpleNamespace(
+        ndarray=np.ndarray,
+        asarray=lambda x: np.asarray(x),
+        asnumpy=lambda x: np.asarray(x),
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    out = dispatch(
+        default=lambda x: x + 1,
+        cuda_func=lambda x: x + 7,
+        args=(dask_image,),
+        kwargs={},
+        backend="auto",
+        dask_strategy="pointwise",
+        dask_output_dtype=np.float32,
+    )
+
+    assert isinstance(out, da.Array)
+    np.testing.assert_allclose(out.compute(), image + 7)
+
+
 def test_dispatch_cuda_function_mapping_uses_selected_node_params(monkeypatch):
     image = np.arange(16, dtype=np.float32).reshape(4, 4)
 
@@ -258,7 +416,7 @@ def test_dispatch_cuda_function_mapping_uses_selected_node_params(monkeypatch):
         cuda_kwarg_names=["sigma", "mode"],
         args=(image,),
         kwargs={"sigma": 1.0, "mode": "nearest", "preserve_range": True},
-        backend="auto",
+        backend="cuda",
     )
 
     assert isinstance(out, np.ndarray)
@@ -341,6 +499,7 @@ def test_dispatch_can_promote_numpy_to_dask_with_strategy():
         default=lambda x: x + 1,
         args=(image,),
         kwargs={},
+        backend="dask",
         dask_strategy="pointwise",
         dask_output_dtype=np.float32,
     )
@@ -420,6 +579,164 @@ def test_dispatch_neighborhood_handles_small_axis_and_extra_modes():
         assert isinstance(out, da.Array)
         arr = out.compute()
         assert arr.shape == image.shape
+
+
+def test_dispatch_dask_options_can_override_map_overlap_depth_and_boundary():
+    image = np.random.default_rng(3).random((4, 50, 50), dtype=np.float32)
+    dask_image = da.from_array(image, chunks=(1, 25, 25))
+
+    out = _run_with_metadata(
+        {"axes": "TYX", "layout_kind": "3d_timeline"},
+        lambda: dispatch(
+            default=skimage.filters.gaussian,
+            args=(dask_image,),
+            kwargs={"sigma": 1.0, "mode": "nearest", "preserve_range": True},
+            dask_options={
+                "strategy": "neighborhood",
+                "output_dtype": np.float64,
+                "independent_axes_param": "sigma",
+                "map_overlap": {
+                    "depth": {"t": 0, "y": 2, "x": 2},
+                    "boundary": "none",
+                },
+            },
+        ),
+    )
+
+    expected = da.map_overlap(
+        skimage.filters.gaussian,
+        dask_image,
+        depth={0: 0, 1: 2, 2: 2},
+        boundary="none",
+        dtype=np.float64,
+        sigma=(0.0, 1.0, 1.0),
+        mode="nearest",
+        preserve_range=True,
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.numblocks == (4, 2, 2)
+    np.testing.assert_allclose(out.compute(), expected.compute(), rtol=1e-6, atol=1e-6)
+
+
+def test_dispatch_dask_options_support_callable_depth_for_shape_adaptation():
+    image = np.random.default_rng(4).random((6, 96, 96), dtype=np.float32)
+    dask_image = da.from_array(image, chunks=(1, 24, 24))
+
+    def adaptive_depth(sample_arr, axes, kwargs_in):
+        sigma = float(kwargs_in.get("sigma", 1.0))
+        base = max(1, int(np.ceil(2.0 * sigma)))
+        depth = {"t": 0}
+        if isinstance(axes, str) and len(axes) == sample_arr.ndim:
+            for axis_name in ("y", "x"):
+                axis_token = axis_name.upper()
+                if axis_token not in axes:
+                    continue
+                axis_i = axes.index(axis_token)
+                chunk_size = int(sample_arr.chunks[axis_i][0])
+                depth[axis_name] = min(base, max(1, chunk_size // 4))
+        return depth
+
+    out = _run_with_metadata(
+        {"axes": "TYX", "layout_kind": "3d_timeline"},
+        lambda: dispatch(
+            default=skimage.filters.gaussian,
+            args=(dask_image,),
+            kwargs={"sigma": 2.0, "mode": "nearest", "preserve_range": True},
+            dask_options={
+                "strategy": "neighborhood",
+                "output_dtype": np.float64,
+                "independent_axes_param": "sigma",
+                "map_overlap": {
+                    "depth": adaptive_depth,
+                    "boundary": "none",
+                },
+            },
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.shape == image.shape
+    assert out.numblocks == (6, 4, 4)
+    _ = out.compute()
+
+
+def test_dispatch_independent_axes_param_keeps_tyx_semantics_with_smaller_graph():
+    image = np.random.default_rng(2).random((8, 96, 96), dtype=np.float32)
+    dask_image = da.from_array(image, chunks=(1, 32, 32))
+
+    # Baseline behavior: explicit per-time slicing (time_policy='independent').
+    out_split = _run_with_metadata(
+        {"axes": "TYX", "layout_kind": "3d_timeline"},
+        lambda: dispatch(
+            default=skimage.filters.gaussian,
+            args=(dask_image,),
+            kwargs={"sigma": 1.8, "mode": "nearest", "preserve_range": True},
+            dask_strategy="neighborhood",
+            dask_halo_from_param="sigma",
+            dask_boundary_from_param="mode",
+            dask_output_dtype=np.float64,
+        ),
+    )
+
+    # Optimized behavior: run full array once, but zero independent axes in sigma.
+    out_vectorized = _run_with_metadata(
+        {"axes": "TYX", "layout_kind": "3d_timeline"},
+        lambda: dispatch(
+            default=skimage.filters.gaussian,
+            args=(dask_image,),
+            kwargs={"sigma": 1.8, "mode": "nearest", "preserve_range": True},
+            dask_strategy="neighborhood",
+            dask_halo_from_param="sigma",
+            dask_boundary_from_param="mode",
+            independent_axes_param="sigma",
+            dask_output_dtype=np.float64,
+        ),
+    )
+
+    assert isinstance(out_split, da.Array)
+    assert isinstance(out_vectorized, da.Array)
+    np.testing.assert_allclose(
+        out_vectorized.compute(),
+        out_split.compute(),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert len(out_vectorized.__dask_graph__()) < len(out_split.__dask_graph__())
+
+
+def test_dispatch_tyx_metadata_with_trailing_channel_does_not_blur_time():
+    image = np.zeros((3, 32, 32, 1), dtype=np.float32)
+    image[1, 10:22, 10:22, 0] = 100.0
+    dask_image = da.from_array(image, chunks=(1, 16, 16, 1))
+
+    out = _run_with_metadata(
+        {"axes": "TYX", "layout_kind": "3d_timeline"},
+        lambda: dispatch(
+            default=skimage.filters.gaussian,
+            args=(dask_image,),
+            kwargs={"sigma": 1.0, "mode": "nearest", "preserve_range": True},
+            dask_strategy="neighborhood",
+            dask_halo_from_param="sigma",
+            dask_boundary_from_param="mode",
+            independent_axes_param="sigma",
+            dask_output_dtype=np.float64,
+        ),
+    )
+
+    expected = skimage.filters.gaussian(
+        image,
+        sigma=(0.0, 1.0, 1.0, 0.0),
+        mode="nearest",
+        preserve_range=True,
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.shape == image.shape
+    result = out.compute()
+    np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+    assert np.max(result[0]) == 0.0
+    assert np.max(result[2]) == 0.0
 
 
 def test_dispatch_per_level_fixed_world_scales_sigma_by_pyramid_factor():

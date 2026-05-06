@@ -199,7 +199,7 @@ def gabor(image, frequency: float = 1.0, theta: float = 0.0, mode: str = 'reflec
 @register_node(
     label="Gaussian Blur",
     category="Filters",
-    description="Applies Gaussian smoothing. Uses dask for large arrays.",
+    description="Applies Gaussian smoothing. Auto-selects Dask+CUDA, Dask, then CPU.",
     outputs=["image_out"],
     input_types={"image": "image"},
     output_types={"image_out": "image"},
@@ -221,14 +221,6 @@ def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
         cuda_output_dtype=np.float64,
         backend="auto",
         gpu_min_nbytes=0,
-        # Generic dask strategy for neighborhood filters:
-        # - map_overlap with halo from sigma
-        # - boundary inferred from mode
-        dask_strategy="neighborhood",
-        dask_halo_from_param="sigma",
-        dask_boundary_from_param="mode",
-        # skimage.gaussian returns float64
-        dask_output_dtype=np.float64,
         # per_level: apply the blur independently to each pyramid level.
         # This keeps every level as a lazy dask array backed by its own zarr
         # resolution group, so napari can stream the right level on zoom.
@@ -238,8 +230,17 @@ def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
         # Keep blur radius consistent in world units across pyramid levels.
         # For a 2x downsample pyramid this becomes sigma, sigma/2, sigma/4, ...
         pyramid_param_policy={"sigma": "fixed_world"},
-        # Numpy inputs are promoted to dask automatically when a dask backend
-        # is configured (dask_strategy/dask_func).
+        dask_options={
+            # Keep Dask controls together for easier tuning/debugging.
+            "strategy": "neighborhood",
+            "halo_from_param": "sigma",
+            "boundary_from_param": "mode",
+            "independent_axes_param": "sigma",
+            "output_dtype": np.float64,
+            "numpy_chunks": "spatial_auto",
+            # Optional explicit overlap override example:
+            # "map_overlap": {"depth": {"t": 0, "y": 2, "x": 2}, "boundary": "none"},
+        }
     )
 
     # IMPORTANT: avoid overwriting the source layer
