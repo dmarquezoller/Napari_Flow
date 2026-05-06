@@ -5271,9 +5271,52 @@ class FlowEditor(QWidget):
             return
 
         # --- D. DISPLAY HELPER ---
+        def _napari_display_array(data_obj):
+            """
+            Napari cannot display Dask arrays whose chunks are CuPy arrays:
+            its slice code eventually calls np.asarray(...), and CuPy rejects
+            implicit host conversion. Keep the graph lazy, but convert requested
+            chunks to NumPy at the viewer boundary.
+            """
+            try:
+                import dask.array as da
+            except Exception:
+                da = None
+
+            if da is None or not isinstance(data_obj, da.Array):
+                return data_obj
+
+            meta = getattr(data_obj, "_meta", None)
+            try:
+                import cupy as cp  # type: ignore
+            except Exception:
+                cp = None
+
+            if cp is None:
+                return data_obj
+
+            try:
+                is_cupy_backed = isinstance(meta, cp.ndarray)
+            except Exception:
+                is_cupy_backed = False
+            if not is_cupy_backed:
+                return data_obj
+
+            return data_obj.map_blocks(
+                cp.asnumpy,
+                dtype=data_obj.dtype,
+                meta=np.empty((0,) * int(data_obj.ndim), dtype=data_obj.dtype),
+            )
+
+        def _napari_display_data(data_obj):
+            if isinstance(data_obj, list):
+                return [_napari_display_array(item) for item in data_obj]
+            return _napari_display_array(data_obj)
+
         def add_layer_to_viewer(layer_data, raw_meta):
             # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
+            layer_data = _napari_display_data(layer_data)
 
             # 2. Filter Metadata
             valid_napari_args = {
