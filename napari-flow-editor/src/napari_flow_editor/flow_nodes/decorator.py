@@ -37,6 +37,12 @@ def _convert_cuda_output_to_numpy(value, cp):
         return {k: _convert_cuda_output_to_numpy(v, cp) for k, v in value.items()}
     return value
 
+
+def _dask_array_has_cupy_chunks(value, cp=None):
+    if not isinstance(value, da.Array):
+        return False
+    return _is_cupy_array(getattr(value, "_meta", None), cp)
+
 def _normalize_logic_config(logic):
     # Backward-compatible defaults: every node has both logic sockets and
     # logic sockets accept multiple links unless explicitly constrained.
@@ -1372,12 +1378,32 @@ def dispatch(
         if use_gpu and cp is None:
             raise RuntimeError("dask_cuda path selected but CuPy is unavailable.")
 
+        def make_meta(dtype, *, gpu=False, ndim=0):
+            shape = (0,) * max(0, int(ndim or 0))
+            meta = np.empty(shape, dtype=np.dtype(dtype))
+            return cp.asarray(meta) if gpu else meta
+
+        if use_gpu and not _dask_array_has_cupy_chunks(sample_exec, cp):
+            sample_exec = sample_exec.map_blocks(
+                cp.asarray,
+                dtype=sample_exec.dtype,
+                meta=make_meta(sample_exec.dtype, gpu=True, ndim=sample_exec.ndim),
+            )
+
+        def finalize_block_output(out):
+            if not use_gpu:
+                return out
+            if cuda_output_dtype is None:
+                return out
+            if _is_cupy_array(out, cp):
+                return out.astype(cuda_output_dtype, copy=False)
+            return out
+
         if dask_strategy == "pointwise":
             def block_apply(block):
-                block_value = cp.asarray(block) if use_gpu else block
-                a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block_value)
+                a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
                 out = compute_func(*a2, **k2)
-                return _convert_cuda_output_to_numpy(out, cp) if use_gpu else out
+                return finalize_block_output(out)
 
             if use_gpu and cuda_output_dtype is not None:
                 out_dtype = cuda_output_dtype
@@ -1387,15 +1413,14 @@ def dispatch(
                 block_apply,
                 sample_exec,
                 dtype=out_dtype,
-                meta=np.array((), dtype=np.dtype(out_dtype)),
+                meta=make_meta(out_dtype, gpu=use_gpu, ndim=sample_exec.ndim),
             )
 
         # dask_strategy == "neighborhood"
         def overlap_apply(block):
-            block_value = cp.asarray(block) if use_gpu else block
-            a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block_value)
+            a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
             out = compute_func(*a2, **k2)
-            return _convert_cuda_output_to_numpy(out, cp) if use_gpu else out
+            return finalize_block_output(out)
 
         depth_kwargs = kwargs_in if depth_kwargs_in is None else depth_kwargs_in
         depth = _depth_for_overlap(sample_exec, axes, depth_kwargs)
@@ -1407,7 +1432,7 @@ def dispatch(
             out_dtype = cuda_output_dtype
         else:
             out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
-        return sample_exec.map_overlap(
+        result = sample_exec.map_overlap(
             overlap_apply,
             depth=depth,
             boundary=boundary,
@@ -1415,7 +1440,11 @@ def dispatch(
             allow_rechunk=allow_rechunk,
             align_arrays=align_arrays,
             dtype=out_dtype,
+            meta=make_meta(out_dtype, gpu=use_gpu, ndim=sample_exec.ndim),
         )
+        if use_gpu:
+            result._meta = make_meta(out_dtype, gpu=True, ndim=sample_exec.ndim)
+        return result
 
     def execute_once(args_in, kwargs_in):
         sample = None

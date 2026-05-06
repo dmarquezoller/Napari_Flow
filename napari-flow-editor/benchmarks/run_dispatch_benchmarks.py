@@ -64,6 +64,31 @@ _MERMAID_MAX_LAYERS = 24
 _MERMAID_MAX_EDGES = 48
 
 
+def _try_import_cupy():
+    try:
+        import cupy as cp  # type: ignore
+        return cp
+    except Exception:
+        return None
+
+
+def _is_cupy_array(value: Any, cp=None) -> bool:
+    cp_mod = cp or _try_import_cupy()
+    if cp_mod is None:
+        return False
+    try:
+        return isinstance(value, cp_mod.ndarray)
+    except Exception:
+        return False
+
+
+def _cupy_to_numpy(value: Any) -> Any:
+    cp = _try_import_cupy()
+    if cp is not None and _is_cupy_array(value, cp):
+        return cp.asnumpy(value)
+    return value
+
+
 @dataclass(frozen=True)
 class CaseSpec:
     name: str
@@ -663,6 +688,8 @@ def _dask_output_info(value: Any) -> dict[str, Any]:
         return {
             "dask_output_chunks": "",
             "dask_output_chunksize": "",
+            "dask_output_chunk_type": "",
+            "dask_output_gpu_resident": False,
             "dask_output_numblocks": "",
             "dask_output_npartitions": None,
             "dask_output_tasks": None,
@@ -672,9 +699,18 @@ def _dask_output_info(value: Any) -> dict[str, Any]:
         tasks = int(len(arr.__dask_graph__()))
     except Exception:
         tasks = None
+    meta = getattr(arr, "_meta", None)
+    chunk_type = type(meta).__name__ if meta is not None else ""
+    chunk_module = type(meta).__module__ if meta is not None else ""
+    chunk_type_full = (
+        f"{chunk_module}.{chunk_type}" if chunk_module and chunk_type else chunk_type
+    )
+    gpu_resident = bool(_is_cupy_array(meta))
     return {
         "dask_output_chunks": str(getattr(arr, "chunks", "")),
         "dask_output_chunksize": str(getattr(arr, "chunksize", "")),
+        "dask_output_chunk_type": chunk_type_full,
+        "dask_output_gpu_resident": gpu_resident,
         "dask_output_numblocks": str(getattr(arr, "numblocks", "")),
         "dask_output_npartitions": int(getattr(arr, "npartitions", 0) or 0),
         "dask_output_tasks": tasks,
@@ -682,7 +718,7 @@ def _dask_output_info(value: Any) -> dict[str, Any]:
 
 
 def _first_array_like(value: Any) -> Any | None:
-    if isinstance(value, (np.ndarray, da.Array)):
+    if isinstance(value, (np.ndarray, da.Array)) or _is_cupy_array(value):
         return value
     if isinstance(value, (list, tuple)):
         for item in value:
@@ -700,7 +736,7 @@ def _first_array_like(value: Any) -> Any | None:
 
 
 def _last_array_like(value: Any) -> Any | None:
-    if isinstance(value, (np.ndarray, da.Array)):
+    if isinstance(value, (np.ndarray, da.Array)) or _is_cupy_array(value):
         return value
     if isinstance(value, (list, tuple)):
         for item in reversed(value):
@@ -1079,9 +1115,17 @@ def _build_mermaid_hlg(value: Any) -> str:
 def _output_shape_signature(value: Any) -> str:
     if isinstance(value, np.ndarray):
         return f"array:{tuple(int(x) for x in value.shape)}:{value.dtype}"
+    if _is_cupy_array(value):
+        shape = tuple(int(x) for x in value.shape)
+        return f"cupy:{shape}:{value.dtype}"
     if isinstance(value, da.Array):
         shape = tuple(int(x) for x in value.shape)
-        return f"dask:{shape}:{value.dtype}:chunksize={getattr(value, 'chunksize', '')}"
+        meta = getattr(value, "_meta", None)
+        chunk_type = type(meta).__module__ + "." + type(meta).__name__
+        return (
+            f"dask:{shape}:{value.dtype}:chunksize={getattr(value, 'chunksize', '')}:"
+            f"chunk_type={chunk_type}"
+        )
     if isinstance(value, list):
         inner = ", ".join(_output_shape_signature(v) for v in value)
         return f"list[{inner}]"
@@ -1092,6 +1136,8 @@ def _output_shape_signature(value: Any) -> str:
 
 
 def _compare_outputs(reference: Any, candidate: Any) -> dict[str, Any]:
+    reference = _cupy_to_numpy(reference)
+    candidate = _cupy_to_numpy(candidate)
     if isinstance(reference, np.ndarray) and isinstance(candidate, np.ndarray):
         if reference.shape != candidate.shape:
             return {"compatible": False, "mae": None, "max_abs": None, "details": "shape mismatch"}
@@ -1542,9 +1588,9 @@ def _write_markdown(
         )
         lines.append("")
         lines.append(
-            "| Case | Requested | Selected (mode) | Honored | Ref | Build mean (s) | Compute mean (s) | Total mean (s) | Speedup vs Ref | Dask chunk shape | Dask partitions | Dask numblocks | Dask tasks | Build share (%) | Throughput (GiB/s) | Throughput (MPix/s) | MAE vs Ref | Compatible |"
+            "| Case | Requested | Selected (mode) | Honored | Ref | Build mean (s) | Compute mean (s) | Total mean (s) | Speedup vs Ref | Dask chunk shape | Dask chunk type | GPU resident | Dask partitions | Dask numblocks | Dask tasks | Build share (%) | Throughput (GiB/s) | Throughput (MPix/s) | MAE vs Ref | Compatible |"
         )
-        lines.append("|---|---|---|---:|---|---:|---:|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---|")
+        lines.append("|---|---|---|---:|---|---:|---:|---:|---:|---|---|---|---:|---|---:|---:|---:|---:|---:|---|")
         for row in summary_rows:
             honored_pct = (
                 "n/a"
@@ -1589,8 +1635,14 @@ def _write_markdown(
             dask_chunksize = str(row.get("dask_output_chunksize", "") or "").strip()
             if not dask_chunksize:
                 dask_chunksize = "n/a"
+            dask_chunk_type = str(row.get("dask_output_chunk_type", "") or "").strip()
+            if not dask_chunk_type:
+                dask_chunk_type = "n/a"
+            dask_gpu_resident = (
+                "yes" if bool(row.get("dask_output_gpu_resident", False)) else "no"
+            )
             lines.append(
-                "| {case} | {requested} | {selected_mode} | {honored} | {ref} | {dispatch_mean:.4f} | {compute_mean:.4f} | {total_mean:.4f} | {speedup} | {dask_chunksize} | {dask_partitions} | {dask_numblocks} | {dask_tasks} | {dispatch_share} | {thr_gib_s} | {thr_mpix_s} | {mae} | {compatible} |".format(
+                "| {case} | {requested} | {selected_mode} | {honored} | {ref} | {dispatch_mean:.4f} | {compute_mean:.4f} | {total_mean:.4f} | {speedup} | {dask_chunksize} | {dask_chunk_type} | {dask_gpu_resident} | {dask_partitions} | {dask_numblocks} | {dask_tasks} | {dispatch_share} | {thr_gib_s} | {thr_mpix_s} | {mae} | {compatible} |".format(
                     case=row.get("case", ""),
                     requested=row.get("requested_backend", ""),
                     selected_mode=row.get("selected_backend_mode", ""),
@@ -1601,6 +1653,8 @@ def _write_markdown(
                     total_mean=float(row.get("total_time_mean_s", 0.0)),
                     speedup=speedup,
                     dask_chunksize=dask_chunksize,
+                    dask_chunk_type=dask_chunk_type,
+                    dask_gpu_resident=dask_gpu_resident,
                     dask_partitions=dask_partitions,
                     dask_numblocks=dask_numblocks,
                     dask_tasks=dask_tasks,
@@ -1637,6 +1691,8 @@ def _write_markdown(
             "Lowres slice (s)",
             "App total (s)",
             "Dask chunk shape",
+            "Dask chunk type",
+            "GPU resident",
             "Dask partitions",
             "Dask numblocks",
             "Dask tasks",
@@ -1654,6 +1710,8 @@ def _write_markdown(
             "---:",
             "---:",
             "---:",
+            "---",
+            "---",
             "---",
             "---:",
             "---",
@@ -1674,6 +1732,9 @@ def _write_markdown(
             dask_numblocks = str(row.get("dask_output_numblocks", "") or "").strip()
             if not dask_numblocks:
                 dask_numblocks = "n/a"
+            dask_chunk_type = str(row.get("dask_output_chunk_type", "") or "").strip()
+            if not dask_chunk_type:
+                dask_chunk_type = "n/a"
             values = [
                 str(row.get("case", "")),
                 str(row.get("requested_backend", "")),
@@ -1690,6 +1751,8 @@ def _write_markdown(
                 _fmt_optional_time(row.get("lowres_slice_time_s")),
                 _fmt_optional_time(row.get("app_total_time_s")),
                 dask_chunksize,
+                dask_chunk_type,
+                "yes" if bool(row.get("dask_output_gpu_resident", False)) else "no",
                 _fmt_optional_int(row.get("dask_output_npartitions")),
                 dask_numblocks,
                 _fmt_optional_int(row.get("dask_output_tasks")),
@@ -1889,6 +1952,8 @@ def main() -> int:
                     "throughput_compute_mpix_s": 0.0,
                     "dask_output_chunks": "",
                     "dask_output_chunksize": "",
+                    "dask_output_chunk_type": "",
+                    "dask_output_gpu_resident": False,
                     "dask_output_numblocks": "",
                     "dask_output_npartitions": None,
                     "dask_output_tasks": None,
@@ -2182,6 +2247,8 @@ def main() -> int:
                     "throughput_compute_mpix_s": throughput_compute_mpix_s,
                     "dask_output_chunks": dask_info_record.get("dask_output_chunks", ""),
                     "dask_output_chunksize": dask_info_record.get("dask_output_chunksize", ""),
+                    "dask_output_chunk_type": dask_info_record.get("dask_output_chunk_type", ""),
+                    "dask_output_gpu_resident": dask_info_record.get("dask_output_gpu_resident", False),
                     "dask_output_numblocks": dask_info_record.get("dask_output_numblocks", ""),
                     "dask_output_npartitions": dask_info_record.get("dask_output_npartitions"),
                     "dask_output_tasks": dask_info_record.get("dask_output_tasks"),

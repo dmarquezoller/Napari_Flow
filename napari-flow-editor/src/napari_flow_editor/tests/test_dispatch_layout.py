@@ -364,6 +364,47 @@ def test_dispatch_dask_cuda_runs_gpu_adapter_per_block(monkeypatch):
     np.testing.assert_allclose(out.compute(), image + 7)
 
 
+def test_dispatch_dask_cuda_neighborhood_keeps_gpu_blocks_until_compute(monkeypatch):
+    class FakeCupyArray(np.ndarray):
+        pass
+
+    def fake_asarray(x):
+        return np.asarray(x).view(FakeCupyArray)
+
+    def fail_asnumpy(x):
+        raise AssertionError("dask_cuda should not convert blocks back to NumPy")
+
+    image = np.arange(64, dtype=np.float32).reshape(8, 8)
+    dask_image = da.from_array(image, chunks=(4, 4))
+    fake_cp = types.SimpleNamespace(
+        ndarray=FakeCupyArray,
+        asarray=fake_asarray,
+        asnumpy=fail_asnumpy,
+        cuda=types.SimpleNamespace(
+            runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+
+    out = dispatch(
+        default=lambda x, sigma=0, mode="nearest": x + 1,
+        cuda_func=lambda x, sigma=0, mode="nearest": x + 7,
+        args=(dask_image,),
+        kwargs={"sigma": 1, "mode": "nearest"},
+        backend="dask_cuda",
+        dask_strategy="neighborhood",
+        dask_halo_from_param="sigma",
+        dask_boundary_from_param="mode",
+        dask_output_dtype=np.float32,
+        cuda_output_dtype=np.float32,
+    )
+
+    assert isinstance(out, da.Array)
+    assert isinstance(out._meta, FakeCupyArray)
+    result = out.compute()
+    np.testing.assert_allclose(np.asarray(result), image + 7)
+
+
 def test_dispatch_auto_prefers_dask_cuda_for_lazy_when_available(monkeypatch):
     image = np.arange(64, dtype=np.float32).reshape(8, 8)
     dask_image = da.from_array(image, chunks=(4, 4))
