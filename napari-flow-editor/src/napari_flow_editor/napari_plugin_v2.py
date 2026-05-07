@@ -76,7 +76,10 @@ class OmeZarrSaveWorker(QObject):
         elapsed = time.perf_counter() - started_at
         ended_iso = datetime.datetime.now().isoformat(timespec="seconds")
         print(
-            f"[ome-zarr-save] END {ended_iso} elapsed={elapsed:.3f}s path={result.path}",
+            f"[ome-zarr-save] END {ended_iso} elapsed={elapsed:.3f}s "
+            f"path={result.path} levels={result.levels}/{result.requested_levels} "
+            f"source_levels={result.source_levels} axes={result.axes.upper()} "
+            f"chunks={result.chunks} omero_channels={result.omero_channels}",
             flush=True,
         )
         self.log_signal.emit(f"Saved OME-Zarr in {elapsed:.2f}s: {result.path}")
@@ -5962,6 +5965,18 @@ class FlowEditor(QWidget):
                 except Exception:
                     pass
 
+        # Display settings are user-adjustable in napari, so the live layer
+        # state should override any inherited/stale metadata from the pipeline.
+        for key in ("contrast_limits", "colormap", "gamma", "visible"):
+            if hasattr(layer, key):
+                try:
+                    value = getattr(layer, key)
+                    if key == "contrast_limits":
+                        value = tuple(value)
+                    metadata[key] = value
+                except Exception:
+                    pass
+
         data = getattr(layer, "data", None)
         sample = data[0] if isinstance(data, list) and data and hasattr(data[0], "shape") else data
         ndim = len(getattr(sample, "shape", ()) or ())
@@ -6009,6 +6024,30 @@ class FlowEditor(QWidget):
             if reply != QMessageBox.Yes:
                 return
 
+        pyramid_levels, ok = QInputDialog.getInt(
+            self,
+            "OME-Zarr Pyramid Levels",
+            "Resolution levels to write (1 = full resolution only):",
+            1,
+            1,
+            6,
+            1,
+        )
+        if not ok:
+            return
+
+        downsample_label, ok = QInputDialog.getItem(
+            self,
+            "OME-Zarr Pyramid Downsampling",
+            "Downsample pyramid levels over:",
+            ["XY only (2D browsing)", "ZYX (3D rendering)"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+        pyramid_downsample = "zyx" if str(downsample_label).startswith("ZYX") else "xy"
+
         metadata = self._metadata_for_layer_save(layer)
         layer_type = self._layer_type_for_save(layer)
         request = OmeZarrSaveRequest(
@@ -6018,6 +6057,8 @@ class FlowEditor(QWidget):
             layer_type=layer_type,
             metadata=metadata,
             chunks="auto",
+            pyramid_levels=pyramid_levels,
+            pyramid_downsample=pyramid_downsample,
             overwrite=overwrite,
         )
 
@@ -6060,7 +6101,9 @@ class FlowEditor(QWidget):
             f"Shape: {result.shape}\n"
             f"Axes: {result.axes.upper()}\n"
             f"Chunks: {result.chunks}\n"
-            f"Levels: {result.levels}"
+            f"Levels: {result.levels}/{result.requested_levels}\n"
+            f"Source levels: {result.source_levels}\n"
+            f"Display channels: {result.omero_channels}"
         )
         self.append_log(detail.replace("\n", " | "))
         QMessageBox.information(self, "OME-Zarr Saved", detail)

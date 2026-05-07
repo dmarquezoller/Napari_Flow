@@ -23,6 +23,8 @@ class OmeZarrSaveRequest:
     scale: Optional[tuple[float, ...]] = None
     translate: Optional[tuple[float, ...]] = None
     chunks: str | tuple[int, ...] | None = "auto"
+    pyramid_levels: int = 1
+    pyramid_downsample: str = "xy"
     overwrite: bool = True
 
 
@@ -34,8 +36,11 @@ class OmeZarrSaveResult:
     shape: tuple[int, ...]
     chunks: tuple[int, ...]
     levels: int
+    requested_levels: int
+    source_levels: int
     layer_type: str
     gpu_chunks_converted: bool = False
+    omero_channels: int = 0
 
 
 def _shape_of(data: Any) -> tuple[int, ...]:
@@ -122,6 +127,36 @@ def axes_to_ome_metadata(axes: str) -> list[dict[str, str]]:
     return out
 
 
+def canonical_ome_axes(axes: str) -> str:
+    axes = str(axes or "").lower()
+    ordered = []
+    for axis in "tczyx":
+        if axis in axes:
+            ordered.append(axis)
+    if len(ordered) != len(axes):
+        raise ValueError(f"Cannot map axes={axes!r} to OME axis order.")
+    return "".join(ordered)
+
+
+def _transpose_to_axes(data: Any, source_axes: str, target_axes: str) -> Any:
+    if source_axes == target_axes:
+        return data
+    perm = tuple(source_axes.index(axis) for axis in target_axes)
+    if hasattr(data, "transpose"):
+        return data.transpose(perm)
+    return np.transpose(data, perm)
+
+
+def _reorder_vector(
+    value: tuple[float, ...],
+    source_axes: str,
+    target_axes: str,
+) -> tuple[float, ...]:
+    if source_axes == target_axes:
+        return value
+    return tuple(float(value[source_axes.index(axis)]) for axis in target_axes)
+
+
 def _coerce_vector(value: Any, ndim: int, default: float) -> tuple[float, ...]:
     if value is None:
         return (float(default),) * int(ndim)
@@ -187,6 +222,32 @@ def _to_zarr_v2(darr: da.Array, path: str, component: str):
             return da.to_zarr(darr, **kwargs)
 
 
+def _spatial_downsample_axes(
+    shape: tuple[int, ...],
+    axes: str,
+    mode: str = "xy",
+) -> dict[int, int]:
+    mode = str(mode or "xy").strip().lower()
+    if mode in {"zyx", "xyz", "3d", "volume"}:
+        downsample_axes = {"z", "y", "x"}
+    else:
+        downsample_axes = {"y", "x"}
+
+    factors = {}
+    for axis_i, axis in enumerate(axes):
+        if axis in downsample_axes and int(shape[axis_i]) >= 2:
+            factors[axis_i] = 2
+    return factors
+
+
+def _downsample_level(prev: da.Array, axes: str, mode: str = "xy") -> Optional[da.Array]:
+    shape = tuple(int(s) for s in prev.shape)
+    factors = _spatial_downsample_axes(shape, axes, mode=mode)
+    if not factors:
+        return None
+    return da.coarsen(np.mean, prev, factors, trim_excess=True)
+
+
 def _as_numpy_backed_dask(array: Any, chunks: tuple[int, ...]) -> tuple[da.Array, bool]:
     if isinstance(array, da.Array):
         darr = array
@@ -239,6 +300,148 @@ def _coordinate_transformations(
     return transforms
 
 
+def _rgb_to_hex(rgb: Any) -> Optional[str]:
+    try:
+        values = [float(v) for v in list(rgb)[:3]]
+    except Exception:
+        return None
+    if len(values) < 3:
+        return None
+    if max(values) <= 1.0:
+        values = [v * 255.0 for v in values]
+    clipped = [max(0, min(255, int(round(v)))) for v in values]
+    return "".join(f"{v:02X}" for v in clipped)
+
+
+def _colormap_to_omero_color(colormap: Any) -> str:
+    name_map = {
+        "gray": "FFFFFF",
+        "grey": "FFFFFF",
+        "red": "FF0000",
+        "green": "00FF00",
+        "blue": "0000FF",
+        "cyan": "00FFFF",
+        "magenta": "FF00FF",
+        "yellow": "FFFF00",
+        "orange": "FFA500",
+        "purple": "800080",
+        "magma": "FCFDBF",
+        "inferno": "FCFFA4",
+        "plasma": "F0F921",
+        "viridis": "FDE725",
+    }
+
+    raw_name = None
+    raw_colors = None
+    if isinstance(colormap, dict):
+        raw_name = colormap.get("name")
+        raw_colors = colormap.get("colors")
+    elif isinstance(colormap, str):
+        raw_name = colormap
+    else:
+        raw_name = getattr(colormap, "name", None)
+        raw_colors = getattr(colormap, "colors", None)
+
+    if raw_name is not None:
+        name = str(raw_name).strip().lower()
+        if name in name_map:
+            return name_map[name]
+
+    if raw_colors is not None:
+        try:
+            colors = np.asarray(raw_colors)
+            if colors.ndim >= 2 and colors.shape[0] > 0 and colors.shape[1] >= 3:
+                color = _rgb_to_hex(colors[-1, :3])
+                if color:
+                    return color
+        except Exception:
+            pass
+
+    return "FFFFFF"
+
+
+def _colormap_for_channel(colormap: Any, channel_index: int) -> Any:
+    if isinstance(colormap, (str, dict)) or colormap is None:
+        return colormap
+    try:
+        if isinstance(colormap, (list, tuple)) and colormap:
+            return colormap[min(channel_index, len(colormap) - 1)]
+    except Exception:
+        pass
+    return colormap
+
+
+def _contrast_for_channel(contrast: Any, channel_index: int) -> Optional[tuple[float, float]]:
+    if contrast is None:
+        return None
+    try:
+        seq = list(contrast)
+    except Exception:
+        return None
+    if len(seq) < 2:
+        return None
+
+    first = seq[0]
+    try:
+        nested = not np.isscalar(first) and len(first) >= 2
+    except Exception:
+        nested = False
+
+    if nested:
+        chosen = seq[min(channel_index, len(seq) - 1)]
+        try:
+            lo, hi = float(chosen[0]), float(chosen[1])
+        except Exception:
+            return None
+    else:
+        try:
+            lo, hi = float(seq[0]), float(seq[1])
+        except Exception:
+            return None
+
+    if hi <= lo:
+        return None
+    return lo, hi
+
+
+def _omero_display_metadata(
+    name: str,
+    axes: str,
+    shape: tuple[int, ...],
+    metadata: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    contrast = metadata.get("contrast_limits")
+
+    channel_count = int(shape[axes.index("c")]) if "c" in axes else 1
+    active = bool(metadata.get("visible", True))
+    channels = []
+    for channel_index in range(max(1, channel_count)):
+        color = _colormap_to_omero_color(
+            _colormap_for_channel(metadata.get("colormap"), channel_index)
+        )
+        window = _contrast_for_channel(contrast, channel_index)
+        label = str(name)
+        if channel_count > 1:
+            label = f"{label} {channel_index}"
+        channel = {
+            "label": label,
+            "active": active,
+            "color": color,
+        }
+        if window is not None:
+            lo, hi = window
+            channel["window"] = {
+                "start": lo,
+                "end": hi,
+                "min": lo,
+                "max": hi,
+            }
+        channels.append(channel)
+    if not channels:
+        return None
+    return {"channels": channels, "rdefs": {"model": "color"}}
+
+
 def save_ome_zarr(
     request: OmeZarrSaveRequest,
     log: LogCallback = None,
@@ -254,8 +457,17 @@ def save_ome_zarr(
     data_levels = list(request.data) if _is_multiscale_data(request.data) else [request.data]
     if not data_levels:
         raise ValueError("No image data to save.")
+    source_level_count = len(data_levels)
+    requested_levels = max(1, int(request.pyramid_levels or 1))
+    if len(data_levels) > requested_levels:
+        data_levels = data_levels[:requested_levels]
 
-    axes = infer_axes(data_levels[0], metadata=metadata, axes=request.axes)
+    source_axes = infer_axes(data_levels[0], metadata=metadata, axes=request.axes)
+    axes = canonical_ome_axes(source_axes)
+    data_levels = [
+        _transpose_to_axes(level, source_axes, axes)
+        for level in data_levels
+    ]
     level_shapes = [_shape_of(level) for level in data_levels]
     base_shape = level_shapes[0]
     if len(axes) != len(base_shape):
@@ -263,17 +475,36 @@ def save_ome_zarr(
 
     scale = _coerce_vector(
         request.scale if request.scale is not None else metadata.get("scale"),
-        len(axes),
+        len(source_axes),
         1.0,
     )
     translate = _coerce_vector(
         request.translate if request.translate is not None else metadata.get("translate"),
-        len(axes),
+        len(source_axes),
         0.0,
     )
+    scale = _reorder_vector(scale, source_axes, axes)
+    translate = _reorder_vector(translate, source_axes, axes)
+
+    gpu_converted = False
+    if len(data_levels) < requested_levels:
+        last_shape = _shape_of(data_levels[-1])
+        last_chunks = normalize_chunks(request.chunks, last_shape, axes)
+        last_darr, converted = _as_numpy_backed_dask(data_levels[-1], last_chunks)
+        data_levels[-1] = last_darr
+        gpu_converted = gpu_converted or converted
+        for _ in range(len(data_levels), requested_levels):
+            next_level = _downsample_level(
+                data_levels[-1],
+                axes,
+                mode=request.pyramid_downsample,
+            )
+            if next_level is None:
+                break
+            data_levels.append(next_level)
+        level_shapes = [_shape_of(level) for level in data_levels]
 
     prepared = []
-    gpu_converted = False
     for level_index, level in enumerate(data_levels):
         shape = level_shapes[level_index]
         if len(shape) != len(axes):
@@ -288,7 +519,8 @@ def save_ome_zarr(
     if log:
         log(
             "Writing OME-Zarr "
-            f"path={path} shape={base_shape} axes={axes.upper()} chunks={prepared[0][1]}"
+            f"path={path} shape={base_shape} axes={axes.upper()} chunks={prepared[0][1]} "
+            f"levels={len(prepared)}/{requested_levels} source_levels={source_level_count}"
         )
 
     _open_group(str(path), mode="w")
@@ -318,7 +550,22 @@ def save_ome_zarr(
         "writer": "napari-flow-editor",
         "layer_type": str(request.layer_type or "image"),
         "source_name": str(metadata.get("source_layer", metadata.get("name", ""))),
+        "requested_levels": requested_levels,
+        "written_levels": len(prepared),
+        "source_levels": source_level_count,
+        "pyramid_downsample": str(request.pyramid_downsample or "xy"),
     }
+    omero = _omero_display_metadata(name, axes, base_shape, metadata)
+    if omero is not None:
+        root.attrs["omero"] = omero
+    omero_channels = len(omero.get("channels", [])) if isinstance(omero, dict) else 0
+    if log:
+        log(
+            "OME-Zarr display metadata "
+            f"omero_channels={omero_channels} "
+            f"contrast_limits={metadata.get('contrast_limits', None)!r} "
+            f"colormap={getattr(metadata.get('colormap', None), 'name', metadata.get('colormap', None))!r}"
+        )
 
     return OmeZarrSaveResult(
         path=str(path),
@@ -327,6 +574,9 @@ def save_ome_zarr(
         shape=base_shape,
         chunks=prepared[0][1],
         levels=len(prepared),
+        requested_levels=requested_levels,
+        source_levels=source_level_count,
         layer_type=str(request.layer_type or "image"),
         gpu_chunks_converted=gpu_converted,
+        omero_channels=omero_channels,
     )
