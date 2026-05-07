@@ -13,7 +13,7 @@ from qtpy.QtWidgets import (
 from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
-from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer, QStandardPaths
+from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer, QStandardPaths, QObject
 import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time
 import tempfile
 import csv
@@ -29,6 +29,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
+from .io.ome_zarr_writer import OmeZarrSaveRequest, save_ome_zarr
 from .script_generator import ScriptGenerator
 from .widgets.dynamic_table import DynamicTableWidget
 from .widgets.plot_widgets import (
@@ -40,6 +41,46 @@ from .widgets.plot_widgets import (
 
 
 NODE_LIBRARY = {}
+
+
+class OmeZarrSaveWorker(QObject):
+    log_signal = Signal(str)
+    finished_signal = Signal(object)
+    error_signal = Signal(str, str)
+
+    def __init__(self, request):
+        super().__init__()
+        self.request = request
+
+    def run(self):
+        import traceback
+
+        started_at = time.perf_counter()
+        started_iso = datetime.datetime.now().isoformat(timespec="seconds")
+        print(
+            f"[ome-zarr-save] START {started_iso} path={self.request.path}",
+            flush=True,
+        )
+        self.log_signal.emit(f"Saving to OME-Zarr: {self.request.path}")
+        try:
+            result = save_ome_zarr(self.request, log=self.log_signal.emit)
+        except Exception as exc:
+            elapsed = time.perf_counter() - started_at
+            print(
+                f"[ome-zarr-save] ERROR elapsed={elapsed:.3f}s path={self.request.path}: {exc}",
+                flush=True,
+            )
+            self.error_signal.emit(str(exc), traceback.format_exc())
+            return
+
+        elapsed = time.perf_counter() - started_at
+        ended_iso = datetime.datetime.now().isoformat(timespec="seconds")
+        print(
+            f"[ome-zarr-save] END {ended_iso} elapsed={elapsed:.3f}s path={result.path}",
+            flush=True,
+        )
+        self.log_signal.emit(f"Saved OME-Zarr in {elapsed:.2f}s: {result.path}")
+        self.finished_signal.emit({"result": result, "elapsed_s": elapsed})
 
 
 class InfoHoverButton(QPushButton):
@@ -1351,6 +1392,8 @@ class FlowEditor(QWidget):
         self._backend_row_order = []
         self.thread = None
         self.worker = None
+        self._ome_zarr_save_thread = None
+        self._ome_zarr_save_worker = None
         self._active_run_mode = None
         self._step_state = None
         self._step_graph_signature = None
@@ -1424,6 +1467,7 @@ class FlowEditor(QWidget):
         self.action_save_pipeline = self.file_menu.addAction("Save Pipeline")
         self.action_load_pipeline = self.file_menu.addAction("Load Pipeline")
         self.file_menu.addSeparator()
+        self.action_save_ome_zarr = self.file_menu.addAction("Save as OME-Zarr...")
         self.action_save_zarr = self.file_menu.addAction("Save to Zarr")
         self.file_menu.addSeparator()
         self.action_import_nodes = self.file_menu.addAction("Import Nodes (.py)")
@@ -1431,6 +1475,7 @@ class FlowEditor(QWidget):
 
         self.action_save_pipeline.triggered.connect(self.save_pipeline)
         self.action_load_pipeline.triggered.connect(self.load_pipeline)
+        self.action_save_ome_zarr.triggered.connect(self.save_to_ome_zarr)
         self.action_save_zarr.triggered.connect(self.save_to_zarr)
         self.action_import_nodes.triggered.connect(self.import_custom_module)
         self.action_export_script.triggered.connect(self.export_to_python)
@@ -1441,6 +1486,7 @@ class FlowEditor(QWidget):
         # Keep old attributes as aliases to preserve internal references.
         self.btn_save = self.action_save_pipeline
         self.btn_load = self.action_load_pipeline
+        self.btn_save_ome_zarr = self.action_save_ome_zarr
         self.btn_save_zarr = self.action_save_zarr
         self.btn_import = self.action_import_nodes
         self.btn_export = self.action_export_script
@@ -5559,6 +5605,14 @@ class FlowEditor(QWidget):
         sb.setValue(sb.maximum())
 
     def closeEvent(self, event):
+        if self._ome_zarr_save_is_running():
+            QMessageBox.warning(
+                self,
+                "Save Running",
+                "An OME-Zarr save is still running. Please wait for it to finish before closing.",
+            )
+            event.ignore()
+            return
         try:
             self._flush_pending_param_updates()
             if self._autosave_timer.isActive():
@@ -5579,6 +5633,10 @@ class FlowEditor(QWidget):
         self.btn_remove.setEnabled(enabled)
         self.btn_load.setEnabled(enabled)
         self.btn_save.setEnabled(enabled)
+        if hasattr(self, "btn_save_ome_zarr"):
+            self.btn_save_ome_zarr.setEnabled(enabled and not self._ome_zarr_save_is_running())
+        if hasattr(self, "btn_save_zarr"):
+            self.btn_save_zarr.setEnabled(enabled)
         self.btn_import.setEnabled(enabled)
         self.btn_collapse_macro.setEnabled(enabled)
         if self.btn_expand_macro is not None:
@@ -5854,6 +5912,169 @@ class FlowEditor(QWidget):
         pixmap = QPixmap.fromImage(q_img)
         return pixmap.scaled(350, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     
+
+
+    def _ome_zarr_save_is_running(self):
+        return self._ome_zarr_save_thread is not None
+
+    def _safe_layer_name_for_path(self, name):
+        text = str(name or "layer").strip()
+        text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
+        text = text.strip("._") or "layer"
+        return text
+
+    def _layer_type_for_save(self, layer):
+        try:
+            if hasattr(layer, "as_layer_data_tuple"):
+                ldt = layer.as_layer_data_tuple()
+                if isinstance(ldt, tuple) and len(ldt) >= 3:
+                    return str(ldt[2])
+        except Exception:
+            pass
+        cls_name = type(layer).__name__.lower()
+        if "label" in cls_name:
+            return "labels"
+        if "image" in cls_name:
+            return "image"
+        return cls_name or "image"
+
+    def _metadata_for_layer_save(self, layer):
+        metadata = {}
+        try:
+            if hasattr(layer, "as_layer_data_tuple"):
+                ldt = layer.as_layer_data_tuple()
+                if isinstance(ldt, tuple) and len(ldt) >= 2 and isinstance(ldt[1], dict):
+                    metadata.update(dict(ldt[1]))
+        except Exception:
+            pass
+        try:
+            layer_meta = getattr(layer, "metadata", None)
+            if isinstance(layer_meta, dict):
+                metadata.update(dict(layer_meta))
+        except Exception:
+            pass
+
+        metadata.setdefault("name", getattr(layer, "name", "Layer"))
+        for key in ("scale", "translate"):
+            if key not in metadata and hasattr(layer, key):
+                try:
+                    metadata[key] = tuple(getattr(layer, key))
+                except Exception:
+                    pass
+
+        data = getattr(layer, "data", None)
+        sample = data[0] if isinstance(data, list) and data and hasattr(data[0], "shape") else data
+        ndim = len(getattr(sample, "shape", ()) or ())
+        dims = getattr(self.viewer, "dims", None)
+        if dims is not None and "axis_labels" not in metadata:
+            try:
+                labels = tuple(str(x).lower() for x in getattr(dims, "axis_labels", ()))
+                if len(labels) == ndim:
+                    metadata["axis_labels"] = labels
+            except Exception:
+                pass
+        return metadata
+
+    def save_to_ome_zarr(self):
+        if self._ome_zarr_save_is_running():
+            self.append_log("OME-Zarr save is already running.")
+            return
+
+        layer = self.viewer.layers.selection.active
+        if not layer:
+            QMessageBox.warning(self, "No Selection", "Please select a layer to save.")
+            return
+
+        default_name = self._safe_layer_name_for_path(getattr(layer, "name", "layer"))
+        default_path = os.path.join(os.path.expanduser("~"), f"{default_name}.zarr")
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save as OME-Zarr",
+            default_path,
+            "OME-Zarr Stores (*.zarr);;All Files (*)",
+        )
+        if not output_path:
+            return
+        if not output_path.endswith(".zarr"):
+            output_path = f"{output_path}.zarr"
+
+        overwrite = True
+        if os.path.exists(output_path):
+            reply = QMessageBox.question(
+                self,
+                "Overwrite OME-Zarr",
+                f"'{output_path}' already exists.\n\nOverwrite it?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        metadata = self._metadata_for_layer_save(layer)
+        layer_type = self._layer_type_for_save(layer)
+        request = OmeZarrSaveRequest(
+            data=getattr(layer, "data", None),
+            path=output_path,
+            name=str(getattr(layer, "name", default_name)),
+            layer_type=layer_type,
+            metadata=metadata,
+            chunks="auto",
+            overwrite=overwrite,
+        )
+
+        self.append_log(f"Saving to OME-Zarr... {output_path}")
+        self._start_ome_zarr_save_worker(request)
+
+    def _start_ome_zarr_save_worker(self, request):
+        self._ome_zarr_save_thread = QThread()
+        self._ome_zarr_save_worker = OmeZarrSaveWorker(request)
+        self._ome_zarr_save_worker.moveToThread(self._ome_zarr_save_thread)
+
+        self._ome_zarr_save_thread.started.connect(self._ome_zarr_save_worker.run)
+        self._ome_zarr_save_worker.log_signal.connect(self.append_log)
+        self._ome_zarr_save_worker.finished_signal.connect(self._on_ome_zarr_save_finished)
+        self._ome_zarr_save_worker.error_signal.connect(self._on_ome_zarr_save_error)
+        self._ome_zarr_save_worker.finished_signal.connect(self._ome_zarr_save_thread.quit)
+        self._ome_zarr_save_worker.error_signal.connect(self._ome_zarr_save_thread.quit)
+        self._ome_zarr_save_worker.finished_signal.connect(self._ome_zarr_save_worker.deleteLater)
+        self._ome_zarr_save_worker.error_signal.connect(self._ome_zarr_save_worker.deleteLater)
+        self._ome_zarr_save_thread.finished.connect(self._ome_zarr_save_thread.deleteLater)
+        self._ome_zarr_save_thread.finished.connect(self._on_ome_zarr_save_thread_finished)
+
+        if hasattr(self, "action_save_ome_zarr"):
+            self.action_save_ome_zarr.setEnabled(False)
+        self._ome_zarr_save_thread.start()
+
+    def _on_ome_zarr_save_finished(self, payload):
+        result = None
+        elapsed_s = None
+        if isinstance(payload, dict):
+            result = payload.get("result")
+            elapsed_s = payload.get("elapsed_s")
+        if result is None:
+            self.append_log("Saved OME-Zarr.")
+            return
+        elapsed_text = f"{float(elapsed_s):.2f}s" if elapsed_s is not None else "unknown time"
+        detail = (
+            f"Saved OME-Zarr in {elapsed_text}\n"
+            f"Path: {result.path}\n"
+            f"Shape: {result.shape}\n"
+            f"Axes: {result.axes.upper()}\n"
+            f"Chunks: {result.chunks}\n"
+            f"Levels: {result.levels}"
+        )
+        self.append_log(detail.replace("\n", " | "))
+        QMessageBox.information(self, "OME-Zarr Saved", detail)
+
+    def _on_ome_zarr_save_error(self, message, traceback_text):
+        print(traceback_text, flush=True)
+        self.append_log(f"OME-Zarr save failed: {message}")
+        QMessageBox.critical(self, "OME-Zarr Save Failed", str(message))
+
+    def _on_ome_zarr_save_thread_finished(self):
+        self._ome_zarr_save_thread = None
+        self._ome_zarr_save_worker = None
+        if hasattr(self, "action_save_ome_zarr"):
+            self.action_save_ome_zarr.setEnabled(True)
 
 
     def save_to_zarr(self):
