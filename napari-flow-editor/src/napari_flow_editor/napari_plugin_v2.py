@@ -14,7 +14,7 @@ from qtpy.QtGui import (
     QBrush, QPen, QColor, QPainterPath, QPainterPathStroker, QLinearGradient, QPainter, QAction, QCursor, QGradient, QImage, QPixmap
 )
 from qtpy.QtCore import Qt, QPointF, QRectF, QThread, Signal, QTimer, QStandardPaths, QObject
-import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time
+import os, sys, json, datetime, napari, uuid, importlib.util, inspect, zarr, copy, re, time, gc
 import tempfile
 import csv
 import html
@@ -29,7 +29,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from napari_flow_editor import generate_library
 from .execution_engine import ExecutionWorker
-from .io.ome_zarr_writer import OmeZarrSaveRequest, save_ome_zarr
+from .io.ome_zarr_writer import OmeZarrSaveRequest, infer_axes, normalize_chunks, save_ome_zarr
 from .script_generator import ScriptGenerator
 from .widgets.dynamic_table import DynamicTableWidget
 from .widgets.plot_widgets import (
@@ -41,6 +41,33 @@ from .widgets.plot_widgets import (
 
 
 NODE_LIBRARY = {}
+
+
+DEFAULT_CHECKPOINT_CONFIG = {
+    "enabled": False,
+    "folder": "",
+    "name": "",
+    "pyramid_levels": 1,
+    "pyramid_downsample": "xy",
+    "chunks": "auto",
+    "overwrite": True,
+    "continue_from_checkpoint": True,
+}
+
+CHECKPOINT_EXCLUDED_CATEGORIES = {
+    "control flow",
+    "input",
+    "inputs",
+    "output",
+    "outputs",
+    "measure",
+    "video",
+    "plotting",
+}
+
+
+def default_checkpoint_config():
+    return copy.deepcopy(DEFAULT_CHECKPOINT_CONFIG)
 
 
 class OmeZarrSaveWorker(QObject):
@@ -589,6 +616,7 @@ class Node(QGraphicsRectItem):
         self.category = "Uncategorized"
         self.uid = uuid_str if uuid_str else str(uuid.uuid4())
         self.parameters = {}
+        self.checkpoint_config = default_checkpoint_config()
         self.dynamic_param_bindings = {}
         self.description = ""
         self.logic_config = _normalize_logic_config(None)
@@ -1796,7 +1824,7 @@ class FlowEditor(QWidget):
             and self.props_group.isAncestorOf(focused)
             and isinstance(
                 focused,
-                (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget),
+                (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget, QCheckBox),
             )
         )
 
@@ -2787,6 +2815,12 @@ class FlowEditor(QWidget):
                 default_val = conf.get("default", "")
                 current_val = node.parameters.get(param_name, default_val)
                 if (
+                    node.node_type == "get_layer"
+                    and param_name == "target_chunks"
+                    and not bool(node.parameters.get("rechunk_enabled", False))
+                ):
+                    continue
+                if (
                     node.node_type == "select_layer"
                     and param_name == "layer_name"
                     and not pending_layer_choice
@@ -2919,7 +2953,15 @@ class FlowEditor(QWidget):
                 elif conf["type"] == "bool":
                     widget = QCheckBox()
                     widget.setChecked(bool(current_val))
-                    widget.toggled.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
+                    if node.node_type == "get_layer" and param_name == "rechunk_enabled":
+                        widget.toggled.connect(
+                            lambda val, n=node, k=param_name: (
+                                self.update_param(n, k, bool(val)),
+                                self.on_selection(force=True),
+                            )
+                        )
+                    else:
+                        widget.toggled.connect(lambda val, n=node, k=param_name: self.update_param(n, k, val))
                 
                 # ENUM (Standard static dropdowns from library)
                 elif conf["type"] == "enum":
@@ -3048,6 +3090,11 @@ class FlowEditor(QWidget):
                     node, param_name, widget, conf, batch_columns
                 )
                 self.props_layout.addRow(param_name.capitalize(), widget)
+
+        if node.node_type == "get_layer":
+            self._add_get_layer_data_info(node)
+
+        self._add_checkpoint_controls(node)
 
         # --- INTERACTIVE CARD (inline in parameters panel) ---
         pending = self._pending_interaction
@@ -3775,6 +3822,63 @@ class FlowEditor(QWidget):
                 return candidate
             idx += 1
 
+    def _enter_video_low_memory_mode(self, enabled):
+        if not enabled:
+            return None
+
+        state = {"dask_cache_bytes": None, "dask_cache_disabled": False}
+        try:
+            dask_utils = importlib.import_module("napari.utils._dask_utils")
+            cache_wrapper = getattr(dask_utils, "_DASK_CACHE", None)
+            cache = getattr(cache_wrapper, "cache", None)
+            if cache is not None and hasattr(cache, "available_bytes"):
+                state["dask_cache_bytes"] = int(cache.available_bytes)
+
+            resize_dask_cache = getattr(dask_utils, "resize_dask_cache", None)
+            if callable(resize_dask_cache):
+                resize_dask_cache(nbytes=0)
+                state["dask_cache_disabled"] = True
+        except Exception as exc:
+            state["dask_cache_error"] = str(exc)
+
+        return state
+
+    def _exit_video_low_memory_mode(self, state):
+        if not state or not state.get("dask_cache_disabled"):
+            return
+
+        previous_bytes = state.get("dask_cache_bytes")
+        if previous_bytes is None:
+            return
+        try:
+            dask_utils = importlib.import_module("napari.utils._dask_utils")
+            resize_dask_cache = getattr(dask_utils, "resize_dask_cache", None)
+            if callable(resize_dask_cache):
+                resize_dask_cache(nbytes=max(0, int(previous_bytes)))
+        except Exception:
+            pass
+
+    def _cleanup_video_frame_memory(self):
+        try:
+            dask_utils = importlib.import_module("napari.utils._dask_utils")
+            cache_wrapper = getattr(dask_utils, "_DASK_CACHE", None)
+            cache = getattr(cache_wrapper, "cache", None)
+            if cache is not None and hasattr(cache, "clear"):
+                cache.clear()
+        except Exception:
+            pass
+
+        try:
+            import cupy as cp
+
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+
+        gc.collect()
+        QApplication.processEvents()
+
     def _render_video_interaction(self, pending):
         config = pending.get("config", {}) if isinstance(pending, dict) else {}
         video_params = dict(config.get("video_params", {}) or {})
@@ -3784,6 +3888,8 @@ class FlowEditor(QWidget):
         out_format = str(video_params.get("format", ".mp4")).strip().lower()
         folder = str(video_params.get("folder", "")).strip()
         filename = str(video_params.get("filename", "napari_video")).strip()
+        low_memory_mode = bool(video_params.get("low_memory_mode", True))
+        cleanup_every = max(1, int(video_params.get("cleanup_every", 5) or 5))
 
         if fps <= 0 or fps > 120:
             self.append_log("❌ Make Video: 'fps' must be between 1 and 120.")
@@ -3844,8 +3950,23 @@ class FlowEditor(QWidget):
         for segment in parsed["segments"]:
             self.append_log(f"   - {segment}")
         self.append_log("   - visibility: using current viewer state")
+        if low_memory_mode:
+            self.append_log(
+                f"   - low memory mode: cleanup every {cleanup_every} frame(s); "
+                "napari Dask cache disabled during render"
+            )
 
         state = self._snapshot_viewer_state()
+        low_memory_state = self._enter_video_low_memory_mode(low_memory_mode)
+        if (
+            low_memory_mode
+            and low_memory_state
+            and low_memory_state.get("dask_cache_error")
+        ):
+            self.append_log(
+                "   - low memory warning: could not disable napari Dask cache "
+                f"({low_memory_state['dask_cache_error']})"
+            )
         run_enabled = self.btn_interaction_run.isEnabled()
         cancel_enabled = self.btn_interaction_cancel.isEnabled()
         self.btn_interaction_run.setEnabled(False)
@@ -3927,6 +4048,14 @@ class FlowEditor(QWidget):
                         )
 
                     writer.append_data(frame_rgb)
+                    del frame
+                    del frame_rgb
+                    if (
+                        low_memory_mode
+                        and ((i + 1) % cleanup_every == 0 or i == total_frames - 1)
+                    ):
+                        self._cleanup_video_frame_memory()
+
                     if (i + 1) % progress_every == 0 or i == total_frames - 1:
                         self.append_log(f"   - frame {i + 1}/{total_frames}")
 
@@ -3936,6 +4065,8 @@ class FlowEditor(QWidget):
                 "format": out_format,
                 "frames": total_frames,
                 "fps": fps,
+                "low_memory_mode": low_memory_mode,
+                "cleanup_every": cleanup_every,
                 "instructions": instructions,
                 "segments": parsed["segments"],
             }
@@ -3954,6 +4085,7 @@ class FlowEditor(QWidget):
             self.append_log(f"❌ Make Video failed: {exc}")
             return None
         finally:
+            self._exit_video_low_memory_mode(low_memory_state)
             self._restore_viewer_state(state)
             self.btn_interaction_run.setEnabled(run_enabled)
             self.btn_interaction_cancel.setEnabled(cancel_enabled)
@@ -4003,6 +4135,390 @@ class FlowEditor(QWidget):
         for node, param_name, value in pending:
             if isinstance(node, Node):
                 self.update_param(node, param_name, value)
+
+    @staticmethod
+    def _format_bytes(num_bytes):
+        try:
+            value = float(num_bytes)
+        except Exception:
+            return "n/a"
+        units = ["B", "KiB", "MiB", "GiB", "TiB"]
+        for unit in units:
+            if abs(value) < 1024.0 or unit == units[-1]:
+                return f"{value:.2f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024.0
+        return f"{value:.2f} TiB"
+
+    @staticmethod
+    def _short_repr(value, max_len=220):
+        text = repr(value)
+        if len(text) > max_len:
+            return text[: max_len - 3] + "..."
+        return text
+
+    @staticmethod
+    def _chunk_shape_from_chunks(chunks):
+        if chunks is None:
+            return None
+        if isinstance(chunks, tuple):
+            out = []
+            for axis_chunks in chunks:
+                if isinstance(axis_chunks, tuple):
+                    if not axis_chunks:
+                        return None
+                    out.append(max(int(c) for c in axis_chunks))
+                else:
+                    out.append(int(axis_chunks))
+            return tuple(out)
+        return None
+
+    def _get_layer_by_name(self, layer_name):
+        if not layer_name:
+            return None
+        try:
+            if layer_name in self.viewer.layers:
+                return self.viewer.layers[layer_name]
+        except Exception:
+            pass
+        try:
+            for layer in self.viewer.layers:
+                if getattr(layer, "name", None) == layer_name:
+                    return layer
+        except Exception:
+            pass
+        return None
+
+    def _layer_payload_for_info(self, layer):
+        data = getattr(layer, "data", None)
+        metadata = {}
+        if hasattr(layer, "as_layer_data_tuple"):
+            try:
+                ldt = layer.as_layer_data_tuple()
+                if (
+                    isinstance(ldt, tuple)
+                    and len(ldt) >= 2
+                    and isinstance(ldt[1], dict)
+                ):
+                    data = ldt[0]
+                    metadata.update(dict(ldt[1]))
+            except Exception:
+                pass
+        layer_meta = getattr(layer, "metadata", None)
+        if isinstance(layer_meta, dict):
+            metadata.update(dict(layer_meta))
+        return data, metadata
+
+    @staticmethod
+    def _looks_like_multiscale_for_info(data):
+        if isinstance(data, (np.ndarray, da.Array, tuple, str, bytes)):
+            return False
+        shapes = getattr(data, "shapes", None)
+        if shapes is not None:
+            try:
+                return len(shapes) > 1
+            except Exception:
+                pass
+        try:
+            return len(data) > 0 and hasattr(data[0], "shape")
+        except Exception:
+            return False
+
+    def _base_array_for_info(self, data):
+        if self._looks_like_multiscale_for_info(data):
+            try:
+                return data[0], len(data)
+            except Exception:
+                return data, None
+        return data, None
+
+    def _axes_from_get_layer_params_for_info(self, node, array, metadata):
+        shape = getattr(array, "shape", None)
+        ndim = len(shape) if shape is not None else None
+        axis_map = node.parameters.get("axis_map", [])
+        if axis_map:
+            row = axis_map[0]
+            if isinstance(row, dict):
+                axes = "".join(
+                    str(row.get(f"d{i}", "-"))
+                    for i in range(5)
+                    if str(row.get(f"d{i}", "-")) != "-"
+                )
+                if axes and (ndim is None or len(axes) == ndim):
+                    return axes
+        try:
+            return infer_axes(array, metadata=metadata or {}, axes=(metadata or {}).get("axes")).upper()
+        except Exception:
+            return str((metadata or {}).get("axes", "") or "")
+
+    def _array_info_lines(self, array, metadata=None):
+        metadata = metadata or {}
+        shape = getattr(array, "shape", None)
+        dtype = getattr(array, "dtype", None)
+        chunks = getattr(array, "chunks", None)
+        chunksize = getattr(array, "chunksize", None)
+        if chunksize is None:
+            chunksize = self._chunk_shape_from_chunks(chunks)
+        numblocks = getattr(array, "numblocks", None)
+        if numblocks is None and chunksize is not None and shape is not None:
+            try:
+                numblocks = tuple(
+                    int(np.ceil(int(s) / max(1, int(c))))
+                    for s, c in zip(shape, chunksize)
+                )
+            except Exception:
+                numblocks = None
+        partitions = getattr(array, "npartitions", None)
+        if partitions is None and numblocks is not None:
+            try:
+                partitions = int(np.prod(numblocks))
+            except Exception:
+                partitions = None
+
+        itemsize = getattr(dtype, "itemsize", None)
+        total_bytes = None
+        chunk_bytes = None
+        if itemsize is not None and shape is not None:
+            try:
+                total_bytes = int(np.prod(tuple(int(s) for s in shape))) * int(itemsize)
+            except Exception:
+                total_bytes = None
+        if itemsize is not None and chunksize is not None:
+            try:
+                chunk_bytes = int(np.prod(tuple(int(c) for c in chunksize))) * int(itemsize)
+            except Exception:
+                chunk_bytes = None
+
+        lines = [
+            f"Data type: {type(array).__module__}.{type(array).__name__}",
+            f"Shape: {tuple(shape) if shape is not None else 'n/a'}",
+            f"Dtype: {dtype if dtype is not None else 'n/a'}",
+        ]
+        axes = str(metadata.get("axes", "") or "")
+        if axes:
+            lines.append(f"Axes metadata: {axes}")
+        lines.extend(
+            [
+                f"Chunksize: {chunksize if chunksize is not None else 'n/a'}",
+                f"Numblocks: {numblocks if numblocks is not None else 'n/a'}",
+                f"Partitions: {partitions if partitions is not None else 'n/a'}",
+                f"Approx full data: {self._format_bytes(total_bytes) if total_bytes is not None else 'n/a'}",
+                f"Approx max chunk: {self._format_bytes(chunk_bytes) if chunk_bytes is not None else 'n/a'}",
+            ]
+        )
+        if chunks is not None:
+            lines.append(f"Chunks: {self._short_repr(chunks)}")
+        return lines
+
+    def _add_get_layer_data_info(self, node):
+        layer_name = str(node.parameters.get("layer_name", "") or "").strip()
+        layer = self._get_layer_by_name(layer_name)
+        self.props_layout.addRow(QLabel(""))
+        self.props_layout.addRow(QLabel("<u>Layer Data</u>"))
+        if layer is None:
+            self.props_layout.addRow(QLabel("<em>No selected layer data available.</em>"))
+            return
+
+        data, metadata = self._layer_payload_for_info(layer)
+        array, n_levels = self._base_array_for_info(data)
+        if n_levels is not None:
+            self.props_layout.addRow("Multiscale levels:", QLabel(str(n_levels)))
+
+        if not hasattr(array, "shape"):
+            self.props_layout.addRow(QLabel("<em>Selected layer is not array-like.</em>"))
+            return
+
+        info_lines = self._array_info_lines(array, metadata=metadata)
+        if bool(node.parameters.get("rechunk_enabled", False)):
+            axes = self._axes_from_get_layer_params_for_info(node, array, metadata)
+            target = str(node.parameters.get("target_chunks", "auto") or "auto").strip() or "auto"
+            try:
+                applied = normalize_chunks(target, tuple(int(s) for s in array.shape), axes.lower())
+                itemsize = getattr(getattr(array, "dtype", None), "itemsize", None)
+                chunk_bytes = (
+                    int(np.prod(applied)) * int(itemsize)
+                    if itemsize is not None
+                    else None
+                )
+                info_lines.append("")
+                info_lines.append(f"Rechunk target: {target}")
+                info_lines.append(f"Applied chunks: {applied}")
+                info_lines.append(
+                    f"Target chunk memory: {self._format_bytes(chunk_bytes) if chunk_bytes is not None else 'n/a'}"
+                )
+            except Exception as exc:
+                info_lines.append("")
+                info_lines.append(f"Rechunk target error: {exc}")
+
+        info = QLabel("<pre style='white-space: pre-wrap; margin: 0;'>" + html.escape("\n".join(info_lines)) + "</pre>")
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        self.props_layout.addRow(info)
+
+    def _ensure_checkpoint_config(self, node):
+        config = default_checkpoint_config()
+        existing = getattr(node, "checkpoint_config", None)
+        if isinstance(existing, dict):
+            config.update(existing)
+        node.checkpoint_config = config
+        return config
+
+    def _node_supports_checkpoint(self, node):
+        if not isinstance(node, Node):
+            return False
+        definition = NODE_LIBRARY.get(node.node_type, {}) or {}
+        category = str(definition.get("category", node.category)).strip().lower()
+        if category in CHECKPOINT_EXCLUDED_CATEGORIES:
+            return False
+        if not getattr(node, "outputs", None):
+            return False
+        return True
+
+    def _update_checkpoint_config(self, node, key, value, refresh=False):
+        config = self._ensure_checkpoint_config(node)
+        old_value = config.get(key)
+        try:
+            if old_value == value:
+                return
+        except Exception:
+            pass
+        config[key] = value
+        node.checkpoint_config = config
+        self.set_node_status_recursive(node, "gray")
+        self.scene.update()
+        self._on_pipeline_edited(f"checkpoint:{key}")
+        if refresh:
+            self.on_selection(force=True)
+
+    def _update_checkpoint_config_live(self, node, key, value):
+        config = self._ensure_checkpoint_config(node)
+        config[key] = value
+        node.checkpoint_config = config
+
+    def _add_checkpoint_controls(self, node):
+        if not self._node_supports_checkpoint(node):
+            return
+
+        config = self._ensure_checkpoint_config(node)
+        self.props_layout.addRow(QLabel(""))
+        self.props_layout.addRow(QLabel("<u>Checkpoint</u>"))
+
+        enabled = QCheckBox("Store intermediate step")
+        enabled.setChecked(bool(config.get("enabled", False)))
+        enabled.toggled.connect(
+            lambda val, n=node: self._update_checkpoint_config(
+                n, "enabled", bool(val), refresh=True
+            )
+        )
+        self.props_layout.addRow(enabled)
+
+        if not bool(config.get("enabled", False)):
+            return
+
+        folder_container = QWidget()
+        folder_layout = QHBoxLayout(folder_container)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        folder_edit = QLineEdit(str(config.get("folder", "") or ""))
+        folder_edit.setPlaceholderText("~/napari_flow_checkpoints")
+        folder_edit.setClearButtonEnabled(True)
+        folder_btn = QPushButton("...")
+        folder_btn.setFixedWidth(30)
+        folder_layout.addWidget(folder_edit)
+        folder_layout.addWidget(folder_btn)
+
+        def browse_checkpoint_folder(le=folder_edit, n=node):
+            start_dir = str(le.text()).strip() or os.path.expanduser("~")
+            selected = QFileDialog.getExistingDirectory(
+                self,
+                "Select Checkpoint Folder",
+                os.path.expanduser(start_dir),
+            )
+            if selected:
+                le.setText(selected)
+                self._update_checkpoint_config(n, "folder", selected)
+
+        folder_btn.clicked.connect(lambda _: browse_checkpoint_folder())
+        folder_edit.textEdited.connect(
+            lambda val, n=node: self._update_checkpoint_config_live(
+                n, "folder", val
+            )
+        )
+        folder_edit.editingFinished.connect(
+            lambda le=folder_edit, n=node: self._update_checkpoint_config(
+                n, "folder", le.text()
+            )
+        )
+        self.props_layout.addRow("Folder:", folder_container)
+
+        name_edit = QLineEdit(str(config.get("name", "") or ""))
+        name_edit.setPlaceholderText("{node}_{uid}.zarr")
+        name_edit.setToolTip("Optional filename/template. Supports {node}, {output}, {uid}.")
+        name_edit.setClearButtonEnabled(True)
+        name_edit.textEdited.connect(
+            lambda val, n=node: self._update_checkpoint_config_live(
+                n, "name", val
+            )
+        )
+        name_edit.editingFinished.connect(
+            lambda le=name_edit, n=node: self._update_checkpoint_config(
+                n, "name", le.text()
+            )
+        )
+        self.props_layout.addRow("Name:", name_edit)
+
+        levels = QSpinBox()
+        levels.setRange(1, 8)
+        levels.setValue(max(1, int(config.get("pyramid_levels", 1) or 1)))
+        levels.valueChanged.connect(
+            lambda val, n=node: self._update_checkpoint_config(
+                n, "pyramid_levels", int(val)
+            )
+        )
+        self.props_layout.addRow("Levels:", levels)
+
+        downsample = QComboBox()
+        downsample.addItem("XY only (2D browsing)", "xy")
+        downsample.addItem("ZYX (3D rendering)", "zyx")
+        current_mode = str(config.get("pyramid_downsample", "xy") or "xy").lower()
+        downsample.setCurrentIndex(1 if current_mode == "zyx" else 0)
+        downsample.currentIndexChanged.connect(
+            lambda _idx, combo=downsample, n=node: self._update_checkpoint_config(
+                n, "pyramid_downsample", combo.currentData()
+            )
+        )
+        self.props_layout.addRow("Downsample:", downsample)
+
+        chunks_edit = QLineEdit(str(config.get("chunks", "auto") or "auto"))
+        chunks_edit.setPlaceholderText("auto or 1,1,32,512,512")
+        chunks_edit.setClearButtonEnabled(True)
+        chunks_edit.textEdited.connect(
+            lambda val, n=node: self._update_checkpoint_config_live(
+                n, "chunks", val
+            )
+        )
+        chunks_edit.editingFinished.connect(
+            lambda le=chunks_edit, n=node: self._update_checkpoint_config(
+                n, "chunks", le.text() or "auto"
+            )
+        )
+        self.props_layout.addRow("Chunks:", chunks_edit)
+
+        overwrite = QCheckBox("Overwrite existing checkpoint")
+        overwrite.setChecked(bool(config.get("overwrite", True)))
+        overwrite.toggled.connect(
+            lambda val, n=node: self._update_checkpoint_config(
+                n, "overwrite", bool(val)
+            )
+        )
+        self.props_layout.addRow(overwrite)
+
+        continue_box = QCheckBox("Continue from saved checkpoint")
+        continue_box.setChecked(bool(config.get("continue_from_checkpoint", True)))
+        continue_box.toggled.connect(
+            lambda val, n=node: self._update_checkpoint_config(
+                n, "continue_from_checkpoint", bool(val)
+            )
+        )
+        self.props_layout.addRow(continue_box)
 
     def set_node_status_recursive(self, node, status):
         """Sets status of a node and recursively updates all downstream nodes."""
@@ -4065,6 +4581,7 @@ class FlowEditor(QWidget):
                 "label": item.title,
                 "position": {"x": item.pos().x(), "y": item.pos().y()},
                 "parameters": item.parameters,
+                "checkpoint_config": getattr(item, "checkpoint_config", default_checkpoint_config()),
                 "dynamic_param_bindings": getattr(item, "dynamic_param_bindings", {}),
                 "input_connections": input_connections,
                 "exec_connections": exec_connections,
@@ -4130,6 +4647,7 @@ class FlowEditor(QWidget):
                     node_type=n_data.get("type", "generic"),
                     pos=QPointF(pos["x"], pos["y"]),
                     loaded_params=n_data.get("parameters", {}),
+                    loaded_checkpoint_config=n_data.get("checkpoint_config", {}),
                     loaded_dynamic_bindings=n_data.get("dynamic_param_bindings", {}),
                     loaded_uid=n_data.get("id"),
                     loaded_title=n_data.get("label"),
@@ -4304,6 +4822,7 @@ class FlowEditor(QWidget):
         node_type,
         pos=None,
         loaded_params=None,
+        loaded_checkpoint_config=None,
         loaded_dynamic_bindings=None,
         loaded_uid=None,
         loaded_title=None,
@@ -4324,6 +4843,10 @@ class FlowEditor(QWidget):
         
         if loaded_params:
             node.parameters.update(loaded_params)
+        if isinstance(loaded_checkpoint_config, dict):
+            checkpoint_config = default_checkpoint_config()
+            checkpoint_config.update(loaded_checkpoint_config)
+            node.checkpoint_config = checkpoint_config
         if isinstance(loaded_dynamic_bindings, dict):
             node.dynamic_param_bindings = {
                 str(k): str(v).strip()

@@ -1,4 +1,5 @@
 import numpy as np
+import dask.array as da
 from napari_flow_editor.execution_engine import ExecutionWorker, infer_layout_kind
 from .conftest import FakeLayer, FakeNode, FakeViewer, unpack_execute_result
 
@@ -82,6 +83,35 @@ def test_get_layer_normalizes_multiscale_wrapper():
     assert len(data) == 3
     assert tuple(data[0].shape) == (64, 64)
     assert meta["source_layer"] == "LayerA"
+
+
+def test_get_layer_can_rechunk_lazy_data_without_computing():
+    source = da.zeros((2, 10, 64, 64), chunks=(1, 1, 64, 64))
+    viewer = FakeViewer(
+        layers={
+            "LayerA": FakeLayer(source, metadata={"name": "LayerA", "axes": "TZYX"})
+        }
+    )
+    worker = ExecutionWorker(scene=None, viewer=viewer)
+    node = FakeNode(
+        node_type="get_layer",
+        title="Get Layer",
+        params={
+            "layer_name": "LayerA",
+            "axis_map": [],
+            "rechunk_enabled": True,
+            "target_chunks": "1,2,32,32",
+        },
+    )
+
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def={}))
+    data, meta = result["data_out"]
+
+    assert isinstance(data, da.Array)
+    assert data.chunksize == (1, 2, 32, 32)
+    assert meta["rechunked"] is True
+    assert meta["target_chunks"] == "1,2,32,32"
+    assert meta["applied_chunks"] == (1, 2, 32, 32)
 
 
 def test_get_layer_includes_visual_metadata_from_layer_data_tuple():

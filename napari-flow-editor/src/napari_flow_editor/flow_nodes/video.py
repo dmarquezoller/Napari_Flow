@@ -122,6 +122,18 @@ from .decorator import register_node
             "value": "napari_video",
             "label": "Filename",
         },
+        "low_memory_mode": {
+            "type": "bool",
+            "value": True,
+            "label": "Low memory mode",
+        },
+        "cleanup_every": {
+            "type": "int",
+            "value": 5,
+            "min": 1,
+            "max": 1000,
+            "label": "Cleanup every N frames",
+        },
     },
     description=(
         "Renders a viewer animation to MP4/GIF.\n"
@@ -135,6 +147,8 @@ def make_video(
     format: str = ".mp4",
     folder: str = "",
     filename: str = "napari_video",
+    low_memory_mode: bool = True,
+    cleanup_every: int = 5,
     interaction=None,
 ):
     """

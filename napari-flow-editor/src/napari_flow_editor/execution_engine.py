@@ -7,8 +7,18 @@ import hashlib
 import sys
 import time
 import threading
+import os
+import re
+from pathlib import Path
 from qtpy.QtCore import QObject, Signal
+import dask.array as da
 from .flow_nodes.decorator import push_dispatch_context, pop_dispatch_context
+from .io.ome_zarr_writer import (
+    OmeZarrSaveRequest,
+    infer_axes,
+    normalize_chunks,
+    save_ome_zarr,
+)
 
 
 def infer_layout_kind(axes: str) -> str:
@@ -132,6 +142,45 @@ class ExecutionWorker(QObject):
                 return data
         return data
 
+    @staticmethod
+    def _shape_tuple(data):
+        shape = getattr(data, "shape", None)
+        if shape is None:
+            raise TypeError(f"Object is not array-like: {type(data)!r}")
+        return tuple(int(s) for s in shape)
+
+    @classmethod
+    def _chunks_for_array(cls, array, metadata, requested_chunks):
+        shape = cls._shape_tuple(array)
+        axes = infer_axes(array, metadata=metadata or {}, axes=(metadata or {}).get("axes"))
+        return normalize_chunks(requested_chunks or "auto", shape, axes)
+
+    @classmethod
+    def _rechunk_single_array(cls, array, metadata, requested_chunks):
+        chunks = cls._chunks_for_array(array, metadata, requested_chunks)
+        if isinstance(array, da.Array):
+            return array.rechunk(chunks), chunks
+        return da.from_array(array, chunks=chunks), chunks
+
+    @classmethod
+    def _rechunk_layer_data(cls, data, metadata, requested_chunks):
+        """
+        Return a lazy Dask view with target chunks without modifying the source.
+        """
+        if cls._looks_like_multiscale_sequence(data):
+            rechunked_levels = []
+            level_chunks = []
+            for level in data:
+                rechunked, chunks = cls._rechunk_single_array(
+                    level, metadata, requested_chunks
+                )
+                rechunked_levels.append(rechunked)
+                level_chunks.append(chunks)
+            return rechunked_levels, level_chunks
+
+        rechunked, chunks = cls._rechunk_single_array(data, metadata, requested_chunks)
+        return rechunked, chunks
+
     def _reset_node_cache(self, node):
         node.last_signature = None
         node.cached_results = {}
@@ -205,6 +254,223 @@ class ExecutionWorker(QObject):
                 ) from exc
 
         return func_params
+
+    @staticmethod
+    def _checkpoint_config(node):
+        config = getattr(node, "checkpoint_config", None)
+        if not isinstance(config, dict):
+            return {}
+        return config
+
+    @staticmethod
+    def _checkpoint_enabled(node):
+        config = ExecutionWorker._checkpoint_config(node)
+        return bool(config.get("enabled", False))
+
+    @staticmethod
+    def _sanitize_path_part(value, fallback="checkpoint"):
+        text = str(value or "").strip()
+        if not text:
+            text = fallback
+        text = re.sub(r"[^\w.\-]+", "_", text, flags=re.UNICODE).strip("._-")
+        return text or fallback
+
+    @staticmethod
+    def _looks_like_array(data):
+        return hasattr(data, "shape") or ExecutionWorker._looks_like_multiscale_sequence(data)
+
+    @staticmethod
+    def _looks_like_multiscale_sequence(data):
+        if isinstance(data, (np.ndarray, da.Array, tuple, str, bytes)):
+            return False
+        try:
+            if len(data) <= 0:
+                return False
+            first = data[0]
+        except Exception:
+            return False
+        return hasattr(first, "shape")
+
+    @staticmethod
+    def _checkpoint_extract_payload(value):
+        """
+        Return (data, metadata, layer_type, wrapper_kind) for image-like outputs.
+
+        wrapper_kind lets us preserve the output envelope when checkpointing is
+        configured to continue from the saved Zarr.
+        """
+        if (
+            isinstance(value, tuple)
+            and len(value) == 3
+            and isinstance(value[1], dict)
+            and isinstance(value[2], str)
+        ):
+            data, metadata, layer_type = value
+            if ExecutionWorker._looks_like_array(data):
+                return data, dict(metadata or {}), str(layer_type or "image"), "ldt"
+            return None
+
+        if (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and isinstance(value[1], dict)
+        ):
+            data, metadata = value
+            if ExecutionWorker._looks_like_array(data):
+                return data, dict(metadata or {}), "image", "envelope"
+            return None
+
+        if ExecutionWorker._looks_like_array(value):
+            return value, {}, "image", "raw"
+
+        return None
+
+    @staticmethod
+    def _checkpoint_rewrap(wrapper_kind, data, metadata, layer_type):
+        if wrapper_kind == "ldt":
+            return (data, metadata, layer_type)
+        if wrapper_kind == "envelope":
+            return (data, metadata)
+        return data
+
+    @staticmethod
+    def _checkpoint_downsample_mode(config):
+        value = str(config.get("pyramid_downsample", "xy") or "xy").strip().lower()
+        if value.startswith("zyx") or "3d" in value:
+            return "zyx"
+        return "xy"
+
+    @staticmethod
+    def _checkpoint_output_path(node, out_name, output_count, config):
+        folder = str(config.get("folder", "") or "").strip()
+        if not folder:
+            folder = os.path.join(os.path.expanduser("~"), "napari_flow_checkpoints")
+        folder_path = Path(os.path.expanduser(folder))
+
+        raw_name = str(config.get("name", "") or "").strip()
+        if not raw_name:
+            stem = ExecutionWorker._sanitize_path_part(
+                f"{getattr(node, 'title', 'node')}_{str(getattr(node, 'uid', ''))[:8]}"
+            )
+        else:
+            values = {
+                "node": ExecutionWorker._sanitize_path_part(getattr(node, "title", "node")),
+                "output": ExecutionWorker._sanitize_path_part(out_name or "out"),
+                "uid": str(getattr(node, "uid", ""))[:8],
+            }
+            try:
+                stem = raw_name.format(**values)
+            except Exception:
+                stem = raw_name
+            stem = ExecutionWorker._sanitize_path_part(stem)
+
+        if output_count > 1 and "{output}" not in raw_name:
+            stem = f"{stem}_{ExecutionWorker._sanitize_path_part(out_name or 'out')}"
+
+        if not stem.lower().endswith(".zarr"):
+            stem = f"{stem}.zarr"
+        return str(folder_path / stem)
+
+    @staticmethod
+    def _checkpoint_reopen(result, original_data):
+        path = Path(result.path)
+        if ExecutionWorker._looks_like_multiscale_sequence(original_data):
+            levels = []
+            for level_index in range(int(result.levels or 1)):
+                levels.append(da.from_zarr(str(path / str(level_index))))
+            return levels
+        return da.from_zarr(str(path / "0"))
+
+    def _apply_checkpointing(self, node, node_outputs):
+        config = self._checkpoint_config(node)
+        if not bool(config.get("enabled", False)):
+            return node_outputs
+        if not node_outputs:
+            return node_outputs
+
+        levels = max(1, int(config.get("pyramid_levels", 1) or 1))
+        downsample = self._checkpoint_downsample_mode(config)
+        chunks = config.get("chunks", "auto") or "auto"
+        overwrite = bool(config.get("overwrite", True))
+        continue_from_checkpoint = bool(config.get("continue_from_checkpoint", True))
+        output_count = len(node_outputs)
+        updated_outputs = dict(node_outputs)
+        saved_any = False
+
+        for out_name, out_value in list(node_outputs.items()):
+            payload = self._checkpoint_extract_payload(out_value)
+            if payload is None:
+                self.log_signal.emit(
+                    f"Checkpoint skipped for {node.title}.{out_name}: output is not image-like."
+                )
+                continue
+
+            data, metadata, layer_type, wrapper_kind = payload
+            path = self._checkpoint_output_path(node, out_name, output_count, config)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            save_name = Path(path).stem
+            metadata = dict(metadata or {})
+            metadata.setdefault("name", save_name)
+            started_at = time.perf_counter()
+            started_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+            print(
+                f"[checkpoint-save] START {started_iso} node={node.title!r} "
+                f"output={out_name!r} path={path}",
+                flush=True,
+            )
+            self.log_signal.emit(
+                f"Checkpointing {node.title}.{out_name} -> {path}"
+            )
+
+            request = OmeZarrSaveRequest(
+                data=data,
+                path=path,
+                name=save_name,
+                layer_type=layer_type,
+                metadata=metadata,
+                axes=metadata.get("axes"),
+                scale=metadata.get("scale"),
+                translate=metadata.get("translate"),
+                chunks=chunks,
+                pyramid_levels=levels,
+                pyramid_downsample=downsample,
+                overwrite=overwrite,
+            )
+            result = save_ome_zarr(request, log=self.log_signal.emit)
+            elapsed_s = time.perf_counter() - started_at
+            ended_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+            print(
+                f"[checkpoint-save] END {ended_iso} elapsed={elapsed_s:.3f}s "
+                f"node={node.title!r} output={out_name!r} path={result.path}",
+                flush=True,
+            )
+            self.log_signal.emit(
+                f"Checkpoint saved in {elapsed_s:.2f}s: {result.path}"
+            )
+            saved_any = True
+
+            if continue_from_checkpoint:
+                reopened = self._checkpoint_reopen(result, data)
+                checkpoint_meta = dict(metadata)
+                checkpoint_meta["name"] = result.name
+                checkpoint_meta["axes"] = result.axes.upper()
+                checkpoint_meta["checkpoint_path"] = result.path
+                checkpoint_meta["checkpoint_levels"] = result.levels
+                checkpoint_meta["checkpoint_chunks"] = result.chunks
+                checkpoint_meta.pop("multiscales", None)
+                updated_outputs[out_name] = self._checkpoint_rewrap(
+                    wrapper_kind,
+                    reopened,
+                    checkpoint_meta,
+                    layer_type,
+                )
+                self.log_signal.emit(
+                    f"Continuing from checkpoint for {node.title}.{out_name}"
+                )
+
+        if not saved_any:
+            self.log_signal.emit(f"Checkpoint enabled for {node.title}, but no image outputs were saved.")
+        return updated_outputs
 
     @staticmethod
     def _detect_csv_dialect(sample_text):
@@ -940,6 +1206,11 @@ class ExecutionWorker(QObject):
     def calculate_signature(self, node):
         try:
             param_str = json.dumps(getattr(node, "parameters", {}), sort_keys=True, default=str)
+            checkpoint_str = json.dumps(
+                getattr(node, "checkpoint_config", {}) or {},
+                sort_keys=True,
+                default=str,
+            )
             input_sigs = []
             for socket in node.inputs:
                 if socket.connected_edges:
@@ -950,7 +1221,7 @@ class ExecutionWorker(QObject):
                 else:
                     input_sigs.append("none")
             
-            combined = param_str + "".join(input_sigs)
+            combined = param_str + checkpoint_str + "".join(input_sigs)
             return hashlib.md5(combined.encode('utf-8')).hexdigest()
         except:
             return "dirty"
@@ -1089,6 +1360,20 @@ class ExecutionWorker(QObject):
         layer_meta["source_layer"] = target_name
 
         normalized_data = self._normalize_layer_data(layer_data)
+        if bool(func_params.get("rechunk_enabled", False)):
+            target_chunks = str(func_params.get("target_chunks", "auto") or "auto").strip() or "auto"
+            normalized_data, applied_chunks = self._rechunk_layer_data(
+                normalized_data,
+                layer_meta,
+                target_chunks,
+            )
+            layer_meta["rechunked"] = True
+            layer_meta["target_chunks"] = target_chunks
+            layer_meta["applied_chunks"] = applied_chunks
+            self.log_signal.emit(
+                f"Get Layer: using lazy rechunk target={target_chunks} "
+                f"applied={applied_chunks}"
+            )
         return {"data_out": (normalized_data, layer_meta)}
 
     def execute_node_logic(self, node, library_def):
@@ -1470,6 +1755,8 @@ class ExecutionWorker(QObject):
              else:
                  # Pass for nodes with no outputs (like Save Image)
                  pass
+
+        node_outputs = self._apply_checkpointing(node, node_outputs)
 
         # Emit Results
         for out_name, out_data in node_outputs.items():

@@ -37,10 +37,21 @@ import os
                          {"name": "d4", "label": "Dim 4", "type": "enum", "options": ["-","T","Z","C","Y","X"]},
                      ],
                      "value": [{"d0": "Y", "d1": "X", "d2": "-", "d3": "-", "d4": "-"}]
-                    }
+                    },
+        "rechunk_enabled": {"type": "bool", "value": False, "label": "Rechunk layer"},
+        "target_chunks": {
+            "type": "text",
+            "value": "auto",
+            "label": "Target chunks",
+        },
     }
 )
-def get_layer(layer_name: str = "", axis_map: list = [{"d0": "Y", "d1": "X", "d2": "-", "d3": "-", "d4": "-"}]):
+def get_layer(
+    layer_name: str = "",
+    axis_map: list = [{"d0": "Y", "d1": "X", "d2": "-", "d3": "-", "d4": "-"}],
+    rechunk_enabled: bool = False,
+    target_chunks: str = "auto",
+):
     # The argument 'layer_name' creates the parameter entry in the JSON.
     return layer_name
 

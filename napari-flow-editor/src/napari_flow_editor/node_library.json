@@ -1807,6 +1807,18 @@
             "d4": "-"
           }
         ]
+      },
+      "rechunk_enabled": {
+        "type": "bool",
+        "default": false,
+        "value": false,
+        "label": "Rechunk layer"
+      },
+      "target_chunks": {
+        "type": "text",
+        "default": "auto",
+        "value": "auto",
+        "label": "Target chunks"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.inputs.get_layer",
@@ -3223,6 +3235,20 @@
         "default": "napari_video",
         "value": "napari_video",
         "label": "Filename"
+      },
+      "low_memory_mode": {
+        "type": "bool",
+        "default": true,
+        "value": true,
+        "label": "Low memory mode"
+      },
+      "cleanup_every": {
+        "type": "int",
+        "default": 5,
+        "value": 5,
+        "min": 1,
+        "max": 1000,
+        "label": "Cleanup every N frames"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.video.make_video",

@@ -8,6 +8,8 @@ def test_make_video_node_registration_metadata():
     assert meta["outputs"] == []
     assert meta["interactive"]["interaction_type"] == "video_render"
     assert "instructions" in meta["params_config"]
+    assert "low_memory_mode" in meta["params_config"]
+    assert meta["params_config"]["cleanup_every"]["value"] == 5
 
 
 def test_make_video_node_accepts_interaction_payload():
@@ -28,6 +30,8 @@ def test_make_video_node_accepts_interaction_payload():
         format=".gif",
         folder="/tmp",
         filename="demo",
+        low_memory_mode=True,
+        cleanup_every=5,
         interaction={"output_path": "/tmp/demo.gif", "frames": 3},
     )
     assert result is None

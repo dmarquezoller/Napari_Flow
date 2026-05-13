@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+import re
 
 import numpy as np
 import dask.array as da
@@ -171,7 +172,9 @@ def _coerce_vector(value: Any, ndim: int, default: float) -> tuple[float, ...]:
 
 def auto_chunks(shape: tuple[int, ...], axes: str) -> tuple[int, ...]:
     chunks = []
-    for size, axis in zip(shape, axes):
+    axes = str(axes or "").lower()
+    for axis_i, size in enumerate(shape):
+        axis = axes[axis_i] if axis_i < len(axes) else ""
         size = max(1, int(size))
         if axis in {"t", "c"}:
             chunks.append(1)
@@ -192,7 +195,11 @@ def normalize_chunks(
     if chunks is None or str(chunks).strip().lower() == "auto":
         return auto_chunks(shape, axes)
     try:
-        seq = tuple(int(c) for c in chunks)
+        if isinstance(chunks, str):
+            parts = [p for p in re.split(r"[\s,;xX]+", chunks.strip()) if p]
+            seq = tuple(int(c) for c in parts)
+        else:
+            seq = tuple(int(c) for c in chunks)
     except Exception as exc:
         raise ValueError(f"Invalid chunks={chunks!r}") from exc
     if len(seq) != len(shape):

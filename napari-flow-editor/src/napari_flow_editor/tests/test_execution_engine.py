@@ -1,4 +1,8 @@
 import numpy as np
+from types import SimpleNamespace
+
+import napari_flow_editor.execution_engine as engine
+
 from .conftest import FakeNode, FakeSocket, FakeEdge, unpack_execute_result
 
 
@@ -136,6 +140,113 @@ def test_execute_node_logic_keeps_explicit_contrast_limits(worker):
     result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
     _, meta = result["out"]
     assert meta["contrast_limits"] == [5.0, 6.0]
+
+
+def test_execute_node_logic_checkpoint_saves_without_replacing_output(worker, monkeypatch, tmp_path):
+    arr = np.ones((4, 4), dtype=np.float32)
+    calls = []
+
+    def dummy_func():
+        return arr, {"axes": "YX", "name": "Gaussian"}
+
+    def fake_save_ome_zarr(request, log=None):
+        calls.append(request)
+        if log:
+            log("fake checkpoint write")
+        return SimpleNamespace(
+            path=str(tmp_path / "gaussian.zarr"),
+            name="gaussian",
+            axes="yx",
+            levels=1,
+            requested_levels=1,
+            chunks=(4, 4),
+        )
+
+    monkeypatch.setattr(engine, "save_ome_zarr", fake_save_ome_zarr)
+    node = FakeNode(node_type="dummy", title="Gaussian Blur", params={})
+    node.uid = "abc12345"
+    node.checkpoint_config = {
+        "enabled": True,
+        "folder": str(tmp_path),
+        "name": "gaussian",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": True,
+        "continue_from_checkpoint": False,
+    }
+    library_def = {
+        "dummy": {
+            "outputs": ["out"],
+            "category": "Filters",
+            "executable": dummy_func,
+        }
+    }
+
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
+    data, meta = result["out"]
+
+    assert data is arr
+    assert meta["axes"] == "YX"
+    assert len(calls) == 1
+    assert calls[0].path == str(tmp_path / "gaussian.zarr")
+    assert calls[0].metadata["name"] == "Gaussian"
+
+
+def test_execute_node_logic_checkpoint_can_continue_from_reopened_zarr(worker, monkeypatch, tmp_path):
+    arr = np.ones((4, 4), dtype=np.float32)
+    reopened = object()
+    save_calls = []
+    from_zarr_calls = []
+
+    def dummy_func():
+        return arr, {"axes": "YX", "name": "Gaussian"}
+
+    def fake_save_ome_zarr(request, log=None):
+        save_calls.append(request)
+        return SimpleNamespace(
+            path=str(tmp_path / "gaussian.zarr"),
+            name="gaussian",
+            axes="yx",
+            levels=1,
+            requested_levels=1,
+            chunks=(4, 4),
+        )
+
+    def fake_from_zarr(path):
+        from_zarr_calls.append(path)
+        return reopened
+
+    monkeypatch.setattr(engine, "save_ome_zarr", fake_save_ome_zarr)
+    monkeypatch.setattr(engine.da, "from_zarr", fake_from_zarr)
+    node = FakeNode(node_type="dummy", title="Gaussian Blur", params={})
+    node.checkpoint_config = {
+        "enabled": True,
+        "folder": str(tmp_path),
+        "name": "gaussian",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": True,
+        "continue_from_checkpoint": True,
+    }
+    library_def = {
+        "dummy": {
+            "outputs": ["out"],
+            "category": "Filters",
+            "executable": dummy_func,
+        }
+    }
+
+    result, _ = unpack_execute_result(worker.execute_node_logic(node, library_def))
+    data, meta = result["out"]
+
+    assert data is reopened
+    assert from_zarr_calls == [str(tmp_path / "gaussian.zarr" / "0")]
+    assert save_calls[0].data is arr
+    assert meta["axes"] == "YX"
+    assert meta["checkpoint_path"] == str(tmp_path / "gaussian.zarr")
+    assert meta["checkpoint_levels"] == 1
 
 
 def test_execute_node_logic_uses_node_scoped_output_name_for_processed_nodes(worker):
