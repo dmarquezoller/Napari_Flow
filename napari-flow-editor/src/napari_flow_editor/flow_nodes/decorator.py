@@ -43,6 +43,58 @@ def _dask_array_has_cupy_chunks(value, cp=None):
         return False
     return _is_cupy_array(getattr(value, "_meta", None), cp)
 
+
+def _resolve_output_dtype_policy(policy, sample):
+    """
+    Resolve a semantic output dtype policy against a sample array.
+
+    ``None`` keeps legacy behavior. Policies are intentionally small and
+    intent-based so nodes can request "image_float" without hardcoding one
+    dtype separately for every backend.
+    """
+    if policy is None:
+        return None
+
+    if isinstance(policy, str):
+        key = policy.strip().lower()
+        if key in ("", "none", "default"):
+            return None
+        if key in ("preserve", "same", "input"):
+            dtype = getattr(sample, "dtype", None)
+            return np.dtype(dtype) if dtype is not None else None
+        if key in ("image_float", "float_image", "float", "auto"):
+            return np.dtype(np.float32)
+        if key in ("bool", "boolean", "mask"):
+            return np.dtype(np.bool_)
+        if key in ("label", "labels"):
+            return np.dtype(np.int32)
+        try:
+            return np.dtype(key)
+        except TypeError as exc:
+            raise ValueError(f"Unknown output_dtype_policy={policy!r}") from exc
+
+    try:
+        return np.dtype(policy)
+    except TypeError as exc:
+        raise ValueError(f"Invalid output_dtype_policy={policy!r}") from exc
+
+
+def _cast_array_output(value, dtype, cp=None):
+    if dtype is None:
+        return value
+    dtype = np.dtype(dtype)
+    if isinstance(value, da.Array):
+        return value.astype(dtype)
+    if isinstance(value, np.ndarray):
+        return value.astype(dtype, copy=False)
+    if _is_cupy_array(value, cp):
+        return value.astype(dtype, copy=False)
+    if isinstance(value, list):
+        return [_cast_array_output(v, dtype, cp=cp) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_cast_array_output(v, dtype, cp=cp) for v in value)
+    return value
+
 def _normalize_logic_config(logic):
     # Backward-compatible defaults: every node has both logic sockets and
     # logic sockets accept multiple links unless explicitly constrained.
@@ -403,6 +455,7 @@ def dispatch(
     independent_axes_param: Optional[str] = None,  # Optional param to set zero on independent axes (e.g. sigma)
     dask_output_dtype=None,
     cuda_output_dtype=None,
+    output_dtype_policy=None,
     pyramid_param_policy: Optional[dict] = None,
     numpy_to_dask_chunks="auto",
     dask_target_chunk_mb: float = 64.0,
@@ -429,6 +482,11 @@ def dispatch(
           "allow_rechunk": True,
         },
       }
+
+    ``output_dtype_policy`` lets nodes declare dtype intent once for all
+    backends. For example, ``"image_float"`` returns float32 image outputs on
+    CPU, Dask, CUDA, and Dask+CUDA unless an explicit legacy dtype override is
+    provided.
 
     Layout defaults:
       - time dims (T): independent (no filtering across time)
@@ -477,6 +535,7 @@ def dispatch(
     dask_boundary_from_param = _dask_opt("boundary_from_param", dask_boundary_from_param)
     independent_axes_param = _dask_opt("independent_axes_param", independent_axes_param)
     dask_output_dtype = _dask_opt("output_dtype", dask_output_dtype)
+    output_dtype_policy = _dask_opt("output_dtype_policy", output_dtype_policy)
     numpy_to_dask_chunks = _dask_opt("numpy_chunks", numpy_to_dask_chunks)
     dask_target_chunk_mb = _dask_opt("target_chunk_mb", dask_target_chunk_mb)
 
@@ -1358,6 +1417,21 @@ def dispatch(
         updated[pname] = tuple(seq)
         return updated, True, f"applied {pname} zeroing on independent axes"
 
+    def _policy_output_dtype(sample):
+        return _resolve_output_dtype_policy(output_dtype_policy, sample)
+
+    def _dask_block_output_dtype(sample, *, use_gpu=False):
+        if use_gpu and cuda_output_dtype is not None:
+            return np.dtype(cuda_output_dtype)
+        if dask_output_dtype is not None:
+            return np.dtype(dask_output_dtype)
+        return _policy_output_dtype(sample)
+
+    def _eager_output_dtype(sample, *, use_gpu=False):
+        if use_gpu and cuda_output_dtype is not None:
+            return np.dtype(cuda_output_dtype)
+        return _policy_output_dtype(sample)
+
     def _execute_auto_dask(
         args_in,
         kwargs_in,
@@ -1390,14 +1464,14 @@ def dispatch(
                 meta=make_meta(sample_exec.dtype, gpu=True, ndim=sample_exec.ndim),
             )
 
+        block_output_dtype = _dask_block_output_dtype(sample_exec, use_gpu=use_gpu)
+
         def finalize_block_output(out):
-            if not use_gpu:
-                return out
-            if cuda_output_dtype is None:
-                return out
-            if _is_cupy_array(out, cp):
-                return out.astype(cuda_output_dtype, copy=False)
-            return out
+            return _cast_array_output(
+                out,
+                block_output_dtype,
+                cp=cp if use_gpu else None,
+            )
 
         if dask_strategy == "pointwise":
             def block_apply(block):
@@ -1405,10 +1479,7 @@ def dispatch(
                 out = compute_func(*a2, **k2)
                 return finalize_block_output(out)
 
-            if use_gpu and cuda_output_dtype is not None:
-                out_dtype = cuda_output_dtype
-            else:
-                out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
+            out_dtype = block_output_dtype if block_output_dtype is not None else sample_exec.dtype
             return da.map_blocks(
                 block_apply,
                 sample_exec,
@@ -1428,10 +1499,7 @@ def dispatch(
         trim = bool(map_overlap_options.get("trim", True))
         allow_rechunk = bool(map_overlap_options.get("allow_rechunk", True))
         align_arrays = bool(map_overlap_options.get("align_arrays", True))
-        if use_gpu and cuda_output_dtype is not None:
-            out_dtype = cuda_output_dtype
-        else:
-            out_dtype = dask_output_dtype if dask_output_dtype is not None else sample_exec.dtype
+        out_dtype = block_output_dtype if block_output_dtype is not None else sample_exec.dtype
         result = sample_exec.map_overlap(
             overlap_apply,
             depth=depth,
@@ -1553,10 +1621,25 @@ def dispatch(
             def run_now(a_now, k_now, *, depth_kwargs=None):
                 if backend_mode == "cuda":
                     out = _execute_cuda(a_now, k_now)
-                else:
-                    out = func(*a_now, **k_now)
-                if backend_mode == "cuda":
+                    out = _cast_array_output(
+                        out,
+                        _eager_output_dtype(sample_exec, use_gpu=True),
+                        cp=cp,
+                    )
                     return _convert_cuda_output_to_numpy(out, cp)
+                out = func(*a_now, **k_now)
+                if backend_mode == "dask":
+                    out = _cast_array_output(
+                        out,
+                        _dask_block_output_dtype(sample_exec, use_gpu=False),
+                        cp=None,
+                    )
+                else:
+                    out = _cast_array_output(
+                        out,
+                        _eager_output_dtype(sample_exec, use_gpu=False),
+                        cp=None,
+                    )
                 return out
 
         # Fast path: no layout policy or no inferable axes.

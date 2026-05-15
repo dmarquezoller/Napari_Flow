@@ -218,7 +218,7 @@ def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
         cuda_function="cupyx.scipy.ndimage.gaussian_filter",
         cuda_arg_names=["image"],
         cuda_kwarg_names=["sigma", "mode"],
-        cuda_output_dtype=np.float64,
+        output_dtype_policy="image_float",
         backend="auto",
         gpu_min_nbytes=0,
         # per_level: apply the blur independently to each pyramid level.
@@ -236,7 +236,6 @@ def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
             "halo_from_param": "sigma",
             "boundary_from_param": "mode",
             "independent_axes_param": "sigma",
-            "output_dtype": np.float64,
             "numpy_chunks": "spatial_auto",
             # Optional explicit overlap override example:
             # "map_overlap": {"depth": {"t": 0, "y": 2, "x": 2}, "boundary": "none"},

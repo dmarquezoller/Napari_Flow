@@ -233,6 +233,42 @@ def test_dispatch_auto_uses_dask_for_lazy_input():
     np.testing.assert_allclose(out.compute(), image + 1)
 
 
+def test_dispatch_output_dtype_policy_casts_eager_cpu_output():
+    image = np.arange(16, dtype=np.uint16).reshape(4, 4)
+
+    out = dispatch(
+        default=lambda x: x.astype(np.float64) + 0.5,
+        args=(image,),
+        kwargs={},
+        backend="cpu",
+        output_dtype_policy="image_float",
+    )
+
+    assert isinstance(out, np.ndarray)
+    assert out.dtype == np.float32
+    np.testing.assert_allclose(out, image.astype(np.float32) + 0.5)
+
+
+def test_dispatch_output_dtype_policy_casts_auto_dask_blocks():
+    image = np.arange(16 * 16, dtype=np.uint16).reshape(16, 16)
+    dask_image = da.from_array(image, chunks=(4, 4))
+
+    out = dispatch(
+        default=lambda x: x.astype(np.float64) + 0.5,
+        args=(dask_image,),
+        kwargs={},
+        backend="dask",
+        dask_strategy="pointwise",
+        output_dtype_policy="image_float",
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.dtype == np.float32
+    result = out.compute()
+    assert result.dtype == np.float32
+    np.testing.assert_allclose(result, image.astype(np.float32) + 0.5)
+
+
 def test_dispatch_dask_pipeline_stays_lazy_until_compute():
     computed = []
 
