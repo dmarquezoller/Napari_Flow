@@ -41,3 +41,6 @@ htmlcov/
 
 # Benchmark outputs
 napari-flow-editor/benchmarks/results/
+
+# CLAUDE Second Brain
+CLAUDE.md
