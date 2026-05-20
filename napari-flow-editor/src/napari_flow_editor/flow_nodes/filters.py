@@ -1,6 +1,43 @@
 from .decorator import register_node, dispatch, smart_compute
 import skimage.filters
+import skimage.morphology
 import numpy as np
+import functools
+
+
+# ---------------------------------------------------------------------------
+# CUDA helpers (cuda_func path — callable, not string)
+# These are called directly by the dispatcher with the CuPy array already
+# transferred; they must not import cupy at module level.
+# ---------------------------------------------------------------------------
+
+def _cuda_sobel(image, mode='reflect'):
+    import cupyx.scipy.ndimage as cnd
+    import cupy as cp
+    sx = cnd.sobel(image, axis=-1, mode=mode)
+    sy = cnd.sobel(image, axis=-2, mode=mode)
+    return cp.hypot(sx, sy)
+
+
+def _cuda_prewitt(image, mode='reflect'):
+    import cupyx.scipy.ndimage as cnd
+    import cupy as cp
+    px = cnd.prewitt(image, axis=-1, mode=mode)
+    py = cnd.prewitt(image, axis=-2, mode=mode)
+    return cp.hypot(px, py)
+
+
+def _cuda_unsharp_mask(image, radius=1.0, amount=1.0):
+    import cupyx.scipy.ndimage as cnd
+    blurred = cnd.gaussian_filter(image, sigma=radius)
+    return image + amount * (image - blurred)
+
+
+def _cuda_difference_of_gaussians(image, low_sigma=1.0, high_sigma=2.0, mode='nearest'):
+    import cupyx.scipy.ndimage as cnd
+    low = cnd.gaussian_filter(image, sigma=low_sigma, mode=mode)
+    high = cnd.gaussian_filter(image, sigma=high_sigma, mode=mode)
+    return low - high
 
 # --- ALREADY IMPLEMENTED --- #
 # - hysteresis threshold      #
@@ -55,18 +92,30 @@ def hysteresis_threshold(image, low: float = 128, high: float = 255):
     return skimage.filters.apply_hysteresis_threshold(image, low=low, high=high)
 
 # --- BUTTERWORTH ---
+# FFT-based: Dask chunked execution gives per-chunk spectra, not the full-image
+# spectrum, so we force CPU and apply output_dtype_policy only.
 @register_node(
     label="Butterworth",
     category="Filters",
+    description="Frequency-domain Butterworth filter. Runs on CPU only (FFT requires the full image).",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "cutoff_frequency_ratio": {"min": 0.0, "max": 0.5, "step": 0.001},
         "order": {"min": 1, "max": 10}
     }
 )
 def butterworth(image, cutoff_frequency_ratio: float = 0.005, order: int = 2):
-    """Wraps skimage.filters.butterworth"""
-    return skimage.filters.butterworth(image, cutoff_frequency_ratio=cutoff_frequency_ratio, order=order)
+    return dispatch(
+        default=skimage.filters.butterworth,
+        args=(image,),
+        kwargs={"cutoff_frequency_ratio": cutoff_frequency_ratio, "order": order},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        # No dask_options: FFT on independent chunks gives wrong spectral results.
+    )
 
 # --- CORRELATE SPARSE ---
 @register_node(
@@ -85,7 +134,10 @@ def correlate_sparse(image, kernel ,mode: str = 'reflect'):
 @register_node(
     label="Difference of Gaussians",
     category="Filters",
+    description="Band-pass filter via subtraction of two Gaussian smoothings. Supports Dask.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "low_sigma": {"min": 0.0, "max": 20.0, "step": 0.1},
         "high_sigma": {"min": 0.0, "max": 20.0, "step": 0.1},
@@ -93,45 +145,99 @@ def correlate_sparse(image, kernel ,mode: str = 'reflect'):
     }
 )
 def difference_of_gaussians(image, low_sigma: float = 1.0, high_sigma: float = 2.0, mode: str = 'nearest'):
-    """Wraps skimage.filters.difference_of_gaussians"""
-    return skimage.filters.difference_of_gaussians(image, low_sigma=low_sigma, high_sigma=high_sigma, mode=mode)
+    return dispatch(
+        default=skimage.filters.difference_of_gaussians,
+        args=(image,),
+        kwargs={"low_sigma": low_sigma, "high_sigma": high_sigma, "mode": mode},
+        cuda_func=_cuda_difference_of_gaussians,
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "halo_from_param": "high_sigma",  # halo scaled from the larger sigma
+            "boundary_from_param": "mode",
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- FARID ---
 @register_node(
     label="Farid",
     category="Filters",
+    description="Farid & Simoncelli gradient magnitude. Supports Dask.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "mode": {"options": ["nearest", "reflect", "wrap", "constant", "mirror"]}
     }
 )
 def farid(image, mode: str = 'reflect'):
-    """Wraps skimage.filters.farid"""
-    return skimage.filters.farid(image, mode=mode)
+    return dispatch(
+        default=skimage.filters.farid,
+        args=(image,),
+        kwargs={"mode": mode},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "boundary_from_param": "mode",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 4},  # 7-tap derivative filter
+        }
+    )
 
 # --- FARID HORIZONTAL ---
 @register_node(
     label="Farid Horizontal",
     category="Filters",
+    description="Farid & Simoncelli horizontal derivative. Supports Dask.",
     outputs=["image_out"],
-    params_config={
-    }
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
+    params_config={}
 )
 def farid_horizontal(image):
-    """Wraps skimage.filters.farid_h"""
-    return skimage.filters.farid_h(image)
+    return dispatch(
+        default=skimage.filters.farid_h,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 4},  # 7-tap derivative filter
+        }
+    )
 
 # --- FARID VERTICAL ---
 @register_node(
     label="Farid Vertical",
     category="Filters",
+    description="Farid & Simoncelli vertical derivative. Supports Dask.",
     outputs=["image_out"],
-    params_config={
-    }
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
+    params_config={}
 )
 def farid_vertical(image):
-    """Wraps skimage.filters.farid_v"""
-    return skimage.filters.farid_v(image)
+    return dispatch(
+        default=skimage.filters.farid_v,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 4},  # 7-tap derivative filter
+        }
+    )
 
 
 # --- FILTER FORWARD ---
@@ -163,7 +269,10 @@ def filter_inverse(image, max_gain: float = 2.0):
 @register_node(
     label="Frangi",
     category="Filters",
+    description="Frangi vesselness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "sigma_range_low": {"min": 0.0, "max": 20.0, "step": 0.1},
         "sigma_range_high": {"min": 0.0, "max": 20.0, "step": 0.1},
@@ -174,9 +283,20 @@ def filter_inverse(image, max_gain: float = 2.0):
     }
 )
 def frangi(image, sigma_range_low: float = 1.0, sigma_range_high: float = 10.0, sigma_step: int = 2, alpha: float = 0.5, beta: float = 0.5, mode: str = 'reflect'):
-    """Wraps skimage.filters.frangi"""
     sigmas = np.arange(sigma_range_low, sigma_range_high, sigma_step)
-    return skimage.filters.frangi(image, sigmas=sigmas, alpha=alpha, beta=beta, mode=mode)
+    fn = functools.partial(skimage.filters.frangi, sigmas=sigmas, alpha=alpha, beta=beta, mode=mode)
+    return dispatch(
+        default=fn,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "pointwise",
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- GABOR ---
 @register_node(
@@ -246,33 +366,74 @@ def gaussian_blur(image, sigma: float = 1.0, mode: str = "nearest"):
     return (out)
 
 
-
-
-
 # --- MEDIAN FILTER ---
 @register_node(
     label="Median Filter",
     category="Filters",
+    description="Median filter with disk footprint. Supports Dask.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
-        "radius": {"min":   1, "max": 50}
+        "radius": {"min": 1, "max": 50}
     }
 )
 def median_filter(image, radius: int = 2):
-    """Wraps skimage.filters.median with a disk footprint"""
     footprint = skimage.morphology.disk(radius)
-    return skimage.filters.median(image, footprint=footprint)
+    # Bake footprint into the callable so it never appears in kwargs.
+    # dispatch's maybe_promote_numpy_to_dask converts every numpy array in
+    # kwargs to a Dask array with image-shaped chunks, which breaks non-image
+    # array arguments like footprint.
+    fn = functools.partial(skimage.filters.median, footprint=footprint)
+
+    def _cuda_median(image):
+        import cupyx.scipy.ndimage as cnd
+        return cnd.median_filter(image, footprint=footprint)
+
+    return dispatch(
+        default=fn,
+        args=(image,),
+        kwargs={},
+        cuda_func=_cuda_median,
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": radius},
+        }
+    )
 
 
-# --- SOBEL FILTER---
+# --- SOBEL FILTER ---
 @register_node(
     label="Sobel Edge Det.",
     category="Filters",
-    outputs=["edges"]
+    description="Sobel gradient magnitude edge detector. Supports Dask.",
+    outputs=["edges"],
+    input_types={"image": "image"},
+    output_types={"edges": "image"},
+    params_config={
+        "mode": {"options": ["reflect", "constant", "nearest", "mirror", "wrap"]}
+    }
 )
-def sobel_filter(image):
-    """Wraps skimage.filters.sobel"""
-    return skimage.filters.sobel(image)
+def sobel_filter(image, mode: str = 'reflect'):
+    return dispatch(
+        default=skimage.filters.sobel,
+        args=(image,),
+        kwargs={"mode": mode},
+        cuda_func=_cuda_sobel,
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "boundary_from_param": "mode",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 1},  # 3x3 Sobel kernel
+        }
+    )
 
 
 # --- SOBEL SPLIT ---
@@ -286,40 +447,75 @@ def sobel_split(image):
     # Calculate both
     h_edges = skimage.filters.sobel_h(image)
     v_edges = skimage.filters.sobel_v(image)
-    
+
     return h_edges, v_edges
 
-# --- PREWITT FILTER---
+# --- PREWITT FILTER ---
 @register_node(
     label="Prewitt Edge Det.",
     category="Filters",
+    description="Prewitt gradient magnitude edge detector. Supports Dask.",
     outputs=["edges"],
+    input_types={"image": "image"},
+    output_types={"edges": "image"},
     params_config={
         "mode": {"options": ["nearest", "reflect", "wrap", "constant"]}
     }
 )
-def prewitt_filter(image):
-    """Wraps skimage.filters.prewitt"""
-    return skimage.filters.prewitt(image, mode='reflect' )
+def prewitt_filter(image, mode: str = 'reflect'):
+    return dispatch(
+        default=skimage.filters.prewitt,
+        args=(image,),
+        kwargs={"mode": mode},
+        cuda_func=_cuda_prewitt,
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "boundary_from_param": "mode",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 1},  # 3x3 Prewitt kernel
+        }
+    )
 
 # --- UNSHARP MASK (SHARPEN) ---
 @register_node(
     label="Unsharp Mask (Sharpen)",
     category="Filters",
+    description="Sharpens image via unsharp masking (image - blurred). Supports Dask.",
     outputs=["sharpened"],
+    input_types={"image": "image"},
+    output_types={"sharpened": "image"},
     params_config={
         "radius": {"min": 0.0, "max": 20.0, "step": 0.5},
         "amount": {"min": 0.0, "max": 5.0, "step": 0.1}
     }
 )
 def unsharp_mask(image, radius: float = 1.0, amount: float = 1.0):
-    return skimage.filters.unsharp_mask(image, radius=radius, amount=amount)
+    return dispatch(
+        default=skimage.filters.unsharp_mask,
+        args=(image,),
+        kwargs={"radius": radius, "amount": amount},
+        cuda_func=_cuda_unsharp_mask,
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "halo_from_param": "radius",  # radius is the internal Gaussian sigma
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- HESSIAN ---
 @register_node(
     label="Hessian (Ridge)",
     category="Filters",
+    description="Hessian-based ridge filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "sigmas_min": {"min": 0.1, "max": 20.0},
         "sigmas_max": {"min": 1.0, "max": 50.0},
@@ -329,25 +525,62 @@ def unsharp_mask(image, radius: float = 1.0, amount: float = 1.0):
 )
 def hessian(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, mode: str = 'reflect', black_ridges: bool = True):
     sigmas = range(int(sigmas_min), int(sigmas_max), 2)
-    return skimage.filters.hessian(image, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    fn = functools.partial(skimage.filters.hessian, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    return dispatch(
+        default=fn,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "pointwise",
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- LAPLACE ---
 @register_node(
     label="Laplace",
     category="Filters",
+    description="Laplacian edge detection via discrete convolution. Supports Dask.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "ksize": {"min": 1, "max": 10, "step": 1}
     }
 )
 def laplace(image, ksize: int = 3):
-    return skimage.filters.laplace(image, ksize=ksize)
+    return dispatch(
+        default=skimage.filters.laplace,
+        args=(image,),
+        kwargs={"ksize": ksize},
+        # cupyx.scipy.ndimage.laplace has no ksize — always uses a 3-point
+        # stencil. On the CUDA path ksize is intentionally not forwarded;
+        # the dispatcher preflight will fall back to Dask if the call fails.
+        cuda_function="cupyx.scipy.ndimage.laplace",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=[],
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "halo_from_param": "ksize",
+            "halo_factor": 0.5,  # halo = ceil(ksize * 0.5) ≈ kernel radius
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- MEIJERING ---
 @register_node(
     label="Meijering (Ridge)",
     category="Filters",
+    description="Meijering neuriteness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "sigmas_min": {"min": 0.1, "max": 20.0, "step": 0.1},
         "sigmas_max": {"min": 1.0, "max": 50.0, "step": 1},
@@ -356,9 +589,21 @@ def laplace(image, ksize: int = 3):
         "black_ridges": {"type": "bool"}
     }
 )
-def meijering(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, sigmas_step: int = 1,mode: str = 'reflect', black_ridges: bool = True):
+def meijering(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, sigmas_step: int = 1, mode: str = 'reflect', black_ridges: bool = True):
     sigmas = range(int(sigmas_min), int(sigmas_max), int(sigmas_step))
-    return skimage.filters.meijering(image, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    fn = functools.partial(skimage.filters.meijering, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    return dispatch(
+        default=fn,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "pointwise",
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- RANK ORDER ---
 @register_node(
@@ -373,16 +618,34 @@ def rank_order(image):
 @register_node(
     label="Roberts",
     category="Filters",
-    outputs=["image_out"]
+    description="Roberts cross gradient edge detector. Supports Dask.",
+    outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
 )
 def roberts(image):
-    return skimage.filters.roberts(image)
+    return dispatch(
+        default=skimage.filters.roberts,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 1},  # 2x2 Roberts cross kernel
+        }
+    )
 
 # --- SATO ---
 @register_node(
     label="Sato (Ridge)",
     category="Filters",
+    description="Sato tubeness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "sigmas_min": {"min": 0.1, "max": 20.0},
         "sigmas_max": {"min": 1.0, "max": 50.0},
@@ -392,19 +655,47 @@ def roberts(image):
 )
 def sato(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, mode: str = 'reflect', black_ridges: bool = True):
     sigmas = range(int(sigmas_min), int(sigmas_max), 2)
-    return skimage.filters.sato(image, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    fn = functools.partial(skimage.filters.sato, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    return dispatch(
+        default=fn,
+        args=(image,),
+        kwargs={},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "pointwise",
+            "numpy_chunks": "spatial_auto",
+        }
+    )
 
 # --- SCHARR ---
 @register_node(
     label="Scharr",
     category="Filters",
+    description="Scharr gradient magnitude edge detector. Supports Dask.",
     outputs=["image_out"],
+    input_types={"image": "image"},
+    output_types={"image_out": "image"},
     params_config={
         "mode": {"options": ["reflect", "constant", "nearest", "mirror", "wrap"]}
     }
 )
 def scharr(image, mode: str = 'reflect'):
-    return skimage.filters.scharr(image, mode=mode)
+    return dispatch(
+        default=skimage.filters.scharr,
+        args=(image,),
+        kwargs={"mode": mode},
+        output_dtype_policy="image_float",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "boundary_from_param": "mode",
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"depth": 1},  # 3x3 Scharr kernel
+        }
+    )
 
 # --- THRESHOLD OTSU ---
 @register_node(

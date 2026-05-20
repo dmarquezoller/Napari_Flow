@@ -5888,6 +5888,7 @@ class FlowEditor(QWidget):
         def add_layer_to_viewer(layer_data, raw_meta):
             # 1. Prepare Name
             layer_name = raw_meta.get("name", f"{node_title} Output")
+            layer_type = raw_meta.get("layer_type", None)
             layer_data = _napari_display_data(layer_data)
 
             # 2. Filter Metadata
@@ -5897,6 +5898,14 @@ class FlowEditor(QWidget):
                 "interpolation2d", "interpolation3d",
                 "scale", "translate", "rotate", "shear", "affine",
             }
+            point_napari_args = {
+                "size", "symbol", "face_color", "edge_color", "border_color",
+                "edge_width", "border_width", "edge_width_is_relative",
+                "border_width_is_relative", "properties", "text", "shown",
+                "out_of_slice_display",
+            }
+            if layer_type == "points":
+                valid_napari_args |= point_napari_args
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
 
@@ -5971,14 +5980,58 @@ class FlowEditor(QWidget):
                     if bad:
                         raise TypeError(f"Multiscale list contains non-array-like items: {bad}")
                     napari_kwargs["multiscale"] = True
-
-                layer_type = raw_meta.get("layer_type", None)
-
                 print("🟢 ADDING:", layer_name, "layer_type=", layer_type,
                       "data_type=", type(layer_data), "multiscale=", napari_kwargs.get("multiscale"))
 
                 if layer_type == "labels":
                     self.viewer.add_labels(layer_data, **napari_kwargs)
+                elif layer_type == "points":
+                    point_aliases = {
+                        "edge_color": "border_color",
+                        "edge_width": "border_width",
+                        "edge_width_is_relative": "border_width_is_relative",
+                    }
+                    for old_key, new_key in point_aliases.items():
+                        if old_key in napari_kwargs:
+                            napari_kwargs.setdefault(new_key, napari_kwargs[old_key])
+                            napari_kwargs.pop(old_key, None)
+
+                    for color_key in ("face_color", "border_color"):
+                        if isinstance(napari_kwargs.get(color_key), tuple):
+                            napari_kwargs[color_key] = list(napari_kwargs[color_key])
+
+                    points_kwargs = {k: v for k, v in napari_kwargs.items()
+                                     if k in {"name", "metadata", "opacity", "blending",
+                                              "visible", "scale", "translate", "affine",
+                                              "size", "symbol", "face_color", "border_color",
+                                              "border_width", "border_width_is_relative",
+                                              "properties", "text", "shown",
+                                              "out_of_slice_display"}}
+                    try:
+                        import inspect
+                        accepted = set(inspect.signature(self.viewer.add_points).parameters)
+                        points_kwargs = {
+                            k: v for k, v in points_kwargs.items() if k in accepted
+                        }
+                    except Exception:
+                        pass
+                    # Align coordinate columns to viewer ndim. blob_dog on an ND
+                    # image returns ND coords, but napari may display the image
+                    # with fewer dims (e.g. treating the last dim as a colour
+                    # channel). Trailing extra columns are channel indices; the
+                    # meaningful spatial coords are always first.
+                    viewer_ndim = self.viewer.dims.ndim
+                    if (hasattr(layer_data, "shape") and layer_data.ndim == 2
+                            and layer_data.shape[1] != viewer_ndim):
+                        if layer_data.shape[1] > viewer_ndim:
+                            layer_data = layer_data[:, :viewer_ndim]
+                        else:
+                            pad = np.zeros(
+                                (len(layer_data), viewer_ndim - layer_data.shape[1]),
+                                dtype=layer_data.dtype,
+                            )
+                            layer_data = np.concatenate([layer_data, pad], axis=1)
+                    self.viewer.add_points(layer_data, **points_kwargs)
                 else:
                     self.viewer.add_image(layer_data, **napari_kwargs)
 

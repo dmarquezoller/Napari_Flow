@@ -460,6 +460,7 @@ def dispatch(
     numpy_to_dask_chunks="auto",
     dask_target_chunk_mb: float = 64.0,
     dask_options: Optional[dict] = None,
+    output_type: str = "image",   # "image" | "points"
 ):
     """
     Choose backend, handle pyramids, and apply layout-aware execution policies.
@@ -538,6 +539,12 @@ def dispatch(
     output_dtype_policy = _dask_opt("output_dtype_policy", output_dtype_policy)
     numpy_to_dask_chunks = _dask_opt("numpy_chunks", numpy_to_dask_chunks)
     dask_target_chunk_mb = _dask_opt("target_chunk_mb", dask_target_chunk_mb)
+    output_type = str(_dask_opt("output_type", output_type)).strip().lower()
+    output_coord_cols = _dask_opt("output_coord_cols", None)  # e.g. slice(None,-1) for blob_log
+    point_size_col = _dask_opt("point_size_col", None)
+    point_size_mode = str(_dask_opt("point_size_mode", "raw")).strip().lower()
+    point_size_scale = _dask_opt("point_size_scale", 1.0)
+    point_kwargs = dict(_dask_opt("point_kwargs", {}) or {})
 
     try:
         dask_halo_factor = float(dask_halo_factor or 0.0)
@@ -970,7 +977,7 @@ def dispatch(
 
     # ---------- Backend selection ----------
     def has_dask_backend():
-        return dask_func is not None or dask_strategy in ("pointwise", "neighborhood")
+        return dask_func is not None or dask_strategy in ("pointwise", "neighborhood", "chunked_delayed")
 
     def has_dask_cuda_capability():
         cuda_ok, _ = _cuda_runtime_ready()
@@ -1514,6 +1521,241 @@ def dispatch(
             result._meta = make_meta(out_dtype, gpu=True, ndim=sample_exec.ndim)
         return result
 
+    def _execute_chunked_delayed(args_in, kwargs_in, sample_loc, axes):
+        """
+        Coordinate-output Dask strategy using dask.delayed.
+
+        Each spatial chunk (with halo) is processed independently by `default`.
+        Returned coordinates are trimmed to the inner (non-halo) region, shifted
+        to global image coordinates, and expanded back to the original axis
+        order. Non-spatial axes such as T/C are handled independently, matching
+        the image-output dispatcher semantics.
+
+        `output_coord_cols` (from dask_options) lets nodes strip extra columns
+        from the coordinate array (e.g. slice(None,-1) drops the sigma column
+        returned by skimage.feature.blob_log).
+        """
+        import dask
+        import itertools
+
+        if sample_loc is None:
+            raise ValueError("chunked_delayed strategy requires an array input.")
+        loc_type, loc_key = sample_loc
+        sample = args_in[loc_key] if loc_type == "arg" else kwargs_in[loc_key]
+        sample_ndim = int(getattr(sample, "ndim", 2))
+        axes_norm = str(axes or "").upper()
+        if len(axes_norm) != sample_ndim:
+            axes_norm = ""
+        output_ndim = sample_ndim
+        extra_cols = 1 if point_size_col is not None else 0
+
+        def _coerce(raw, coord_ndim, size_ndim):
+            """Normalise raw function output to coords plus optional attrs."""
+            if raw is None or (hasattr(raw, "__len__") and len(raw) == 0):
+                return (
+                    np.empty((0, coord_ndim), dtype=np.float32),
+                    np.empty((0, extra_cols), dtype=np.float32),
+                )
+            out = np.asarray(raw, dtype=np.float32)
+            if out.ndim == 1:
+                out = out.reshape(1, -1)
+            attrs = np.empty((len(out), 0), dtype=np.float32)
+            if point_size_col is not None:
+                size = out[:, point_size_col].astype(np.float32, copy=False)
+                if point_size_mode in {"blob_diameter", "sigma_diameter"}:
+                    size = size * (2.0 * float(np.sqrt(max(1, int(size_ndim)))))
+                size = size * float(point_size_scale)
+                attrs = size.reshape(-1, 1).astype(np.float32, copy=False)
+            if output_coord_cols is not None:
+                out = out[:, output_coord_cols]
+            return out, attrs
+
+        def _expand_coords(coords, core_axis_indices, fixed_axis_values, attrs=None):
+            if coords is None or len(coords) == 0:
+                return np.empty((0, output_ndim + extra_cols), dtype=np.float32)
+            full = np.zeros((len(coords), output_ndim), dtype=np.float32)
+            for axis_i, value in fixed_axis_values:
+                full[:, int(axis_i)] = float(value)
+            coord_cols = min(coords.shape[1], len(core_axis_indices))
+            for coord_i in range(coord_cols):
+                full[:, int(core_axis_indices[coord_i])] = coords[:, coord_i]
+            if extra_cols:
+                if attrs is None or len(attrs) != len(coords):
+                    attrs = np.empty((len(coords), extra_cols), dtype=np.float32)
+                return np.concatenate([full, attrs], axis=1)
+            return full
+
+        def _run_chunk(
+            chunk_np,
+            args_no_img,
+            kwargs_no_img,
+            padded_origin,
+            inner_lo,
+            inner_hi,
+            core_axis_indices,
+            fixed_axis_values,
+            size_ndim,
+        ):
+            """Run default on one padded chunk, return inner global coords."""
+            a2 = list(args_no_img)
+            k2 = dict(kwargs_no_img)
+            if loc_type == "arg":
+                a2[loc_key] = chunk_np
+            else:
+                k2[loc_key] = chunk_np
+
+            coords, attrs = _coerce(default(*a2, **k2), len(core_axis_indices), size_ndim)
+            if len(coords) == 0:
+                return _expand_coords(coords, core_axis_indices, fixed_axis_values, attrs)
+
+            # Keep only coords whose center falls inside the inner region.
+            ncols = coords.shape[1]
+            mask = np.ones(len(coords), dtype=bool)
+            for dim_i in range(min(ncols, len(inner_lo))):
+                mask &= (coords[:, dim_i] >= inner_lo[dim_i])
+                mask &= (coords[:, dim_i] < inner_hi[dim_i])
+            coords = coords[mask]
+            attrs = attrs[mask] if len(attrs) else attrs
+            if len(coords) == 0:
+                return _expand_coords(coords, core_axis_indices, fixed_axis_values, attrs)
+
+            # Shift chunk-local → global coordinates.
+            origin = np.array(padded_origin[:ncols], dtype=np.float32)
+            coords += origin
+            return _expand_coords(coords, core_axis_indices, fixed_axis_values, attrs)
+
+        def _vstack(arrays):
+            valid = [a for a in arrays if a is not None and len(a) > 0]
+            if not valid:
+                return np.empty((0, output_ndim + extra_cols), dtype=np.float32)
+            return np.concatenate(valid, axis=0)
+
+        if axes_norm:
+            core_axis_indices = [
+                i for i, axis_name in enumerate(axes_norm) if axis_name in ("Z", "Y", "X")
+            ]
+            if time_policy == "joint":
+                core_axis_indices.extend(
+                    i for i, axis_name in enumerate(axes_norm) if axis_name == "T"
+                )
+            if channel_policy == "joint":
+                core_axis_indices.extend(
+                    i for i, axis_name in enumerate(axes_norm) if axis_name == "C"
+                )
+            core_axis_indices = sorted(set(core_axis_indices))
+        else:
+            core_axis_indices = list(range(sample_ndim))
+
+        if not core_axis_indices:
+            core_axis_indices = list(range(sample_ndim))
+
+        independent_axes = [i for i in range(sample_ndim) if i not in core_axis_indices]
+
+        def _slice_for_independent(index_tuple):
+            slicer = [slice(None)] * sample_ndim
+            fixed_values = []
+            for local_i, axis_i in enumerate(independent_axes):
+                value = int(index_tuple[local_i])
+                slicer[axis_i] = value
+                fixed_values.append((axis_i, value))
+            return tuple(slicer), fixed_values
+
+        def _run_core(core_sample, core_axis_indices_now, fixed_axis_values):
+            core_axes = (
+                "".join(axes_norm[i] for i in core_axis_indices_now)
+                if axes_norm
+                else None
+            )
+            core_ndim = int(getattr(core_sample, "ndim", len(core_axis_indices_now)))
+            if axes_norm:
+                size_ndim = sum(
+                    1 for i in core_axis_indices_now if axes_norm[i] in ("Z", "Y", "X")
+                )
+            else:
+                size_ndim = core_ndim
+
+            a2, k2 = list(args_in), dict(kwargs_in)
+            if loc_type == "arg":
+                a2[loc_key] = core_sample
+            else:
+                k2[loc_key] = core_sample
+
+            # NumPy path: run once on this independent slice.
+            if not isinstance(core_sample, da.Array):
+                coords, attrs = _coerce(default(*a2, **k2), core_ndim, size_ndim)
+                return _expand_coords(coords, core_axis_indices_now, fixed_axis_values, attrs)
+
+            shape = core_sample.shape
+            chunks = core_sample.chunks
+            depth = _depth_for_overlap(core_sample, core_axes, kwargs_in)
+
+            dim_starts = []
+            for dim_i in range(core_ndim):
+                acc, starts = 0, []
+                for c in chunks[dim_i]:
+                    starts.append(acc)
+                    acc += c
+                dim_starts.append(starts)
+
+            args_no_img = list(a2)
+            kwargs_no_img = dict(k2)
+            if loc_type == "arg":
+                args_no_img[loc_key] = None
+            else:
+                kwargs_no_img[loc_key] = None
+
+            delayed_chunks = []
+            for chunk_idx in itertools.product(*[range(len(c)) for c in chunks]):
+                padded_slices = []
+                padded_origin = []
+                inner_lo = []
+                inner_hi = []
+
+                for dim_i in range(core_ndim):
+                    start = dim_starts[dim_i][chunk_idx[dim_i]]
+                    size = chunks[dim_i][chunk_idx[dim_i]]
+                    end = start + size
+                    d = depth[dim_i]
+
+                    p_start = max(0, start - d)
+                    p_end = min(shape[dim_i], end + d)
+
+                    inner_local_start = start - p_start
+                    inner_local_end = inner_local_start + size
+
+                    padded_slices.append(slice(p_start, p_end))
+                    padded_origin.append(p_start)
+                    inner_lo.append(inner_local_start)
+                    inner_hi.append(inner_local_end)
+
+                chunk_dask = core_sample[tuple(padded_slices)]
+                delayed_chunks.append(
+                    dask.delayed(_run_chunk)(
+                        chunk_dask,
+                        args_no_img,
+                        kwargs_no_img,
+                        tuple(padded_origin),
+                        tuple(inner_lo),
+                        tuple(inner_hi),
+                        tuple(core_axis_indices_now),
+                        tuple(fixed_axis_values),
+                        int(size_ndim),
+                    )
+                )
+
+            return dask.delayed(_vstack)(delayed_chunks)
+
+        if independent_axes:
+            pieces = []
+            independent_shape = tuple(int(sample.shape[i]) for i in independent_axes)
+            for index_tuple in np.ndindex(*independent_shape):
+                slicer, fixed_values = _slice_for_independent(index_tuple)
+                core_sample = sample[slicer]
+                pieces.append(_run_core(core_sample, core_axis_indices, fixed_values))
+            return dask.delayed(_vstack)(pieces)
+
+        return _run_core(sample, core_axis_indices, ())
+
     def execute_once(args_in, kwargs_in):
         sample = None
         sample_loc = None
@@ -1582,6 +1824,23 @@ def dispatch(
             axis_labels_hint=runtime_axis_labels,
             layout_hint=runtime_layout_kind,
         )
+
+        # chunked_delayed: coordinate-output strategy. It returns coordinates
+        # instead of an image, but still uses the inferred axis layout above.
+        if dask_strategy == "chunked_delayed" and backend_mode in ("dask", "cpu"):
+            raw = _execute_chunked_delayed(args_exec, kwargs_exec, sample_loc, axes)
+            if output_type == "points":
+                coords = raw.compute() if hasattr(raw, "compute") else raw
+                meta = dict(point_kwargs)
+                if point_size_col is not None:
+                    coord_ndim = int(getattr(sample_exec, "ndim", 0) or 0)
+                    if coord_ndim <= 0 or coord_ndim > coords.shape[1]:
+                        coord_ndim = max(0, coords.shape[1] - 1)
+                    if coords.shape[1] > coord_ndim:
+                        meta["size"] = coords[:, coord_ndim].astype(np.float32, copy=False)
+                        coords = coords[:, :coord_ndim]
+                return (coords, meta, "points")
+            return raw
 
         auto_dask = (
             isinstance(sample_exec, da.Array)

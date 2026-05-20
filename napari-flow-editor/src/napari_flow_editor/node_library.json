@@ -489,6 +489,31 @@
       "allow_multi_out": true
     }
   },
+  "convert_to_grayscale": {
+    "label": "Convert to Grayscale",
+    "category": "Exposure",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "grayscale"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.exposure.convert_to_grayscale",
+    "description": "Collapse RGB/RGBA images to a single luminance channel using ITU-R BT.709 weights. Supports Dask arrays (lazy). Images whose last dim is not 3 or 4 pass through unchanged.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "grayscale": "image"
+    }
+  },
   "cummulative_distribution": {
     "label": "Cummulative Distribution",
     "category": "Exposure",
@@ -621,6 +646,408 @@
       "allow_multi_out": true
     }
   },
+  "blob_dog": {
+    "label": "Blob DoG",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "blobs"
+    ],
+    "parameters": {
+      "min_sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.5,
+        "max": 20.0,
+        "step": 0.5
+      },
+      "max_sigma": {
+        "type": "float",
+        "default": 10.0,
+        "min": 1.0,
+        "max": 200.0,
+        "step": 1.0
+      },
+      "threshold": {
+        "type": "float",
+        "default": 0.1,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.blob_dog",
+    "description": "Difference-of-Gaussians blob detector. Returns blob centres as a Points layer. Supports Dask (chunked).",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "blobs": "points"
+    }
+  },
+  "blob_log": {
+    "label": "Blob LoG",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "blobs"
+    ],
+    "parameters": {
+      "min_sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.5,
+        "max": 20.0,
+        "step": 0.5
+      },
+      "max_sigma": {
+        "type": "float",
+        "default": 10.0,
+        "min": 1.0,
+        "max": 50.0,
+        "step": 1.0
+      },
+      "num_sigma": {
+        "type": "int",
+        "default": 10,
+        "min": 2,
+        "max": 20,
+        "step": 1
+      },
+      "threshold": {
+        "type": "float",
+        "default": 0.1,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.blob_log",
+    "description": "Laplacian-of-Gaussian blob detector. Returns blob centres as a Points layer. Supports Dask (chunked).",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "blobs": "points"
+    }
+  },
+  "canny": {
+    "label": "Canny Edge Detector",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "edges"
+    ],
+    "parameters": {
+      "sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 10.0,
+        "step": 0.1
+      },
+      "low_threshold": {
+        "type": "float",
+        "default": 0.1,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      },
+      "high_threshold": {
+        "type": "float",
+        "default": 0.2,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.canny",
+    "description": "Canny edge detection. Returns a binary edge mask. CPU only \u2014 hysteresis requires the full image.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "edges": "image"
+    }
+  },
+  "corner_harris": {
+    "label": "Corner Harris",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "response"
+    ],
+    "parameters": {
+      "k": {
+        "type": "float",
+        "default": 0.05,
+        "min": 0.0,
+        "max": 0.5,
+        "step": 0.01
+      },
+      "sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 10.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.corner_harris",
+    "description": "Harris corner detector response map. Supports Dask+CUDA.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "response": "image"
+    }
+  },
+  "corner_shi_tomasi": {
+    "label": "Corner Shi-Tomasi",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "response"
+    ],
+    "parameters": {
+      "sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 10.0,
+        "step": 0.1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.corner_shi_tomasi",
+    "description": "Shi-Tomasi minimum-eigenvalue corner response map. Supports Dask+CUDA.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "response": "image"
+    }
+  },
+  "hog": {
+    "label": "HOG Visualization",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "hog_image"
+    ],
+    "parameters": {
+      "orientations": {
+        "type": "int",
+        "default": 9,
+        "min": 4,
+        "max": 16,
+        "step": 1
+      },
+      "pixels_per_cell": {
+        "type": "int",
+        "default": 8,
+        "min": 4,
+        "max": 64,
+        "step": 4
+      },
+      "cells_per_block": {
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 8,
+        "step": 1
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.hog",
+    "description": "Histogram of Oriented Gradients visualisation. CPU only \u2014 cell/block grid spans the full image.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "hog_image": "image"
+    }
+  },
+  "local_binary_pattern": {
+    "label": "Local Binary Pattern",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "lbp"
+    ],
+    "parameters": {
+      "P": {
+        "type": "int",
+        "default": 8,
+        "min": 4,
+        "max": 32,
+        "step": 1
+      },
+      "R": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.5,
+        "max": 10.0,
+        "step": 0.5
+      },
+      "method": {
+        "type": "enum",
+        "default": "uniform",
+        "options": [
+          "uniform",
+          "default",
+          "ror",
+          "var"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.local_binary_pattern",
+    "description": "LBP texture descriptor. Supports Dask (2-D images). No CUDA equivalent in CuPy.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "lbp": "image"
+    }
+  },
+  "peak_local_max": {
+    "label": "Peak Local Max",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "peaks"
+    ],
+    "parameters": {
+      "min_distance": {
+        "type": "int",
+        "default": 5,
+        "min": 1,
+        "max": 50,
+        "step": 1
+      },
+      "threshold_rel": {
+        "type": "float",
+        "default": 0.1,
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.peak_local_max",
+    "description": "Finds local intensity maxima above a threshold. Returns peak coordinates as a Points layer. Supports Dask (chunked).",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "peaks": "points"
+    }
+  },
+  "shape_index": {
+    "label": "Shape Index",
+    "category": "Features",
+    "inputs": [
+      "image"
+    ],
+    "outputs": [
+      "shape_index"
+    ],
+    "parameters": {
+      "sigma": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.1,
+        "max": 10.0,
+        "step": 0.1
+      },
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.features.shape_index",
+    "description": "Koenderink shape index \u2014 encodes local surface curvature in [-1, 1]. Supports Dask+CUDA.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "shape_index": "image"
+    }
+  },
   "butterworth": {
     "label": "Butterworth",
     "category": "Filters",
@@ -646,12 +1073,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.butterworth",
-    "description": "Wraps skimage.filters.butterworth",
+    "description": "Frequency-domain Butterworth filter. Runs on CPU only (FFT requires the full image).",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "correlate_sparse": {
@@ -723,12 +1156,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.difference_of_gaussians",
-    "description": "Wraps skimage.filters.difference_of_gaussians",
+    "description": "Band-pass filter via subtraction of two Gaussian smoothings. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "farid": {
@@ -754,12 +1193,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.farid",
-    "description": "Wraps skimage.filters.farid",
+    "description": "Farid & Simoncelli gradient magnitude. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "farid_horizontal": {
@@ -773,12 +1218,18 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.farid_horizontal",
-    "description": "Wraps skimage.filters.farid_h",
+    "description": "Farid & Simoncelli horizontal derivative. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "farid_vertical": {
@@ -792,12 +1243,18 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.farid_vertical",
-    "description": "Wraps skimage.filters.farid_v",
+    "description": "Farid & Simoncelli vertical derivative. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "filter_forward": {
@@ -904,12 +1361,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.frangi",
-    "description": "Wraps skimage.filters.frangi",
+    "description": "Frangi vesselness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "gabor": {
@@ -1039,11 +1502,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.hessian",
+    "description": "Hessian-based ridge filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "hysteresis_threshold": {
@@ -1099,11 +1569,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.laplace",
+    "description": "Laplacian edge detection via discrete convolution. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "median_filter": {
@@ -1124,12 +1601,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.median_filter",
-    "description": "Wraps skimage.filters.median with a disk footprint",
+    "description": "Median filter with disk footprint. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "meijering": {
@@ -1180,11 +1663,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.meijering",
+    "description": "Meijering neuriteness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "prewitt_filter": {
@@ -1196,14 +1686,31 @@
     "outputs": [
       "edges"
     ],
-    "parameters": {},
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "nearest",
+          "reflect",
+          "wrap",
+          "constant"
+        ]
+      }
+    },
     "execution_path": "napari_flow_editor.flow_nodes.filters.prewitt_filter",
-    "description": "Wraps skimage.filters.prewitt",
+    "description": "Prewitt gradient magnitude edge detector. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "edges": "image"
     }
   },
   "rank_order": {
@@ -1236,11 +1743,18 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.roberts",
+    "description": "Roberts cross gradient edge detector. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "sato": {
@@ -1282,11 +1796,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.sato",
+    "description": "Sato tubeness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "scharr": {
@@ -1312,11 +1833,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.scharr",
+    "description": "Scharr gradient magnitude edge detector. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "sobel_filter": {
@@ -1328,14 +1856,32 @@
     "outputs": [
       "edges"
     ],
-    "parameters": {},
+    "parameters": {
+      "mode": {
+        "type": "enum",
+        "default": "reflect",
+        "options": [
+          "reflect",
+          "constant",
+          "nearest",
+          "mirror",
+          "wrap"
+        ]
+      }
+    },
     "execution_path": "napari_flow_editor.flow_nodes.filters.sobel_filter",
-    "description": "Wraps skimage.filters.sobel",
+    "description": "Sobel gradient magnitude edge detector. Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "edges": "image"
     }
   },
   "sobel_split": {
@@ -1663,11 +2209,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.unsharp_mask",
+    "description": "Sharpens image via unsharp masking (image - blurred). Supports Dask.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "sharpened": "image"
     }
   },
   "wiener": {

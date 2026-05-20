@@ -1577,12 +1577,15 @@ class ExecutionWorker(QObject):
                 and isinstance(x[2], str)
             )
 
-        def normalize_layer_data_tuple(ldt):
+        def normalize_layer_data_tuple(ldt, output_name_hint=None):
             """Merge engine-collected metadata into napari LayerDataTuple meta."""
             data, meta, layer_type = ldt
             merged = {}
             merged.update(current_metadata)
             merged.update(meta or {})
+            # Rename so output doesn't overwrite the input layer (same logic as
+            # paths 3/4 in wrap_result).
+            _assign_node_output_name(merged, output_name_hint=output_name_hint)
             return (data, merged, layer_type)
 
         # Determine if this node is a passthrough/input node that should NOT rename
@@ -1630,7 +1633,7 @@ class ExecutionWorker(QObject):
             We keep display settings (contrast_limits, colormap, gamma, etc.)
             so processed outputs preserve source appearance by default.
             """
-            for key in ("multiscales",):
+            for key in ("multiscales", "rgb"):
                 meta.pop(key, None)
             return meta
 
@@ -1697,11 +1700,11 @@ class ExecutionWorker(QObject):
         def wrap_result(res, output_name_hint=None):
             # 1) If node returned a single LayerDataTuple: keep it as LayerDataTuple
             if is_layer_data_tuple(res):
-                return normalize_layer_data_tuple(res)
+                return normalize_layer_data_tuple(res, output_name_hint=output_name_hint)
 
             # 2) If node returned multiple layers: keep list of LayerDataTuples
             if isinstance(res, list) and len(res) > 0 and is_layer_data_tuple(res[0]):
-                return [normalize_layer_data_tuple(x) for x in res]
+                return [normalize_layer_data_tuple(x, output_name_hint=output_name_hint) for x in res]
 
             # 3) Your (data, meta) envelope: merge meta
             if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):

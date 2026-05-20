@@ -1,5 +1,7 @@
 from .decorator import register_node
 import skimage.exposure
+import numpy as np
+import dask.array as da
 
 # --- ALREADY IMPLEMENTED --- #
 # - adjust gamma              #
@@ -10,6 +12,44 @@ import skimage.exposure
 # - equalize histogram        #
 # - rescale intensity         #
 # --- --- --- --- --- --- --- #
+
+# --- CONVERT TO GRAYSCALE ---
+def _rgb_to_gray(image):
+    """Collapse trailing channel dim using ITU-R BT.709 luminance weights.
+
+    Supports NumPy and Dask. Returns the image unchanged if the last dim is
+    not 3 or 4 (already single-channel).
+    """
+    weights = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    if isinstance(image, da.Array):
+        n = image.shape[-1]
+        if n not in (3, 4):
+            return image
+        w = weights[:n]
+        return da.map_blocks(
+            lambda c: np.tensordot(c.astype(np.float32), w, axes=[[-1], [0]]),
+            image,
+            drop_axis=image.ndim - 1,
+            dtype=np.float32,
+        )
+    arr = np.asarray(image, dtype=np.float32)
+    n = arr.shape[-1]
+    if n not in (3, 4):
+        return arr
+    return np.tensordot(arr, weights[:n], axes=[[-1], [0]])
+
+
+@register_node(
+    label="Convert to Grayscale",
+    category="Exposure",
+    description="Collapse RGB/RGBA images to a single luminance channel using ITU-R BT.709 weights. Supports Dask arrays (lazy). Images whose last dim is not 3 or 4 pass through unchanged.",
+    outputs=["grayscale"],
+    input_types={"image": "image"},
+    output_types={"grayscale": "image"},
+)
+def convert_to_grayscale(image):
+    return _rgb_to_gray(image)
+
 
 # --- ADJUST GAMMA ---
 @register_node(
