@@ -97,6 +97,217 @@ def test_dispatch_zyx_runs_on_full_volume():
     assert calls[0] == (4, 5, 6)
 
 
+def test_dispatch_spatial_core_axes_yx_runs_per_z_plane():
+    calls = []
+    image = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+
+    def default_func(x):
+        calls.append(x.shape)
+        assert x.ndim == 2
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "ZYX", "layout_kind": "3d_image"},
+        lambda: dispatch(
+            default=default_func,
+            args=(image,),
+            kwargs={},
+            spatial_core_axes="YX",
+        ),
+    )
+
+    assert out.shape == image.shape
+    assert len(calls) == 4
+    assert all(shape == (5, 6) for shape in calls)
+    np.testing.assert_array_equal(out, image + 1)
+
+
+def test_dispatch_spatial_core_axes_yx_runs_per_ctz_plane():
+    calls = []
+    image = np.arange(2 * 3 * 4 * 5 * 6, dtype=np.float32).reshape(2, 3, 4, 5, 6)
+
+    def default_func(x):
+        calls.append(x.shape)
+        assert x.ndim == 2
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "CTZYX"},
+        lambda: dispatch(
+            default=default_func,
+            args=(image,),
+            kwargs={},
+            spatial_core_axes="YX",
+        ),
+    )
+
+    assert out.shape == image.shape
+    assert len(calls) == 2 * 3 * 4
+    assert all(shape == (5, 6) for shape in calls)
+    np.testing.assert_array_equal(out, image + 1)
+
+
+def test_dispatch_spatial_core_axes_yx_spatial_auto_chunks_make_z_independent():
+    image = np.arange(4 * 16 * 18, dtype=np.float32).reshape(4, 16, 18)
+
+    def default_func(x):
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "ZYX", "layout_kind": "3d_image"},
+        lambda: dispatch(
+            default=default_func,
+            args=(image,),
+            kwargs={},
+            backend="auto",
+            dask_strategy="pointwise",
+            numpy_to_dask_chunks="spatial_auto",
+            spatial_core_axes="YX",
+            output_dtype_policy="preserve",
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.chunks[0] == (1, 1, 1, 1)
+    assert out.chunks[1:] == ((16,), (18,))
+    np.testing.assert_array_equal(out.compute(), image + 1)
+
+
+def test_dispatch_rechunks_existing_dask_to_yx_planes_when_requested():
+    image = np.arange(4 * 16 * 18, dtype=np.float32).reshape(4, 16, 18)
+    lazy = da.from_array(image, chunks=(2, 8, 9))
+
+    def default_func(x):
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "ZYX", "layout_kind": "3d_image"},
+        lambda: dispatch(
+            default=default_func,
+            args=(lazy,),
+            kwargs={},
+            backend="auto",
+            dask_options={
+                "strategy": "pointwise",
+                "numpy_chunks": "spatial_auto",
+                "rechunk": "spatial_auto",
+            },
+            spatial_core_axes="YX",
+            output_dtype_policy="preserve",
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.chunks[0] == (1, 1, 1, 1)
+    assert out.chunks[1:] == ((16,), (18,))
+    np.testing.assert_array_equal(out.compute(), image + 1)
+
+
+def test_dispatch_full_core_chunks_for_existing_dask_yx_planes():
+    image = np.arange(4 * 16 * 18, dtype=np.float32).reshape(4, 16, 18)
+    lazy = da.from_array(image, chunks=(2, 8, 9))
+
+    def default_func(x):
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "ZYX", "layout_kind": "3d_image"},
+        lambda: dispatch(
+            default=default_func,
+            args=(lazy,),
+            kwargs={},
+            backend="auto",
+            layout_policy="full_nd",
+            spatial_core_axes="YX",
+            dask_options={
+                "strategy": "pointwise",
+                "numpy_chunks": "full_core",
+                "rechunk": "full_core",
+            },
+            output_dtype_policy="preserve",
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.chunks == ((1, 1, 1, 1), (16,), (18,))
+    np.testing.assert_array_equal(out.compute(), image + 1)
+
+
+def test_dispatch_full_core_chunks_for_existing_dask_ctzyx_planes():
+    image = np.arange(2 * 3 * 4 * 5 * 6, dtype=np.float32).reshape(2, 3, 4, 5, 6)
+    lazy = da.from_array(image, chunks=(1, 2, 2, 3, 3))
+
+    def default_func(x):
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "CTZYX"},
+        lambda: dispatch(
+            default=default_func,
+            args=(lazy,),
+            kwargs={},
+            backend="auto",
+            layout_policy="full_nd",
+            spatial_core_axes="YX",
+            dask_options={
+                "strategy": "pointwise",
+                "numpy_chunks": "full_core",
+                "rechunk": "full_core",
+            },
+            output_dtype_policy="preserve",
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.chunks == ((1, 1), (1, 1, 1), (1, 1, 1, 1), (5,), (6,))
+    np.testing.assert_array_equal(out.compute(), image + 1)
+
+
+def test_dispatch_full_core_chunks_for_existing_dask_ctzyx_volumes():
+    image = np.arange(2 * 3 * 4 * 5 * 6, dtype=np.float32).reshape(2, 3, 4, 5, 6)
+    lazy = da.from_array(image, chunks=(1, 2, 2, 3, 3))
+
+    def default_func(x):
+        return x + 1
+
+    out = _run_with_metadata(
+        {"axes": "CTZYX"},
+        lambda: dispatch(
+            default=default_func,
+            args=(lazy,),
+            kwargs={},
+            backend="auto",
+            layout_policy="full_nd",
+            spatial_core_axes="ZYX",
+            dask_options={
+                "strategy": "pointwise",
+                "numpy_chunks": "full_core",
+                "rechunk": "full_core",
+            },
+            output_dtype_policy="preserve",
+        ),
+    )
+
+    assert isinstance(out, da.Array)
+    assert out.chunks == ((1, 1), (1, 1, 1), (4,), (5,), (6,))
+    np.testing.assert_array_equal(out.compute(), image + 1)
+
+
+def test_dispatch_spatial_core_axes_rejects_unknown_axis():
+    image = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+
+    def default_func(x):
+        return x
+
+    with np.testing.assert_raises(ValueError):
+        dispatch(
+            default=default_func,
+            args=(image,),
+            kwargs={},
+            spatial_core_axes="TYX",
+        )
+
+
 def test_worker_propagates_axes_metadata_to_dispatch(worker):
     upstream = FakeNode("get_layer")
     upstream.cached_results = {

@@ -39,6 +39,74 @@ def _cuda_difference_of_gaussians(image, low_sigma=1.0, high_sigma=2.0, mode='ne
     high = cnd.gaussian_filter(image, sigma=high_sigma, mode=mode)
     return low - high
 
+
+def _cuda_threshold_mean(image):
+    import cupy as cp
+    return float(cp.mean(image))
+
+
+def _threshold_to_mask(threshold, image, **_):
+    """Convert a threshold image to this app's boolean mask output."""
+    return image > threshold
+
+
+def _validate_odd_window(value, name):
+    value = int(value)
+    if value < 3 or value % 2 == 0:
+        raise ValueError(f"{name} must be an odd integer >= 3, got {value!r}.")
+    return value
+
+
+def _sigma_sequence(start, stop, step, *, name="sigmas"):
+    try:
+        start = float(start)
+        stop = float(stop)
+        step = float(step)
+    except Exception as exc:
+        raise ValueError(f"{name} bounds must be numeric.") from exc
+    if step <= 0:
+        raise ValueError(f"{name} step must be > 0, got {step!r}.")
+    if stop <= start:
+        raise ValueError(
+            f"{name} stop must be greater than start, got start={start!r}, stop={stop!r}."
+        )
+    sigmas = tuple(float(v) for v in np.arange(start, stop, step))
+    if not sigmas:
+        raise ValueError(f"{name} range produced no sigma values.")
+    return sigmas
+
+
+def _spatial_depth_from_sigmas(sample_arr, axes, kwargs_in):
+    sigmas = kwargs_in.get("sigmas", ())
+    max_sigma = max(float(s) for s in sigmas) if sigmas else 0.0
+    depth = int(np.ceil(max_sigma * 6.0))
+    ndim = int(getattr(sample_arr, "ndim", 0) or 0)
+    if depth <= 0 or ndim <= 0:
+        return tuple(0 for _ in range(ndim))
+    if isinstance(axes, str) and len(axes) == ndim:
+        return {i: depth for i, axis_name in enumerate(axes) if axis_name in ("Z", "Y", "X")}
+    if ndim <= 2:
+        return tuple(depth for _ in range(ndim))
+    return tuple(0 if i < ndim - 2 else depth for i in range(ndim))
+
+
+def _ensure_numpy_full_image(image):
+    try:
+        import dask.array as da
+
+        if isinstance(image, da.Array):
+            image = image.compute()
+    except Exception:
+        pass
+    try:
+        import cupy as cp
+
+        if isinstance(image, cp.ndarray):
+            return cp.asnumpy(image)
+    except Exception:
+        pass
+    return image
+
 # --- ALREADY IMPLEMENTED --- #
 # - hysteresis threshold      #
 # - butterworth               #
@@ -269,7 +337,7 @@ def filter_inverse(image, max_gain: float = 2.0):
 @register_node(
     label="Frangi",
     category="Filters",
-    description="Frangi vesselness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    description="Frangi vesselness filter (multi-scale). Full-image CPU because default gamma depends on a global Hessian norm.",
     outputs=["image_out"],
     input_types={"image": "image"},
     output_types={"image_out": "image"},
@@ -283,19 +351,27 @@ def filter_inverse(image, max_gain: float = 2.0):
     }
 )
 def frangi(image, sigma_range_low: float = 1.0, sigma_range_high: float = 10.0, sigma_step: int = 2, alpha: float = 0.5, beta: float = 0.5, mode: str = 'reflect'):
-    sigmas = np.arange(sigma_range_low, sigma_range_high, sigma_step)
-    fn = functools.partial(skimage.filters.frangi, sigmas=sigmas, alpha=alpha, beta=beta, mode=mode)
+    sigmas = _sigma_sequence(sigma_range_low, sigma_range_high, sigma_step, name="Frangi sigmas")
+
+    def _cpu_frangi_full_image(image, sigmas, alpha, beta, mode):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.frangi(
+            image,
+            sigmas=sigmas,
+            alpha=alpha,
+            beta=beta,
+            mode=mode,
+        )
+
+    _cpu_frangi_full_image.__name__ = "frangi"
+
     return dispatch(
-        default=fn,
+        default=_cpu_frangi_full_image,
         args=(image,),
-        kwargs={},
+        kwargs={"sigmas": sigmas, "alpha": alpha, "beta": beta, "mode": mode},
         output_dtype_policy="image_float",
         backend="auto",
         gpu_min_nbytes=0,
-        dask_options={
-            "strategy": "pointwise",
-            "numpy_chunks": "spatial_auto",
-        }
     )
 
 # --- GABOR ---
@@ -512,7 +588,7 @@ def unsharp_mask(image, radius: float = 1.0, amount: float = 1.0):
 @register_node(
     label="Hessian (Ridge)",
     category="Filters",
-    description="Hessian-based ridge filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    description="Hessian-based ridge filter (multi-scale). Auto-selects Dask+CUDA, Dask, then CPU.",
     outputs=["image_out"],
     input_types={"image": "image"},
     output_types={"image_out": "image"},
@@ -524,18 +600,24 @@ def unsharp_mask(image, radius: float = 1.0, amount: float = 1.0):
     }
 )
 def hessian(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, mode: str = 'reflect', black_ridges: bool = True):
-    sigmas = range(int(sigmas_min), int(sigmas_max), 2)
-    fn = functools.partial(skimage.filters.hessian, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    sigmas = _sigma_sequence(sigmas_min, sigmas_max, 2.0, name="Hessian sigmas")
     return dispatch(
-        default=fn,
+        default=skimage.filters.hessian,
         args=(image,),
-        kwargs={},
+        kwargs={"sigmas": sigmas, "mode": mode, "black_ridges": black_ridges},
+        cuda_function="cucim.skimage.filters.hessian",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["sigmas", "mode", "black_ridges"],
         output_dtype_policy="image_float",
         backend="auto",
         gpu_min_nbytes=0,
         dask_options={
-            "strategy": "pointwise",
+            "strategy": "neighborhood",
             "numpy_chunks": "spatial_auto",
+            "map_overlap": {
+                "depth": _spatial_depth_from_sigmas,
+                "boundary": "none",
+            },
         }
     )
 
@@ -577,7 +659,7 @@ def laplace(image, ksize: int = 3):
 @register_node(
     label="Meijering (Ridge)",
     category="Filters",
-    description="Meijering neuriteness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    description="Meijering neuriteness filter (multi-scale). Full-image CPU because the algorithm normalizes by global response maxima.",
     outputs=["image_out"],
     input_types={"image": "image"},
     output_types={"image_out": "image"},
@@ -590,19 +672,26 @@ def laplace(image, ksize: int = 3):
     }
 )
 def meijering(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, sigmas_step: int = 1, mode: str = 'reflect', black_ridges: bool = True):
-    sigmas = range(int(sigmas_min), int(sigmas_max), int(sigmas_step))
-    fn = functools.partial(skimage.filters.meijering, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    sigmas = _sigma_sequence(sigmas_min, sigmas_max, sigmas_step, name="Meijering sigmas")
+
+    def _cpu_meijering_full_image(image, sigmas, mode, black_ridges):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.meijering(
+            image,
+            sigmas=sigmas,
+            mode=mode,
+            black_ridges=black_ridges,
+        )
+
+    _cpu_meijering_full_image.__name__ = "meijering"
+
     return dispatch(
-        default=fn,
+        default=_cpu_meijering_full_image,
         args=(image,),
-        kwargs={},
+        kwargs={"sigmas": sigmas, "mode": mode, "black_ridges": black_ridges},
         output_dtype_policy="image_float",
         backend="auto",
         gpu_min_nbytes=0,
-        dask_options={
-            "strategy": "pointwise",
-            "numpy_chunks": "spatial_auto",
-        }
     )
 
 # --- RANK ORDER ---
@@ -642,7 +731,7 @@ def roberts(image):
 @register_node(
     label="Sato (Ridge)",
     category="Filters",
-    description="Sato tubeness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    description="Sato tubeness filter (multi-scale). Auto-selects Dask+CUDA, Dask, then CPU.",
     outputs=["image_out"],
     input_types={"image": "image"},
     output_types={"image_out": "image"},
@@ -654,18 +743,24 @@ def roberts(image):
     }
 )
 def sato(image, sigmas_min: float = 1.0, sigmas_max: float = 10.0, mode: str = 'reflect', black_ridges: bool = True):
-    sigmas = range(int(sigmas_min), int(sigmas_max), 2)
-    fn = functools.partial(skimage.filters.sato, sigmas=sigmas, mode=mode, black_ridges=black_ridges)
+    sigmas = _sigma_sequence(sigmas_min, sigmas_max, 2.0, name="Sato sigmas")
     return dispatch(
-        default=fn,
+        default=skimage.filters.sato,
         args=(image,),
-        kwargs={},
+        kwargs={"sigmas": sigmas, "mode": mode, "black_ridges": black_ridges},
+        cuda_function="cucim.skimage.filters.sato",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["sigmas", "mode", "black_ridges"],
         output_dtype_policy="image_float",
         backend="auto",
         gpu_min_nbytes=0,
         dask_options={
-            "strategy": "pointwise",
+            "strategy": "neighborhood",
             "numpy_chunks": "spatial_auto",
+            "map_overlap": {
+                "depth": _spatial_depth_from_sigmas,
+                "boundary": "none",
+            },
         }
     )
 
@@ -697,24 +792,50 @@ def scharr(image, mode: str = 'reflect'):
         }
     )
 
+# Global threshold nodes intentionally do not declare a Dask block strategy:
+# the scalar threshold must be computed per full spatial image/frame, never per
+# chunk. The postprocess step can still keep the final mask lazy for Dask input.
+
 # --- THRESHOLD OTSU ---
 @register_node(
     label="Threshold Otsu",
     category="Filters",
+    description="Global Otsu threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "nbins": {"min": 2, "max": 1024}
     }
 )
 def threshold_otsu(image, nbins: int = 256):
-    thresh = skimage.filters.threshold_otsu(image, nbins=nbins)
-    return image > thresh
+    def _cpu_threshold_otsu_global(image, nbins):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.threshold_otsu(image, nbins=nbins)
+
+    _cpu_threshold_otsu_global.__name__ = "threshold_otsu"
+    return dispatch(
+        default=_cpu_threshold_otsu_global,
+        args=(image,),
+        kwargs={"nbins": nbins},
+        cuda_function="cucim.skimage.filters.threshold_otsu",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["nbins"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- THRESHOLD LOCAL ---
 @register_node(
     label="Threshold Local",
     category="Filters",
+    description="Adaptive local threshold mask. Auto-selects Dask+CUDA, Dask, then CPU.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "block_size": {"min": 3, "max": 101, "step": 2},
         "method": {"options": ["gaussian", "mean", "median"]},
@@ -723,110 +844,284 @@ def threshold_otsu(image, nbins: int = 256):
     }
 )
 def threshold_local(image, block_size: int = 15, method: str = 'gaussian', offset: float = 0.0, mode: str = 'reflect'):
-    thresh = skimage.filters.threshold_local(image, block_size=block_size, method=method, offset=offset, mode=mode)
-    return image > thresh
+    block_size = _validate_odd_window(block_size, "block_size")
+    return dispatch(
+        default=skimage.filters.threshold_local,
+        args=(image,),
+        kwargs={
+            "block_size": block_size,
+            "method": method,
+            "offset": offset,
+            "mode": mode,
+        },
+        cuda_function="cucim.skimage.filters.threshold_local",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["block_size", "method", "offset", "mode"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "halo_from_param": "block_size",
+            "halo_factor": 0.5,
+            "numpy_chunks": "spatial_auto",
+            # The skimage/cuCIM threshold function handles image borders.
+            # Dask only supplies real neighboring pixels across chunk borders.
+            "map_overlap": {"boundary": "none"},
+        },
+    )
 
 # --- THRESHOLD NIBLACK ---
 @register_node(
     label="Threshold Niblack",
     category="Filters",
+    description="Niblack local threshold mask. Auto-selects Dask+CUDA, Dask, then CPU.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "window_size": {"min": 3, "max": 101, "step": 2},
         "k": {"min": 0.0, "max": 1.0, "step": 0.01}
     }
 )
 def threshold_niblack(image, window_size: int = 15, k: float = 0.2):
-    thresh = skimage.filters.threshold_niblack(image, window_size=window_size, k=k)
-    return image > thresh
+    window_size = _validate_odd_window(window_size, "window_size")
+    return dispatch(
+        default=skimage.filters.threshold_niblack,
+        args=(image,),
+        kwargs={"window_size": window_size, "k": k},
+        cuda_function="cucim.skimage.filters.threshold_niblack",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["window_size", "k"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "halo_from_param": "window_size",
+            "halo_factor": 0.5,
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"boundary": "none"},
+        },
+    )
 
 # --- THRESHOLD SAUVOLA ---
 @register_node(
     label="Threshold Sauvola",
     category="Filters",
+    description="Sauvola local threshold mask. Auto-selects Dask+CUDA, Dask, then CPU.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "window_size": {"min": 3, "max": 101, "step": 2},
         "k": {"min": 0.0, "max": 1.0, "step": 0.01}
     }
 )
 def threshold_sauvola(image, window_size: int = 15, k: float = 0.2):
-    thresh = skimage.filters.threshold_sauvola(image, window_size=window_size, k=k)
-    return image > thresh
+    window_size = _validate_odd_window(window_size, "window_size")
+    return dispatch(
+        default=skimage.filters.threshold_sauvola,
+        args=(image,),
+        kwargs={"window_size": window_size, "k": k},
+        cuda_function="cucim.skimage.filters.threshold_sauvola",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["window_size", "k"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        dask_options={
+            "strategy": "neighborhood",
+            "halo_from_param": "window_size",
+            "halo_factor": 0.5,
+            "numpy_chunks": "spatial_auto",
+            "map_overlap": {"boundary": "none"},
+        },
+    )
 
 # --- THRESHOLD LI ---
 @register_node(
     label="Threshold Li",
     category="Filters",
+    description="Global Li threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={}
 )
 def threshold_li(image):
-    thresh = skimage.filters.threshold_li(image)
-    return image > thresh
+    def _cpu_threshold_li_global(image):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.threshold_li(image)
+
+    _cpu_threshold_li_global.__name__ = "threshold_li"
+    return dispatch(
+        default=_cpu_threshold_li_global,
+        args=(image,),
+        kwargs={},
+        cuda_function="cucim.skimage.filters.threshold_li",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=[],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- THRESHOLD MEAN ---
 @register_node(
     label="Threshold Mean",
     category="Filters",
+    description="Global mean threshold mask. Computes one scalar threshold per spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={}
 )
 def threshold_mean(image):
-    thresh = skimage.filters.threshold_mean(image)
-    return image > thresh
+    return dispatch(
+        default=skimage.filters.threshold_mean,
+        args=(image,),
+        kwargs={},
+        cuda_func=_cuda_threshold_mean,
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- THRESHOLD MINIMUM ---
 @register_node(
     label="Threshold Minimum",
     category="Filters",
+    description="Global minimum histogram threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "nbins": {"min": 2, "max": 1024}
     }
 )
 def threshold_minimum(image, nbins: int = 256):
-    thresh = skimage.filters.threshold_minimum(image, nbins=nbins)
-    return image > thresh
+    def _cpu_threshold_minimum_global(image, nbins):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.threshold_minimum(image, nbins=nbins)
+
+    _cpu_threshold_minimum_global.__name__ = "threshold_minimum"
+    return dispatch(
+        default=_cpu_threshold_minimum_global,
+        args=(image,),
+        kwargs={"nbins": nbins},
+        cuda_function="cucim.skimage.filters.threshold_minimum",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["nbins"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- THRESHOLD TRIANGLE ---
 @register_node(
     label="Threshold Triangle",
     category="Filters",
+    description="Global triangle histogram threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "nbins": {"min": 2, "max": 1024}
     }
 )
 def threshold_triangle(image, nbins: int = 256):
-    thresh = skimage.filters.threshold_triangle(image, nbins=nbins)
-    return image > thresh
+    def _cpu_threshold_triangle_global(image, nbins):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.threshold_triangle(image, nbins=nbins)
+
+    _cpu_threshold_triangle_global.__name__ = "threshold_triangle"
+    return dispatch(
+        default=_cpu_threshold_triangle_global,
+        args=(image,),
+        kwargs={"nbins": nbins},
+        cuda_function="cucim.skimage.filters.threshold_triangle",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["nbins"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- THRESHOLD YEN ---
 @register_node(
     label="Threshold Yen",
     category="Filters",
+    description="Global Yen threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "nbins": {"min": 2, "max": 1024}
     }
 )
 def threshold_yen(image, nbins: int = 256):
-    thresh = skimage.filters.threshold_yen(image, nbins=nbins)
-    return image > thresh
+    def _cpu_threshold_yen_global(image, nbins):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.threshold_yen(image, nbins=nbins)
+
+    _cpu_threshold_yen_global.__name__ = "threshold_yen"
+    return dispatch(
+        default=_cpu_threshold_yen_global,
+        args=(image,),
+        kwargs={"nbins": nbins},
+        cuda_function="cucim.skimage.filters.threshold_yen",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["nbins"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- THRESHOLD ISODATA ---
 @register_node(
     label="Threshold Isodata",
     category="Filters",
+    description="Global Isodata threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     outputs=["mask_out"],
+    input_types={"image": "image"},
+    output_types={"mask_out": "image"},
     params_config={
         "nbins": {"min": 2, "max": 1024}
     }
 )
 def threshold_isodata(image, nbins: int = 256):
-    thresh = skimage.filters.threshold_isodata(image, nbins=nbins)
-    return image > thresh
+    def _cpu_threshold_isodata_global(image, nbins):
+        image = _ensure_numpy_full_image(image)
+        return skimage.filters.threshold_isodata(image, nbins=nbins)
+
+    _cpu_threshold_isodata_global.__name__ = "threshold_isodata"
+    return dispatch(
+        default=_cpu_threshold_isodata_global,
+        args=(image,),
+        kwargs={"nbins": nbins},
+        cuda_function="cucim.skimage.filters.threshold_isodata",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=["nbins"],
+        postprocess=_threshold_to_mask,
+        output_dtype_policy="bool",
+        backend="auto",
+        gpu_min_nbytes=0,
+        pyramid_strategy="per_level",
+    )
 
 # --- WIENER ---
 @register_node(

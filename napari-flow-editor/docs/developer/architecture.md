@@ -10,7 +10,7 @@ Describe core components and how they interact.
 |---|---|---|
 | Plugin entry/UI | `src/napari_flow_editor/napari_plugin_v2.py` | Main widget, graph scene/view, node/edge graphics, toolbar/actions, napari integration hooks |
 | Execution engine | `src/napari_flow_editor/execution_engine.py` | Runtime traversal of exec graph, node execution, cache signatures, loop/batch behavior, interactive synchronization |
-| Node decorators/dispatch | `src/napari_flow_editor/flow_nodes/decorator.py` | `@register_node`, `@smart_compute`, backend dispatch (NumPy/Dask/CUDA path abstraction), socket metadata normalization |
+| Node decorators/dispatch | `src/napari_flow_editor/flow_nodes/decorator.py` | `@register_node`, `dispatch()`, backend dispatch — auto priority: Dask+CUDA → Dask → CUDA → CPU, socket metadata normalization |
 | Node implementations | `src/napari_flow_editor/flow_nodes/*.py` | Domain operations exposed as visual nodes |
 | Library generator | `src/napari_flow_editor/generate_library.py` | Reflection-based extraction of node metadata into `node_library.json` |
 | Script export | `src/napari_flow_editor/script_generator.py` | Converts visual pipelines to Python script stubs |
@@ -62,3 +62,4 @@ FlowEditor (QWidget)
 3. **Reflection-generated library** avoids manual UI registration drift.
 4. **Threaded worker model** keeps UI responsive during heavy computation.
 5. **Metadata-aware envelopes** preserve viewer semantics (display/axes context) through pipelines.
+6. **Automatic backend selection** — `dispatch()` with `backend="auto"` selects from Dask+CUDA → Dask → CUDA → CPU. Nodes declare GPU paths via `cuda_function` (lazy dotted string, resolved inside dispatcher) or `cuda_func` (module-level callable, only for custom GPU logic with no library equivalent). The dispatcher handles availability checks and graceful fallback.

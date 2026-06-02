@@ -12,11 +12,12 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+if "--gpu" not in sys.argv or sys.argv[sys.argv.index("--gpu") + 1] == "0":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 warnings.filterwarnings("ignore")
 
-def refine_model(img_path, lbl_path, base_model_path, model_name, output_dir, epochs, learning_rate):
+def refine_model(img_path, lbl_path, base_model_path, model_name, output_dir, epochs, learning_rate, use_gpu=False):
     print(f"REFINE WORKER: Starting Job (PID: {os.getpid()})")
     
     # --- 1. LOAD DATA (Identical to Train Worker) ---
@@ -106,8 +107,8 @@ def refine_model(img_path, lbl_path, base_model_path, model_name, output_dir, ep
     
     # IMPORTANT: Update Learning Rate in the config before creating new model
     config.train_learning_rate = learning_rate
-    # Update epochs in config (though .train() argument usually overrides this, it's good practice)
-    config.train_epochs = epochs 
+    config.train_epochs = epochs
+    config.use_gpu = use_gpu
 
     print(f"REFINE WORKER: Creating new model '{model_name}' with updated config...")
     new_model = StarDist2D(config, name=model_name, basedir=output_dir)
@@ -169,6 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.0001)
-    
+    parser.add_argument("--gpu", type=int, default=0)
+
     args = parser.parse_args()
-    refine_model(args.img, args.lbl, args.base_model, args.name, args.outdir, args.epochs, args.lr)
+    refine_model(args.img, args.lbl, args.base_model, args.name, args.outdir, args.epochs, args.lr, bool(args.gpu))

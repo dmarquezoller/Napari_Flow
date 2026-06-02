@@ -1,0 +1,271 @@
+{
+  "schema_version": "0.1",
+  "nodes": [
+    {
+      "id": "9cb5debb-c4bd-4ec9-a64a-d702afeffcbf",
+      "type": "save_image_node",
+      "label": "Save Image",
+      "position": {
+        "x": -500.0291552783943,
+        "y": 56.83762099821084
+      },
+      "parameters": {
+        "folder": "/home/david",
+        "base_name": "segmentation_output",
+        "format": ".tif"
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {
+        "image": "d5491e0f-1b9d-4429-8266-4625506de274.mask_layer"
+      },
+      "exec_connections": [
+        "d5491e0f-1b9d-4429-8266-4625506de274.exec_out"
+      ]
+    },
+    {
+      "id": "3e202779-a6c3-4f09-8e0d-bf4db025a670",
+      "type": "export_ultrack_tracks",
+      "label": "Export Ultrack Tracks 1",
+      "position": {
+        "x": -77.1397914090285,
+        "y": 57.045613752644954
+      },
+      "parameters": {
+        "folder": "/home/david",
+        "filename": "tracks",
+        "format": "csv"
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {
+        "tracks": "e4e49016-80a9-4a5c-96c2-9fa6bda031ae.tracks_layer"
+      },
+      "exec_connections": [
+        "e4e49016-80a9-4a5c-96c2-9fa6bda031ae.exec_out"
+      ]
+    },
+    {
+      "id": "26633e5a-d80c-4073-baac-159c43dcbd4c",
+      "type": "make_video",
+      "label": "Make Video",
+      "position": {
+        "x": 350.28975233727357,
+        "y": -82.28211514983136
+      },
+      "parameters": {
+        "instructions": [
+          {
+            "axis": "idx:0 (0, n=3)",
+            "direction": null,
+            "end": 80.0,
+            "op": "sweep",
+            "rot_axis": null,
+            "space": null,
+            "start": 0.0,
+            "step": 1.0,
+            "view": "2d"
+          }
+        ],
+        "fps": 20,
+        "format": ".gif",
+        "folder": "/home/david",
+        "filename": "napari_video",
+        "low_memory_mode": true,
+        "cleanup_every": 5
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {},
+      "exec_connections": [
+        "1a14a4e2-e473-4055-b5bf-b6d8b0dcf307.exec_out"
+      ]
+    },
+    {
+      "id": "1a14a4e2-e473-4055-b5bf-b6d8b0dcf307",
+      "type": "export_ultrack_tracks",
+      "label": "Export Ultrack Tracks",
+      "position": {
+        "x": 123.02125842587469,
+        "y": -122.58736133494739
+      },
+      "parameters": {
+        "folder": "/home/david",
+        "filename": "tracks",
+        "format": "csv"
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {
+        "tracks": "e4e49016-80a9-4a5c-96c2-9fa6bda031ae.tracks_layer"
+      },
+      "exec_connections": [
+        "3e202779-a6c3-4f09-8e0d-bf4db025a670.exec_out"
+      ]
+    },
+    {
+      "id": "e4e49016-80a9-4a5c-96c2-9fa6bda031ae",
+      "type": "run_ultrack_node",
+      "label": "Ultrack Tracking",
+      "position": {
+        "x": -301.83327905802537,
+        "y": -137.43035994062566
+      },
+      "parameters": {
+        "config_path": "",
+        "time_limit": 300,
+        "solution_gap": 0.0,
+        "window_size": 0
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {
+        "labels": "d5491e0f-1b9d-4429-8266-4625506de274.mask_layer"
+      },
+      "exec_connections": [
+        "9cb5debb-c4bd-4ec9-a64a-d702afeffcbf.exec_out"
+      ]
+    },
+    {
+      "id": "d5491e0f-1b9d-4429-8266-4625506de274",
+      "type": "run_stardist",
+      "label": "StarDist Segmentation",
+      "position": {
+        "x": -721.0090695474461,
+        "y": -179.6688806970241
+      },
+      "parameters": {
+        "model_type": "2D_versatile_fluo",
+        "custom_path": "",
+        "scale": 1.0,
+        "prob_thresh": 0.5,
+        "nms_thresh": 0.3,
+        "norm_pmin": 1.0,
+        "norm_pmax": 99.8,
+        "use_gpu": false
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {
+        "image": "15269dde-0c46-47a2-94d4-6e8cd873cde0.data_out"
+      },
+      "exec_connections": [
+        "2adff09a-10fc-4108-b7b2-e0665f6ab455.exec_out"
+      ]
+    },
+    {
+      "id": "15269dde-0c46-47a2-94d4-6e8cd873cde0",
+      "type": "get_layer",
+      "label": "Get Layer",
+      "position": {
+        "x": -947.1722017425603,
+        "y": -61.757179177817676
+      },
+      "parameters": {
+        "layer_name": "C1-A3_F1.ome.tiff-A3_F1.ome.tiff-_1-1-1",
+        "axis_map": [
+          {
+            "d0": "T",
+            "d1": "Y",
+            "d2": "X",
+            "d3": "C",
+            "d4": "-"
+          }
+        ],
+        "rechunk_enabled": false,
+        "target_chunks": "auto"
+      },
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {},
+      "exec_connections": []
+    },
+    {
+      "id": "2adff09a-10fc-4108-b7b2-e0665f6ab455",
+      "type": "begin",
+      "label": "Begin",
+      "position": {
+        "x": -952.1390898122625,
+        "y": -220.66888069702406
+      },
+      "parameters": {},
+      "checkpoint_config": {
+        "enabled": false,
+        "folder": "",
+        "name": "",
+        "pyramid_levels": 1,
+        "pyramid_downsample": "xy",
+        "chunks": "auto",
+        "overwrite": true,
+        "continue_from_checkpoint": true
+      },
+      "dynamic_param_bindings": {},
+      "input_connections": {},
+      "exec_connections": []
+    }
+  ],
+  "macro_groups": []
+}

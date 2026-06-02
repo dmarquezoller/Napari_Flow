@@ -446,6 +446,7 @@ def dispatch(
     kwargs=None,
     pyramid_strategy: str = "per_level",  # "per_level" | "from_level0"
     layout_policy: str = "spatial_only",  # "spatial_only" | "full_nd"
+    spatial_core_axes: Optional[str] = None,  # None -> "ZYX"; e.g. "YX" treats Z as independent
     time_policy: str = "independent",      # "independent" | "joint" | "reject"
     channel_policy: str = "independent",   # "independent" | "joint" | "reject"
     dask_strategy: Optional[str] = None,   # None | "pointwise" | "neighborhood"
@@ -461,6 +462,7 @@ def dispatch(
     dask_target_chunk_mb: float = 64.0,
     dask_options: Optional[dict] = None,
     output_type: str = "image",   # "image" | "points"
+    postprocess: Optional[Callable] = None,
 ):
     """
     Choose backend, handle pyramids, and apply layout-aware execution policies.
@@ -482,6 +484,7 @@ def dispatch(
           "trim": True,
           "allow_rechunk": True,
         },
+        "rechunk": "spatial_auto",  # optional: lazily rechunk existing Dask input first
       }
 
     ``output_dtype_policy`` lets nodes declare dtype intent once for all
@@ -489,10 +492,20 @@ def dispatch(
     CPU, Dask, CUDA, and Dask+CUDA unless an explicit legacy dtype override is
     provided.
 
+    ``postprocess`` is an optional callable applied to a backend result while
+    the current block/sample is still available. This is useful when a
+    maintained backend function returns an intermediate image, but the node
+    contract returns a derived image (for example ``image > threshold``).
+
     Layout defaults:
       - time dims (T): independent (no filtering across time)
       - channel dims (C): independent (no channel mixing)
       - volumetric data (ZYX): processed as true 3D
+
+    ``spatial_core_axes`` can narrow which spatial axes are processed together.
+    For example, ``spatial_core_axes="YX"`` processes each YX plane
+    independently, treating Z like T/C for layout splitting. The default keeps
+    the existing Gaussian-style behavior: Z, Y, and X are a true spatial core.
     """
     import numpy as np
     import dask.array as da
@@ -534,17 +547,44 @@ def dispatch(
     dask_halo_from_param = _dask_opt("halo_from_param", dask_halo_from_param)
     dask_halo_factor = _dask_opt("halo_factor", dask_halo_factor)
     dask_boundary_from_param = _dask_opt("boundary_from_param", dask_boundary_from_param)
+    spatial_core_axes = _dask_opt("spatial_core_axes", spatial_core_axes)
     independent_axes_param = _dask_opt("independent_axes_param", independent_axes_param)
     dask_output_dtype = _dask_opt("output_dtype", dask_output_dtype)
     output_dtype_policy = _dask_opt("output_dtype_policy", output_dtype_policy)
     numpy_to_dask_chunks = _dask_opt("numpy_chunks", numpy_to_dask_chunks)
     dask_target_chunk_mb = _dask_opt("target_chunk_mb", dask_target_chunk_mb)
     output_type = str(_dask_opt("output_type", output_type)).strip().lower()
+    dask_rechunk = _dask_opt("rechunk", None)
     output_coord_cols = _dask_opt("output_coord_cols", None)  # e.g. slice(None,-1) for blob_log
     point_size_col = _dask_opt("point_size_col", None)
     point_size_mode = str(_dask_opt("point_size_mode", "raw")).strip().lower()
     point_size_scale = _dask_opt("point_size_scale", 1.0)
     point_kwargs = dict(_dask_opt("point_kwargs", {}) or {})
+
+    def _normalize_spatial_core_axes(value):
+        if value is None:
+            return None
+        text = str(value).strip().upper()
+        if not text:
+            return None
+        allowed = {"Z", "Y", "X"}
+        seen = []
+        invalid = []
+        for char in text:
+            if char in allowed:
+                if char not in seen:
+                    seen.append(char)
+            else:
+                invalid.append(char)
+        if invalid or not seen:
+            raise ValueError(
+                "spatial_core_axes must contain only Z, Y, and/or X, "
+                f"got {value!r}."
+            )
+        return "".join(seen)
+
+    spatial_core_axes_norm = _normalize_spatial_core_axes(spatial_core_axes)
+    core_spatial_axis_names = set(spatial_core_axes_norm or "ZYX")
 
     try:
         dask_halo_factor = float(dask_halo_factor or 0.0)
@@ -561,6 +601,10 @@ def dispatch(
 
     if cuda_func is not None and cuda_function is not None:
         raise ValueError("Use either cuda_func or cuda_function, not both.")
+    if postprocess is not None and not callable(postprocess):
+        raise TypeError(
+            f"postprocess must be callable when provided, got {type(postprocess)!r}"
+        )
 
     resolved_cuda_target = None
     cuda_function_path = None
@@ -704,7 +748,9 @@ def dispatch(
         fixed_element_factor = 1
         spatial_axes = []
         for axis_i, (axis_name, axis_size) in enumerate(zip(axes_norm, shape)):
-            if axis_name in ("T", "C"):
+            if axis_name in ("T", "C") or (
+                axis_name in ("Z", "Y", "X") and axis_name not in core_spatial_axis_names
+            ):
                 chunks[axis_i] = 1
                 fixed_element_factor *= 1
             elif axis_name == "Z":
@@ -731,14 +777,63 @@ def dispatch(
 
         return tuple(int(c if c is not None else s) for c, s in zip(chunks, shape))
 
+    def _full_core_chunks(sample, axes=None):
+        shape = tuple(int(s) for s in getattr(sample, "shape", ()) or ())
+        ndim = len(shape)
+        if ndim == 0:
+            return "auto"
+
+        axes_norm = str(axes or "").upper()
+        if len(axes_norm) != ndim:
+            if ndim == 2:
+                axes_norm = "YX"
+            elif ndim == 3:
+                axes_norm = "ZYX"
+            elif ndim == 4:
+                axes_norm = "TZYX"
+            elif ndim == 5:
+                axes_norm = "CTZYX"
+            else:
+                axes_norm = ("N" * max(0, ndim - 2)) + "YX"
+
+        chunks = []
+        for axis_name, axis_size in zip(axes_norm, shape):
+            if axis_name in core_spatial_axis_names:
+                chunks.append(int(axis_size))
+            else:
+                chunks.append(1)
+        return tuple(chunks)
+
     def _resolve_numpy_to_dask_chunks(sample, axes=None):
         raw = numpy_to_dask_chunks
         if isinstance(raw, str):
             value = raw.strip().lower()
             if value in ("spatial_auto", "spatial-auto", "spatial"):
                 return _spatial_auto_chunks(sample, axes=axes)
+            if value in ("full_core", "core_full", "spatial_full", "full-spatial"):
+                return _full_core_chunks(sample, axes=axes)
             if value == "auto":
                 return "auto"
+        if isinstance(raw, (tuple, list)):
+            return _fit_chunk_tuple_to_sample(raw, sample, axes=axes)
+        return raw
+
+    def _resolve_dask_rechunk(sample, axes=None):
+        raw = dask_rechunk
+        if raw is None or raw is False:
+            return None
+        if raw is True:
+            raw = numpy_to_dask_chunks
+        if isinstance(raw, str):
+            value = raw.strip().lower()
+            if value in ("spatial_auto", "spatial-auto", "spatial"):
+                return _spatial_auto_chunks(sample, axes=axes)
+            if value in ("full_core", "core_full", "spatial_full", "full-spatial"):
+                return _full_core_chunks(sample, axes=axes)
+            if value in ("auto", ""):
+                return "auto"
+            if value in ("none", "false"):
+                return None
         if isinstance(raw, (tuple, list)):
             return _fit_chunk_tuple_to_sample(raw, sample, axes=axes)
         return raw
@@ -1049,6 +1144,8 @@ def dispatch(
                 return "dask", "auto backend selected dask"
             return "dask", "auto backend selected dask"
 
+        if cuda_ok and gpu_func is not None and (sample_is_numpy or sample_is_cupy):
+            return "cuda", "auto backend selected cuda"
         if gpu_func is not None and (sample_is_numpy or sample_is_dask or sample_is_cupy):
             return "cpu", f"auto fallback cpu ({cuda_reason})"
         return "cpu", "auto backend selected cpu"
@@ -1175,6 +1272,11 @@ def dispatch(
 
         return target(*cuda_args_resolved, **cuda_kwargs_resolved)
 
+    def _apply_postprocess(out, args_in, kwargs_in):
+        if postprocess is None:
+            return out
+        return postprocess(out, *args_in, **kwargs_in)
+
     def _small_probe_shape(shape):
         dims = []
         for dim in tuple(shape):
@@ -1209,7 +1311,8 @@ def dispatch(
         try:
             probe_args = [_probe_value_for_cuda(v) for v in args_in]
             probe_kwargs = {k: _probe_value_for_cuda(v) for k, v in kwargs_in.items()}
-            _execute_cuda(probe_args, probe_kwargs)
+            out = _execute_cuda(probe_args, probe_kwargs)
+            _apply_postprocess(out, probe_args, probe_kwargs)
             return True, "CUDA preflight passed"
         except (TypeError, ValueError, NotImplementedError) as exc:
             return False, f"CUDA cannot preserve current user parameters ({exc})"
@@ -1464,6 +1567,10 @@ def dispatch(
             meta = np.empty(shape, dtype=np.dtype(dtype))
             return cp.asarray(meta) if gpu else meta
 
+        rechunk_chunks = _resolve_dask_rechunk(sample_exec, axes=axes)
+        if rechunk_chunks is not None:
+            sample_exec = sample_exec.rechunk(rechunk_chunks)
+
         if use_gpu and not _dask_array_has_cupy_chunks(sample_exec, cp):
             sample_exec = sample_exec.map_blocks(
                 cp.asarray,
@@ -1484,6 +1591,7 @@ def dispatch(
             def block_apply(block):
                 a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
                 out = compute_func(*a2, **k2)
+                out = _apply_postprocess(out, a2, k2)
                 return finalize_block_output(out)
 
             out_dtype = block_output_dtype if block_output_dtype is not None else sample_exec.dtype
@@ -1498,6 +1606,7 @@ def dispatch(
         def overlap_apply(block):
             a2, k2 = _replace_sample(args_in, kwargs_in, sample_loc, block)
             out = compute_func(*a2, **k2)
+            out = _apply_postprocess(out, a2, k2)
             return finalize_block_output(out)
 
         depth_kwargs = kwargs_in if depth_kwargs_in is None else depth_kwargs_in
@@ -1632,7 +1741,9 @@ def dispatch(
 
         if axes_norm:
             core_axis_indices = [
-                i for i, axis_name in enumerate(axes_norm) if axis_name in ("Z", "Y", "X")
+                i
+                for i, axis_name in enumerate(axes_norm)
+                if axis_name in core_spatial_axis_names
             ]
             if time_policy == "joint":
                 core_axis_indices.extend(
@@ -1880,6 +1991,7 @@ def dispatch(
             def run_now(a_now, k_now, *, depth_kwargs=None):
                 if backend_mode == "cuda":
                     out = _execute_cuda(a_now, k_now)
+                    out = _apply_postprocess(out, a_now, k_now)
                     out = _cast_array_output(
                         out,
                         _eager_output_dtype(sample_exec, use_gpu=True),
@@ -1887,6 +1999,7 @@ def dispatch(
                     )
                     return _convert_cuda_output_to_numpy(out, cp)
                 out = func(*a_now, **k_now)
+                out = _apply_postprocess(out, a_now, k_now)
                 if backend_mode == "dask":
                     out = _cast_array_output(
                         out,
@@ -1910,7 +2023,7 @@ def dispatch(
         ):
             return run_now(args_exec, kwargs_exec)
 
-        spatial = [i for i, a in enumerate(axes) if a in ("Z", "Y", "X")]
+        spatial = [i for i, a in enumerate(axes) if a in core_spatial_axis_names]
         if not spatial:
             return run_now(args_exec, kwargs_exec)
 

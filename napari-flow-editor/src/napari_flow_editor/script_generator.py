@@ -11,8 +11,8 @@ FUNCTION_MAP = {
     "sobel": "skimage.filters.sobel",
     
     # Morphology
-    "binary_closing": "skimage.morphology.binary_closing",
-    "binary_opening": "skimage.morphology.binary_opening",
+    "binary_closing": "skimage.morphology.closing",
+    "binary_opening": "skimage.morphology.opening",
     "dilation": "skimage.morphology.dilation",
     "erosion": "skimage.morphology.erosion",
     "remove_small_objects": "skimage.morphology.remove_small_objects",

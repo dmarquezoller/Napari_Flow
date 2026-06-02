@@ -734,10 +734,12 @@ class ExecutionWorker(QObject):
         return edge.end_socket.node, target_socket.name
 
     def _is_data_source_node(self, node):
-        """Pure data provider: no required data inputs and no exec input."""
+        """Pure data provider: no data inputs, no exec input, no exec output.
+        Begin nodes have exec outputs and are explicitly excluded."""
         return (
             len(getattr(node, "inputs", [])) == 0
             and len(getattr(node, "logic_inputs", [])) == 0
+            and len(getattr(node, "logic_outputs", [])) == 0
         )
 
     def _execute_exec_path(self, start_node, library_def, force_recompute=False):
@@ -1191,6 +1193,14 @@ class ExecutionWorker(QObject):
                 else:
                     if begin_out is not None:
                         self.exec_transition_signal.emit(begin_node.uid, begin_out)
+                    # Pre-run data source nodes (e.g. Get Layer) so their
+                    # last_signature is set before downstream signatures are
+                    # computed.  Without this, the first run stores a "dirty"
+                    # upstream sig; the second run sees the real sig and misses
+                    # the cache even though nothing changed.
+                    for n in nodes:
+                        if self._is_data_source_node(n):
+                            self._execute_single_node(n, NODE_LIBRARY, force_recompute=False)
                     self._execute_exec_path(first_exec, NODE_LIBRARY)
 
             self.log_signal.emit("--- Execution Finished ---")

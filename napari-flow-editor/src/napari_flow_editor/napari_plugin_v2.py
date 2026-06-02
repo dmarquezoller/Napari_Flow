@@ -42,6 +42,8 @@ from .widgets.plot_widgets import (
 
 NODE_LIBRARY = {}
 
+_SAVED_PIPELINES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_pipelines")
+
 
 DEFAULT_CHECKPOINT_CONFIG = {
     "enabled": False,
@@ -1383,6 +1385,7 @@ class FlowEditor(QWidget):
 
         # --- AUTO GENERATE JSON LIBRARY ---
         generate_library.generate()
+        os.makedirs(_SAVED_PIPELINES_DIR, exist_ok=True)
 
         global NODE_LIBRARY
         json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node_library.json")
@@ -1468,6 +1471,7 @@ class FlowEditor(QWidget):
             }
             QPushButton:hover { background-color: #5d7a99; }
             QPushButton:pressed { background-color: #405469; }
+            QPushButton:disabled { background-color: #3a4a58; color: #7a8a99; }
             QPushButton::menu-indicator {
                 subcontrol-origin: padding;
                 subcontrol-position: bottom right;
@@ -1496,7 +1500,9 @@ class FlowEditor(QWidget):
         self.btn_file_menu = QPushButton("File")
         self.file_menu = QMenu(self)
         self.action_save_pipeline = self.file_menu.addAction("Save Pipeline")
-        self.action_load_pipeline = self.file_menu.addAction("Load Pipeline")
+        self.menu_load_pipeline = QMenu("Load Pipeline", self)
+        self.file_menu.addMenu(self.menu_load_pipeline)
+        self.menu_load_pipeline.aboutToShow.connect(self._populate_load_pipeline_menu)
         self.file_menu.addSeparator()
         self.action_save_ome_zarr = self.file_menu.addAction("Save as OME-Zarr...")
         self.action_save_zarr = self.file_menu.addAction("Save to Zarr")
@@ -1505,7 +1511,6 @@ class FlowEditor(QWidget):
         self.action_export_script = self.file_menu.addAction("Export Script")
 
         self.action_save_pipeline.triggered.connect(self.save_pipeline)
-        self.action_load_pipeline.triggered.connect(self.load_pipeline)
         self.action_save_ome_zarr.triggered.connect(self.save_to_ome_zarr)
         self.action_save_zarr.triggered.connect(self.save_to_zarr)
         self.action_import_nodes.triggered.connect(self.import_custom_module)
@@ -1516,7 +1521,7 @@ class FlowEditor(QWidget):
 
         # Keep old attributes as aliases to preserve internal references.
         self.btn_save = self.action_save_pipeline
-        self.btn_load = self.action_load_pipeline
+        self.btn_load = self.menu_load_pipeline
         self.btn_save_ome_zarr = self.action_save_ome_zarr
         self.btn_save_zarr = self.action_save_zarr
         self.btn_import = self.action_import_nodes
@@ -2924,7 +2929,11 @@ class FlowEditor(QWidget):
                 if conf["type"] == "float":
                     widget = QDoubleSpinBox()
                     widget.setRange(conf.get("min", -9999.0), conf.get("max", 9999.0))
-                    widget.setSingleStep(conf.get("step", 0.1))
+                    step = conf.get("step", 0.1)
+                    widget.setSingleStep(step)
+                    step_str = str(step)
+                    decimals = max(2, len(step_str.split(".")[-1].rstrip("0")) if "." in step_str else 0)
+                    widget.setDecimals(decimals)
                     widget.setValue(float(current_val))
                     # Avoid firing graph-invalidations on every keystroke.
                     widget.setKeyboardTracking(False)
@@ -4767,6 +4776,32 @@ class FlowEditor(QWidget):
             return
         self._load_pipeline_from_file(filename, from_autosave=False, mark_clean=True)
 
+    def _populate_load_pipeline_menu(self):
+        self.menu_load_pipeline.clear()
+
+        pipelines = []
+        if os.path.isdir(_SAVED_PIPELINES_DIR):
+            pipelines = sorted(
+                f for f in os.listdir(_SAVED_PIPELINES_DIR)
+                if f.endswith(".json")
+            )
+
+        if pipelines:
+            for fname in pipelines:
+                display = fname[:-5]
+                full_path = os.path.join(_SAVED_PIPELINES_DIR, fname)
+                act = self.menu_load_pipeline.addAction(display)
+                act.triggered.connect(
+                    lambda checked=False, p=full_path:
+                        self._load_pipeline_from_file(p, from_autosave=False, mark_clean=True)
+                )
+        else:
+            placeholder = self.menu_load_pipeline.addAction("No saved pipelines")
+            placeholder.setEnabled(False)
+
+        self.menu_load_pipeline.addSeparator()
+        import_act = self.menu_load_pipeline.addAction("Import Pipeline…")
+        import_act.triggered.connect(self.load_pipeline)
 
     # --- Add Node Method ---
     # 1. The UI Logic (Dropdown)
@@ -5839,7 +5874,8 @@ class FlowEditor(QWidget):
 
         # --- C. NON-VISUAL FILTER ---
         import pandas as pd
-        if isinstance(display_data, (pd.DataFrame, dict, str)):
+        is_tracks_df = isinstance(display_data, pd.DataFrame) and display_meta.get("layer_type") == "tracks"
+        if isinstance(display_data, (pd.DataFrame, dict, str)) and not is_tracks_df:
             return
 
         # --- D. DISPLAY HELPER ---
@@ -5894,10 +5930,12 @@ class FlowEditor(QWidget):
             # 2. Filter Metadata
             valid_napari_args = {
                 "name", "opacity", "blending", "visible", "multiscale",
-                "colormap", "contrast_limits", "gamma", "rgb",
+                "colormap", "contrast_limits", "gamma",
                 "interpolation2d", "interpolation3d",
                 "scale", "translate", "rotate", "shear", "affine",
             }
+            if layer_type in ("image", None):
+                valid_napari_args.add("rgb")
             point_napari_args = {
                 "size", "symbol", "face_color", "edge_color", "border_color",
                 "edge_width", "border_width", "edge_width_is_relative",
@@ -5906,6 +5944,8 @@ class FlowEditor(QWidget):
             }
             if layer_type == "points":
                 valid_napari_args |= point_napari_args
+            if layer_type == "tracks":
+                valid_napari_args |= {"graph", "tail_width", "tail_length", "head_length", "color_by"}
             napari_kwargs = {"name": layer_name}
             custom_metadata = {}
 
@@ -5984,7 +6024,12 @@ class FlowEditor(QWidget):
                       "data_type=", type(layer_data), "multiscale=", napari_kwargs.get("multiscale"))
 
                 if layer_type == "labels":
-                    self.viewer.add_labels(layer_data, **napari_kwargs)
+                    labels_allow = {
+                        "name", "metadata", "opacity", "blending", "visible",
+                        "multiscale", "scale", "translate", "rotate", "shear", "affine",
+                    }
+                    labels_kwargs = {k: v for k, v in napari_kwargs.items() if k in labels_allow}
+                    self.viewer.add_labels(layer_data, **labels_kwargs)
                 elif layer_type == "points":
                     point_aliases = {
                         "edge_color": "border_color",
@@ -6032,6 +6077,24 @@ class FlowEditor(QWidget):
                             )
                             layer_data = np.concatenate([layer_data, pad], axis=1)
                     self.viewer.add_points(layer_data, **points_kwargs)
+                elif layer_type == "tracks":
+                    import pandas as pd
+                    if isinstance(layer_data, pd.DataFrame):
+                        pos_cols = ['track_id', 't'] + (['z'] if 'z' in layer_data.columns else []) + ['y', 'x']
+                        pos_cols = [c for c in pos_cols if c in layer_data.columns]
+                        layer_data = layer_data[pos_cols].to_numpy()
+                    tracks_kwargs = {k: v for k, v in napari_kwargs.items()
+                                     if k in {"name", "metadata", "opacity", "blending",
+                                              "visible", "scale", "translate", "graph",
+                                              "tail_width", "tail_length", "head_length",
+                                              "colormap", "color_by"}}
+                    try:
+                        import inspect
+                        accepted = set(inspect.signature(self.viewer.add_tracks).parameters)
+                        tracks_kwargs = {k: v for k, v in tracks_kwargs.items() if k in accepted}
+                    except Exception:
+                        pass
+                    self.viewer.add_tracks(layer_data, **tracks_kwargs)
                 else:
                     self.viewer.add_image(layer_data, **napari_kwargs)
 
@@ -6210,6 +6273,7 @@ class FlowEditor(QWidget):
         self.btn_add.setEnabled(enabled)
         self.btn_add_control.setEnabled(enabled)
         self.btn_remove.setEnabled(enabled)
+        self.btn_file_menu.setEnabled(enabled)
         self.btn_load.setEnabled(enabled)
         self.btn_save.setEnabled(enabled)
         if hasattr(self, "btn_save_ome_zarr"):
@@ -6217,6 +6281,7 @@ class FlowEditor(QWidget):
         if hasattr(self, "btn_save_zarr"):
             self.btn_save_zarr.setEnabled(enabled)
         self.btn_import.setEnabled(enabled)
+        self.btn_export.setEnabled(enabled)
         self.btn_collapse_macro.setEnabled(enabled)
         if self.btn_expand_macro is not None:
             self.btn_expand_macro.setEnabled(enabled)

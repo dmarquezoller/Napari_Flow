@@ -11,11 +11,12 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+if "--gpu" not in sys.argv or sys.argv[sys.argv.index("--gpu") + 1] == "0":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 warnings.filterwarnings("ignore")
 
-def train_model(img_path, lbl_path, model_name, output_dir, epochs, patch_size):
+def train_model(img_path, lbl_path, model_name, output_dir, epochs, patch_size, use_gpu=False):
     print(f"TRAINER: Starting Training Job (PID: {os.getpid()})")
     
     # --- 1. LOAD DATA ---
@@ -96,7 +97,7 @@ def train_model(img_path, lbl_path, model_name, output_dir, epochs, patch_size):
         train_epochs = epochs,
         train_steps_per_epoch = max(10, len(X_norm)*2), # Dynamic steps based on data size
         train_patch_size = (patch_size, patch_size), 
-        use_gpu      = False
+        use_gpu      = use_gpu,
     )
 
     # Cleanup old model
@@ -158,6 +159,7 @@ if __name__ == "__main__":
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--patch", type=int, default=256)
-    
+    parser.add_argument("--gpu", type=int, default=0)
+
     args = parser.parse_args()
-    train_model(args.img, args.lbl, args.name, args.outdir, args.epochs, args.patch)
+    train_model(args.img, args.lbl, args.name, args.outdir, args.epochs, args.patch, bool(args.gpu))

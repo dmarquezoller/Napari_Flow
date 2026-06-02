@@ -41,9 +41,9 @@ Provide a clear checklist for adding new flow nodes safely.
    - Override with:
      - `{"in": bool, "out": bool, "allow_multi_in": bool, "allow_multi_out": bool}`
 
-7. **Use compute middleware when appropriate**
-   - Wrap heavy/image compute nodes with `@smart_compute(...)`.
-   - Use `dispatch(...)` inside node function for backend-aware execution.
+7. **Use dispatch() for backend-aware execution**
+   - Call `dispatch(...)` directly inside the node body — no decorator wrapper needed.
+   - The dispatcher selects the backend (CPU / Dask / CUDA) automatically based on input type and available hardware.
 
 8. **Regenerate node library**
    - Run from repo root:
@@ -62,21 +62,36 @@ Provide a clear checklist for adding new flow nodes safely.
 ## Minimal Example
 
 ```python
-from napari_flow_editor.flow_nodes.decorator import register_node, smart_compute, dispatch
-import skimage.filters
+import functools
+import skimage.morphology
+from napari_flow_editor.flow_nodes.decorator import register_node, dispatch
 
 @register_node(
-    label="Median Filter",
-    category="Filters",
+    label="Erosion",
+    category="Morphology",
     outputs=["image_out"],
     params_config={"radius": {"type": "int", "min": 1, "max": 25, "step": 1}},
-    input_types={"image_in": "image"},
+    input_types={"image": "image"},
     output_types={"image_out": "image"},
 )
-@smart_compute()
-def median_filter(image_in, radius: int = 3):
-    return dispatch(skimage.filters.median, image_in, footprint=None)
+def erosion(image, radius: int = 1):
+    footprint = skimage.morphology.disk(radius)
+    fn = functools.partial(skimage.morphology.erosion, footprint=footprint)
+    return dispatch(
+        default=fn,
+        args=(image,),
+        kwargs={},
+        cuda_function="cucim.skimage.morphology.erosion",
+        cuda_arg_names=["image"],
+        cuda_kwarg_names=[],
+        output_dtype_policy="preserve",
+        backend="auto",
+        pyramid_strategy="per_level",
+        dask_options={"strategy": "neighborhood", "halo_from_param": "radius"},
+    )
 ```
+
+> **Note**: The footprint is baked into the callable via `functools.partial` — never pass numpy arrays directly in `kwargs` to `dispatch()`. The `maybe_promote_numpy_to_dask` step inside the dispatcher would convert them to Dask arrays using image-shaped chunks, which breaks non-image arrays like footprints.
 
 ## Common Pitfalls
 
@@ -84,3 +99,5 @@ def median_filter(image_in, radius: int = 3):
 2. Mismatch between declared socket names and function arguments/outputs.
 3. Interactive node missing robust behavior for cancel/empty input cases.
 4. Overly permissive `any` types where strict typing would prevent user errors.
+5. Passing a numpy array (e.g. `footprint`) in `kwargs` to `dispatch()` — use `functools.partial` to bake it into the callable instead.
+6. Hardcoding output dtypes in the node — use `output_dtype_policy` (`"image_float"`, `"bool"`, `"preserve"`) so the dispatcher handles dtype consistently across backends.

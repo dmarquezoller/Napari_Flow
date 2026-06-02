@@ -52,9 +52,7 @@ DASK_NODES = [
     (unsharp_mask,           {}),
     (unsharp_mask,           {"radius": 3.0, "amount": 2.0}),
     (difference_of_gaussians, {"low_sigma": 1.0, "high_sigma": 2.0}),
-    (frangi,                 {}),
     (hessian,                {}),
-    (meijering,              {}),
     (sato,                   {}),
 ]
 
@@ -62,6 +60,8 @@ DASK_NODES = [
 NUMPY_ONLY_NODES = [
     (butterworth, {}),
     (butterworth, {"cutoff_frequency_ratio": 0.1, "order": 3}),
+    (frangi, {}),
+    (meijering, {}),
 ]
 
 ALL_NUMPY_NODES = DASK_NODES + NUMPY_ONLY_NODES

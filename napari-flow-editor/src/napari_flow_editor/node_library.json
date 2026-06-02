@@ -104,14 +104,25 @@
         "value": 0.0001,
         "step": 1e-05,
         "label": "Learning Rate"
+      },
+      "use_gpu": {
+        "type": "bool",
+        "default": false,
+        "value": false,
+        "label": "Use GPU"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.refine_stardist_model",
+    "description": "Fine-tune an existing StarDist model on new labelled data.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image",
+      "labels": "labels"
     }
   },
   "run_cellpose": {
@@ -172,11 +183,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_cellpose",
+    "description": "Instance segmentation using Cellpose. Accepts pretrained or custom models. Runs on CPU or GPU (PyTorch).",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_layer": "labels"
     }
   },
   "run_stardist": {
@@ -246,14 +264,27 @@
         "max": 100.0,
         "step": 1.0,
         "value": 99.8
+      },
+      "use_gpu": {
+        "type": "bool",
+        "default": false,
+        "value": false,
+        "label": "Use GPU"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_stardist",
+    "description": "Instance segmentation using StarDist. Runs in an isolated subprocess to prevent TF/Keras memory conflicts.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_layer": "labels"
     }
   },
   "run_ultrack_node": {
@@ -274,14 +305,77 @@
         "mode": "file",
         "label": "Config File (Optional, .toml)",
         "value": ""
+      },
+      "time_limit": {
+        "type": "int",
+        "default": 600,
+        "min": 30,
+        "max": 36000,
+        "step": 30,
+        "value": 600,
+        "label": "Time Limit (s)"
+      },
+      "solution_gap": {
+        "type": "float",
+        "default": 0.001,
+        "min": 0.0001,
+        "max": 0.1,
+        "step": 0.001,
+        "value": 0.001,
+        "label": "Solution Gap"
+      },
+      "window_size": {
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 500,
+        "step": 1,
+        "value": 0,
+        "label": "Window Size (0 = off)"
+      },
+      "max_distance": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 500.0,
+        "step": 1.0,
+        "value": 0.0,
+        "label": "Max Distance px (0 = auto)"
+      },
+      "min_area": {
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 10000,
+        "step": 10,
+        "value": 0,
+        "label": "Min Area px (0 = auto)"
+      },
+      "max_area": {
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 500000,
+        "step": 100,
+        "value": 0,
+        "label": "Max Area px (0 = auto)"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.run_ultrack_node",
+    "description": "Cell tracking via Ultrack. Input must be a label mask time-series (T,Y,X) or (T,Z,Y,X).",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "labels": "labels"
+    },
+    "output_types": {
+      "detection_layer": "image",
+      "edges_layer": "image",
+      "tracks_layer": "tracks"
     }
   },
   "train_cellpose": {
@@ -291,9 +385,7 @@
       "image",
       "labels"
     ],
-    "outputs": [
-      "model_path"
-    ],
+    "outputs": [],
     "parameters": {
       "base_model": {
         "type": "enum",
@@ -339,11 +431,16 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.train_cellpose",
+    "description": "Fine-tune a Cellpose model on labelled images. Saves model to ~/napari_flow_models/. Path is printed to console on completion.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image",
+      "labels": "labels"
     }
   },
   "train_stardist": {
@@ -379,14 +476,25 @@
         ],
         "value": 256,
         "label": "Patch Size"
+      },
+      "use_gpu": {
+        "type": "bool",
+        "default": false,
+        "value": false,
+        "label": "Use GPU"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.deep_learning.train_stardist",
+    "description": "Train a StarDist 2D model from scratch. Saves model to napari_flow_editor/custom_models/.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image",
+      "labels": "labels"
     }
   },
   "adjust_gamma": {
@@ -415,11 +523,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_gamma",
+    "description": "Gamma intensity correction. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "adjusted": "image"
     }
   },
   "adjust_log": {
@@ -445,11 +560,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_log",
+    "description": "Logarithmic intensity correction. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "adjusted": "image"
     }
   },
   "adjust_sigmoid": {
@@ -482,11 +604,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.exposure.adjust_sigmoid",
+    "description": "Sigmoid contrast adjustment. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "adjusted": "image"
     }
   },
   "convert_to_grayscale": {
@@ -639,11 +768,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.exposure.rescale_intensity",
+    "description": "Rescale image intensities from one explicit range to another. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "adjusted": "image"
     }
   },
   "blob_dog": {
@@ -1361,7 +1497,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.frangi",
-    "description": "Frangi vesselness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    "description": "Frangi vesselness filter (multi-scale). Full-image CPU because default gamma depends on a global Hessian norm.",
     "logic": {
       "in": true,
       "out": true,
@@ -1502,7 +1638,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.hessian",
-    "description": "Hessian-based ridge filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    "description": "Hessian-based ridge filter (multi-scale). Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
@@ -1663,7 +1799,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.meijering",
-    "description": "Meijering neuriteness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    "description": "Meijering neuriteness filter (multi-scale). Full-image CPU because the algorithm normalizes by global response maxima.",
     "logic": {
       "in": true,
       "out": true,
@@ -1796,7 +1932,7 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.sato",
-    "description": "Sato tubeness filter (multi-scale). Supports Dask via per-chunk pointwise dispatch.",
+    "description": "Sato tubeness filter (multi-scale). Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
@@ -1921,11 +2057,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_isodata",
+    "description": "Global Isodata threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_li": {
@@ -1939,11 +2082,18 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_li",
+    "description": "Global Li threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_local": {
@@ -1992,11 +2142,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_local",
+    "description": "Adaptive local threshold mask. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_mean": {
@@ -2010,11 +2167,18 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_mean",
+    "description": "Global mean threshold mask. Computes one scalar threshold per spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_minimum": {
@@ -2035,11 +2199,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_minimum",
+    "description": "Global minimum histogram threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_niblack": {
@@ -2068,11 +2239,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_niblack",
+    "description": "Niblack local threshold mask. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_otsu": {
@@ -2093,11 +2271,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_otsu",
+    "description": "Global Otsu threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_sauvola": {
@@ -2126,11 +2311,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_sauvola",
+    "description": "Sauvola local threshold mask. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_triangle": {
@@ -2151,11 +2343,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_triangle",
+    "description": "Global triangle histogram threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "threshold_yen": {
@@ -2176,11 +2375,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.filters.threshold_yen",
+    "description": "Global Yen threshold mask. Computes the scalar threshold on the full spatial image, then applies a lazy mask when possible.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "unsharp_mask": {
@@ -2732,12 +2938,14 @@
         ]
       },
       "frame_column": {
-        "type": "string",
-        "default": "frame"
+        "type": "text",
+        "default": "Frame",
+        "value": "Frame"
       },
       "id_column": {
-        "type": "string",
-        "default": "label"
+        "type": "text",
+        "default": "label",
+        "value": "label"
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.measure.filter_labels_by_csv",
@@ -2746,6 +2954,113 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    }
+  },
+  "join_tables": {
+    "label": "Join Tables",
+    "category": "Measure",
+    "inputs": [
+      "csv1",
+      "csv2"
+    ],
+    "outputs": [
+      "joined_table"
+    ],
+    "parameters": {
+      "rules": {
+        "type": "table",
+        "default": [
+          {
+            "c1": "t",
+            "c2": "frame",
+            "method": "exact"
+          },
+          {
+            "c1": "y",
+            "c2": "Y",
+            "method": "approximate"
+          },
+          {
+            "c1": "x",
+            "c2": "X",
+            "method": "approximate"
+          }
+        ],
+        "label": "Join Keys",
+        "columns": [
+          {
+            "name": "c1",
+            "label": "CSV 1 Column",
+            "type": "text"
+          },
+          {
+            "name": "c2",
+            "label": "CSV 2 Column",
+            "type": "text"
+          },
+          {
+            "name": "method",
+            "label": "Match",
+            "type": "enum",
+            "options": [
+              "exact",
+              "approximate"
+            ]
+          }
+        ],
+        "value": [
+          {
+            "c1": "t",
+            "c2": "frame",
+            "method": "exact"
+          },
+          {
+            "c1": "y",
+            "c2": "Y",
+            "method": "approximate"
+          },
+          {
+            "c1": "x",
+            "c2": "X",
+            "method": "approximate"
+          }
+        ]
+      },
+      "max_distance": {
+        "type": "float",
+        "default": 5.0,
+        "min": 0.0,
+        "max": 1000000.0,
+        "step": 1.0,
+        "value": 5.0,
+        "label": "Max Distance (0 = no limit)"
+      },
+      "base": {
+        "type": "enum",
+        "default": "CSV 1 (keep all)",
+        "options": [
+          "CSV 1 (keep all)",
+          "CSV 2 (keep all)",
+          "Only matched (inner)"
+        ],
+        "value": "CSV 1 (keep all)",
+        "label": "Base Table"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.measure.join_tables",
+    "description": "Spatially join two tables. 'exact' columns must match (they block the search); 'approximate' columns are matched together by nearest-neighbor within each block, rejecting matches beyond Max Distance.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "csv1": "any",
+      "csv2": "any"
+    },
+    "output_types": {
+      "joined_table": "table"
     }
   },
   "measure_labels": {
@@ -2782,12 +3097,37 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.measure.measure_labels",
-    "description": "Calculates properties for labeled regions.\nSupports processing stack slice-by-slice to prevent RAM crashes.",
+    "description": "Region properties table. One row per (frame, label) with a string cell_uid.\n\nSlice-by-Slice iterates the leading axis (time / Z planes); 3D Volumetric\nmeasures the whole volume as one. Property set adapts to the measured array's\ndimensionality so 3D measurements never request 2D-only metrics.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    }
+  },
+  "track_statistics": {
+    "label": "Track Statistics",
+    "category": "Measure",
+    "inputs": [
+      "tracks"
+    ],
+    "outputs": [
+      "stats_table"
+    ],
+    "parameters": {},
+    "execution_path": "napari_flow_editor.flow_nodes.measure.track_statistics",
+    "description": "Computes per-track statistics from a tracks layer (track_id, t, y, x). Outputs an enriched table with length, duration, displacement, speed, and division info. Attach a Save Table node to write it to disk.",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "tracks": "tracks"
+    },
+    "output_types": {
+      "stats_table": "table"
     }
   },
   "binary_closing": {
@@ -2808,11 +3148,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_closing",
+    "description": "Binary closing with an axis-aware footprint. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "binary_opening": {
@@ -2833,11 +3180,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.binary_opening",
+    "description": "Binary opening with an axis-aware footprint. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "mask_out": "image"
     }
   },
   "black_tophat": {
@@ -2858,12 +3212,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.black_tophat",
-    "description": "Returns dark spots smaller than the structuring element.",
+    "description": "Black tophat background subtraction. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "tophat": "image"
     }
   },
   "convex_hull": {
@@ -2877,7 +3237,6 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.morphology.convex_hull",
-    "description": "Computes the convex hull of the binary image objects.",
     "logic": {
       "in": true,
       "out": true,
@@ -2903,12 +3262,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.dilation",
-    "description": "Wraps skimage.morphology.dilation with a disk footprint",
+    "description": "Morphological dilation. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "erosion": {
@@ -2929,12 +3294,18 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.erosion",
-    "description": "Wraps skimage.morphology.erosion with a disk footprint",
+    "description": "Morphological erosion. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "image_out": "image"
     }
   },
   "label_objects": {
@@ -2946,14 +3317,27 @@
     "outputs": [
       "labels"
     ],
-    "parameters": {},
+    "parameters": {
+      "connectivity": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 3
+      }
+    },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.label_objects",
-    "description": "Labels connected components in a binary image.",
+    "description": "Label connected components. T and C are independent; full spatial core per label operation.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "labels": "labels"
     }
   },
   "remove_small_holes": {
@@ -2972,15 +3356,27 @@
         "min": 10,
         "max": 1000,
         "step": 10
+      },
+      "connectivity": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 3
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_holes",
-    "description": "Fills holes smaller than the threshold inside objects.",
+    "description": "Fill holes smaller than area_threshold. T and C are independent; full spatial core per connectivity check.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "filled_mask": "image"
     }
   },
   "remove_small_objects": {
@@ -2999,14 +3395,27 @@
         "min": 10,
         "max": 1000,
         "step": 10
+      },
+      "connectivity": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 3
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.remove_small_objects",
+    "description": "Remove connected components smaller than min_size. T and C are independent; full spatial core per connectivity check.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "cleaned_mask": "image"
     }
   },
   "skeletonize": {
@@ -3020,11 +3429,18 @@
     ],
     "parameters": {},
     "execution_path": "napari_flow_editor.flow_nodes.morphology.skeletonize",
+    "description": "Skeletonize binary masks. T and C are processed independently; full spatial core is used.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "skeleton": "image"
     }
   },
   "white_tophat": {
@@ -3045,12 +3461,59 @@
       }
     },
     "execution_path": "napari_flow_editor.flow_nodes.morphology.white_tophat",
-    "description": "Returns bright spots smaller than the structuring element.\nGreat for background subtraction (uniform background).",
+    "description": "White tophat background subtraction. Auto-selects Dask+CUDA, Dask, then CPU.",
     "logic": {
       "in": true,
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image"
+    },
+    "output_types": {
+      "tophat": "image"
+    }
+  },
+  "export_ultrack_tracks": {
+    "label": "Export Ultrack Tracks",
+    "category": "Outputs",
+    "inputs": [
+      "tracks"
+    ],
+    "outputs": [],
+    "parameters": {
+      "folder": {
+        "type": "path",
+        "default": "",
+        "mode": "directory",
+        "label": "Save Folder"
+      },
+      "filename": {
+        "type": "text",
+        "default": "tracks",
+        "value": "tracks",
+        "label": "Filename (no extension)"
+      },
+      "format": {
+        "type": "enum",
+        "default": "csv",
+        "options": [
+          "csv",
+          "parquet"
+        ],
+        "label": "Format"
+      }
+    },
+    "execution_path": "napari_flow_editor.flow_nodes.outputs.export_ultrack_tracks",
+    "logic": {
+      "in": true,
+      "out": true,
+      "allow_multi_in": true,
+      "allow_multi_out": true
+    },
+    "input_types": {
+      "tracks": "tracks"
     }
   },
   "save_image_node": {

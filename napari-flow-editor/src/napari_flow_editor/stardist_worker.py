@@ -11,7 +11,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+if "--gpu" not in sys.argv or sys.argv[sys.argv.index("--gpu") + 1] == "0":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 warnings.filterwarnings("ignore")
 
@@ -156,7 +157,8 @@ if __name__ == "__main__":
     parser.add_argument("--pmin", type=float, default=1.0)
     parser.add_argument("--pmax", type=float, default=99.8)
     parser.add_argument("--scale", type=float, default=1.0)
-    
+    parser.add_argument("--gpu", type=int, default=0)
+
     args = parser.parse_args()
     
     run_inference(args.input, args.output, args.model, args.prob, args.nms, args.pmin, args.pmax, args.scale)
