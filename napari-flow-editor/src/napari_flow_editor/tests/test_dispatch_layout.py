@@ -569,7 +569,10 @@ def test_dispatch_auto_prefers_dask_cuda_for_numpy_when_available(monkeypatch):
 def test_dispatch_cuda_fallback_logs_message_when_gpu_unavailable(capsys, monkeypatch):
     image = np.arange(16, dtype=np.float32).reshape(4, 4)
 
-    monkeypatch.delitem(sys.modules, "cupy", raising=False)
+    # Force `import cupy` to fail even on hosts where cupy IS installed:
+    # a None entry in sys.modules makes the import raise ImportError, which
+    # _try_import_cupy() catches. (delitem alone would just re-import from disk.)
+    monkeypatch.setitem(sys.modules, "cupy", None)
     out = dispatch(
         default=lambda x: x + 1,
         cuda_func=lambda x: x + 5,

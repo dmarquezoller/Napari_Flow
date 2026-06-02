@@ -187,7 +187,10 @@ def train_cellpose(image,
 @register_node(
     label="StarDist Segmentation",
     category="Deep Learning",
-    description="Instance segmentation using StarDist. Runs in an isolated subprocess to prevent TF/Keras memory conflicts.",
+    description="Instance segmentation using StarDist. Small images run in an isolated subprocess; "
+                "large images (above the streaming threshold) run out-of-core via predict_instances_big "
+                "— reading the input block-by-block through the lazy dask graph (no copy) and writing "
+                "labels to a zarr-backed lazy layer.",
     outputs=["mask_layer"],
     input_types={"image": "image"},
     output_types={"mask_layer": "labels"},
@@ -208,6 +211,12 @@ def train_cellpose(image,
         "norm_pmin": {"min": 0.0, "max": 100.0, "step": 1.0, "value": 1.0},
         "norm_pmax": {"min": 0.0, "max": 100.0, "step": 1.0, "value": 99.8},
         "use_gpu": {"type": "bool", "value": False, "label": "Use GPU"},
+        "stream_threshold_gb": {"min": 0.0, "max": 1024.0, "step": 0.5, "value": 4.0,
+                                "label": "Out-of-core above (GB)"},
+        "block_size": {"min": 64, "max": 8192, "step": 64, "value": 512,
+                       "label": "Block Size (big images)"},
+        "min_overlap": {"min": 0, "max": 1024, "step": 16, "value": 96,
+                        "label": "Block Overlap (big images)"},
     }
 )
 def run_stardist(image,
@@ -218,30 +227,49 @@ def run_stardist(image,
                  nms_thresh: float = 0.3,
                  norm_pmin: float = 1.0,
                  norm_pmax: float = 99.8,
-                 use_gpu: bool = False):
+                 use_gpu: bool = False,
+                 stream_threshold_gb: float = 4.0,
+                 block_size: int = 512,
+                 min_overlap: int = 96):
+    import dask.array as da
 
     final_model_id = model_type
-
     if custom_path and isinstance(custom_path, str) and os.path.isdir(custom_path):
         print(f"🔹 Using Custom Model: {custom_path}")
         final_model_id = custom_path
     else:
         print(f"🔹 Using Pretrained Model: {final_model_id}")
 
-    image = _ensure_numpy(image)
+    # Lazily wrap the input (no compute) so we can size-check without loading it.
+    raw = _unwrap_array(image)
+    darr = da.asarray(raw)
+    if darr.dtype == bool:
+        darr = darr.astype(np.float32)
+
+    threshold_bytes = float(stream_threshold_gb) * (1024 ** 3)
+    if darr.nbytes > threshold_bytes:
+        print(f"--- StarDist out-of-core path ({darr.nbytes / 1024**3:.1f} GB > "
+              f"{stream_threshold_gb} GB) ---")
+        return _stardist_big(
+            darr, model_id=final_model_id, use_gpu=use_gpu,
+            prob=prob_thresh, nms=nms_thresh, pmin=norm_pmin, pmax=norm_pmax,
+            scale=scale, block_size=int(block_size), min_overlap=int(min_overlap),
+        )
+
+    # --- FAST PATH (subprocess, unchanged behaviour; temp on /home not /tmp) ---
+    image = _ensure_numpy(raw)
     if image.dtype == bool:
         image = image.astype(np.float32)
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     worker_script = os.path.join(parent_dir, "stardist_worker.py")
-
     if not os.path.exists(worker_script):
         worker_script = os.path.join(current_dir, "..", "stardist_worker.py")
         if not os.path.exists(worker_script):
             raise FileNotFoundError(f"Could not find stardist_worker.py at {worker_script}")
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with tempfile.TemporaryDirectory(dir=_scratch_dir()) as tmp_dir:
         in_path = os.path.join(tmp_dir, "input.npy")
         out_path = os.path.join(tmp_dir, "output.npy")
 
@@ -283,6 +311,104 @@ def run_stardist(image,
     return (
         masks.astype(np.uint32),
         {"name": f"StarDist ({os.path.basename(final_model_id)})", "opacity": 0.7, "layer_type": "labels"},
+    )
+
+
+def _scratch_dir():
+    """Scratch dir on a roomy disk (NOT /tmp tmpfs). Override with NAPARI_FLOW_SCRATCH."""
+    d = os.environ.get("NAPARI_FLOW_SCRATCH") or os.path.join(os.path.expanduser("~"), ".napari_flow_scratch")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _unwrap_array(image):
+    """Return the raw array-like from a layer/tuple/list WITHOUT computing it."""
+    raw = image
+    if isinstance(image, list) and len(image) > 0:
+        raw = image[0][0] if isinstance(image[0], tuple) else image[0]
+    elif isinstance(image, tuple) and len(image) >= 2:
+        raw = image[0]
+    return raw
+
+
+def _load_stardist_model(model_id, is_3d):
+    """Load a StarDist model in-process (custom folder or pretrained), mirroring the worker."""
+    from stardist.models import StarDist2D, StarDist3D
+    ModelClass = StarDist3D if is_3d else StarDist2D
+    mid = str(model_id).strip().strip('"').strip("'")
+    if os.path.isdir(mid) or os.path.sep in mid:
+        mid = mid.rstrip(os.path.sep)
+        name = os.path.basename(mid)
+        base = os.path.dirname(mid)
+        return ModelClass(None, name=name, basedir=base)
+    if mid.lower() == '3d_demo':
+        mid = '3D_demo'
+    return ModelClass.from_pretrained(mid)
+
+
+class _LazyBlockReader:
+    """img[block] -> computes ONLY that block through the real dask graph (zero copy)."""
+    def __init__(self, d):
+        self.d = d
+        self.shape = d.shape
+        self.ndim = d.ndim
+        self.dtype = d.dtype
+
+    def __getitem__(self, s):
+        return np.asarray(self.d[s])
+
+
+def _stardist_big(darr, *, model_id, use_gpu, prob, nms, pmin, pmax, scale,
+                  block_size, min_overlap):
+    """Out-of-core StarDist via predict_instances_big, reading blocks lazily through the
+    dask graph and writing labels to a zarr-backed lazy layer. Bounded memory; no input copy."""
+    import uuid, atexit, shutil
+    import dask.array as da
+    import zarr
+    import tensorflow as tf
+    from csbdeep.data import PercentileNormalizer
+
+    is_3d = "3d" in str(model_id).lower()
+    model = _load_stardist_model(model_id, is_3d)
+
+    out_path = os.path.join(_scratch_dir(), f"lbl_{uuid.uuid4().hex[:8]}.zarr")
+    chunks = getattr(darr, "chunksize", None)
+    out = zarr.open(out_path, mode="w", shape=darr.shape, dtype="i4", chunks=chunks)
+
+    norm = PercentileNormalizer(pmin, pmax)   # per-block normalization (no global pass)
+    kw = dict(prob_thresh=prob, nms_thresh=nms, scale=scale, normalizer=norm,
+              block_size=block_size, min_overlap=min_overlap, show_progress=True)
+    device = "/GPU:0" if use_gpu else "/CPU:0"
+
+    try:
+        with tf.device(device):
+            if is_3d and darr.ndim == 4:          # (T, Z, Y, X): per-timepoint volume
+                for t in range(darr.shape[0]):
+                    print(f"  > frame {t + 1}/{darr.shape[0]}")
+                    out[t] = model.predict_instances_big(
+                        _LazyBlockReader(darr[t]), axes="ZYX", **kw)[0]
+            elif is_3d:                           # (Z, Y, X): single volume -> stream to zarr
+                model.predict_instances_big(
+                    _LazyBlockReader(darr), axes="ZYX", labels_out=out, **kw)
+            elif darr.ndim == 3:                  # (T, Y, X): per-frame
+                for t in range(darr.shape[0]):
+                    print(f"  > frame {t + 1}/{darr.shape[0]}")
+                    out[t] = model.predict_instances_big(
+                        _LazyBlockReader(darr[t]), axes="YX", **kw)[0]
+            else:                                 # (Y, X): single image -> stream to zarr
+                model.predict_instances_big(
+                    _LazyBlockReader(darr), axes="YX", labels_out=out, **kw)
+    finally:
+        try:
+            tf.keras.backend.clear_session()      # release GPU memory after the run
+        except Exception:
+            pass
+
+    atexit.register(lambda p=out_path: shutil.rmtree(p, ignore_errors=True))
+    labels = da.from_zarr(out_path)               # lazy dask labels layer
+    return (
+        labels,
+        {"name": f"StarDist ({os.path.basename(str(model_id))})", "opacity": 0.7, "layer_type": "labels"},
     )
 
 
