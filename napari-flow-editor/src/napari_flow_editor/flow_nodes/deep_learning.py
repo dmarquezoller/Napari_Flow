@@ -9,6 +9,14 @@ import pandas as pd
 from pathlib import Path
 from .decorator import register_node
 
+# Skip per-shape cuDNN/XLA convolution autotuning. During StarDist out-of-core
+# inference it stalls ~1-2s on every block shape (the "slow_operation_alarm /
+# Trying algorithm engN" spam) and inflates workspace memory (can OOM large 3D
+# blocks). TF 2.18 runs the convs correctly with the default algorithm. Set before
+# TensorFlow is imported anywhere; power users can override via the environment.
+os.environ.setdefault("TF_CUDNN_USE_AUTOTUNE", "0")
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
+
 # --- SAFE IMPORTS ---
 try:
     from cellpose import models, core
@@ -291,6 +299,10 @@ def run_stardist(image,
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        # Let the worker's TensorFlow find the pip CUDA libs (no user env setup needed).
+        nv_libs = _nvidia_lib_dirs()
+        if nv_libs:
+            env["LD_LIBRARY_PATH"] = nv_libs + ":" + env.get("LD_LIBRARY_PATH", "")
 
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
@@ -319,6 +331,40 @@ def _scratch_dir():
     d = os.environ.get("NAPARI_FLOW_SCRATCH") or os.path.join(os.path.expanduser("~"), ".napari_flow_scratch")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _nvidia_lib_dirs():
+    """':'-joined lib dirs of the pip-installed nvidia-*-cu12 wheels, or ''."""
+    import glob
+    try:
+        import nvidia
+    except Exception:
+        return ""
+    base = os.path.dirname(nvidia.__file__)
+    return ":".join(sorted(glob.glob(os.path.join(base, "*", "lib"))))
+
+
+def _preload_cuda_libs():
+    """Make pip-installed NVIDIA CUDA libs loadable by TensorFlow without requiring
+    LD_LIBRARY_PATH to be set in the environment (production-friendly, no activate hook).
+
+    TF resolves CUDA libs by soname via dlopen; once we load each .so by full path with
+    RTLD_GLOBAL, a later dlopen of the same soname finds the already-loaded library.
+    RTLD_LAZY defers symbol resolution so inter-lib dependency order doesn't matter.
+    """
+    import ctypes
+    import glob
+    try:
+        import nvidia
+    except Exception:
+        return
+    base = os.path.dirname(nvidia.__file__)
+    mode = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_LAZY", 0)
+    for so in sorted(glob.glob(os.path.join(base, "*", "lib", "*.so*"))):
+        try:
+            ctypes.CDLL(so, mode=mode)
+        except OSError:
+            pass
 
 
 def _unwrap_array(image):
@@ -365,6 +411,8 @@ def _stardist_big(darr, *, model_id, use_gpu, prob, nms, pmin, pmax, scale,
     import uuid, atexit, shutil
     import dask.array as da
     import zarr
+    if use_gpu:
+        _preload_cuda_libs()          # let TF find the pip CUDA libs without LD_LIBRARY_PATH
     import tensorflow as tf
     from csbdeep.data import PercentileNormalizer
 
