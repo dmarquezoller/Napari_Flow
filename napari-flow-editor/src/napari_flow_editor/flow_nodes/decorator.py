@@ -1706,6 +1706,14 @@ def dispatch(
             size_ndim,
         ):
             """Run default on one padded chunk, return inner global coords."""
+            # `default` is a CPU function (e.g. skimage.feature.blob_dog) which calls
+            # np.asarray() internally. If the input is a CuPy-backed dask array (e.g.
+            # produced by an upstream GPU node), the chunk arrives as a CuPy array and
+            # CuPy blocks the implicit host conversion. Bring this single chunk to host
+            # first (bounded memory — one chunk at a time).
+            if hasattr(chunk_np, "get") and not isinstance(chunk_np, np.ndarray):
+                chunk_np = chunk_np.get()
+
             a2 = list(args_no_img)
             k2 = dict(kwargs_no_img)
             if loc_type == "arg":

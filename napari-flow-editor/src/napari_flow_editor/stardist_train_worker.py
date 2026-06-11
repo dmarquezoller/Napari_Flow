@@ -29,39 +29,42 @@ def train_model(img_path, lbl_path, model_name, output_dir, epochs, patch_size, 
         sys.exit(1)
 
     # --- 2. PREPARE DATA ---
-    X_train_all = []
-    Y_train_all = []
+    # One coherent rule: the LABELS define the samples; each image sample is
+    # (H, W) [grayscale] or (H, W, C) [multichannel/RGB]. This covers single 2D
+    # and stacks, grayscale and multichannel, uniformly -- no per-shape special cases.
+    def _as_samples(X, Y):
+        if Y.ndim == 2:
+            Xs, Ys = [X], [Y]                       # single frame; X is (H,W) or (H,W,C)
+        elif Y.ndim == 3:
+            n = Y.shape[0]
+            if X.shape[0] != n:
+                raise ValueError(f"Sample-count mismatch: image {X.shape} vs labels {Y.shape}")
+            Xs = [X[i] for i in range(n)]           # X[i] is (H,W) or (H,W,C)
+            Ys = [Y[i] for i in range(n)]
+        else:
+            raise ValueError(f"Labels must be 2D or 3D (got {Y.shape}).")
 
-    # Handle 4D (Time/Z, Y, X, C) - Your specific case
-    if X_raw.ndim == 4 and Y_raw.ndim == 3:
-        print("TRAINER: Processing 4D Stack (Multichannel/RGB)...")
-        for i in range(X_raw.shape[0]):
-            if np.max(Y_raw[i]) > 0: # Only use annotated frames
-                X_train_all.append(X_raw[i])
-                Y_train_all.append(Y_raw[i].astype(int))
-                
-    # Handle Standard 3D (Z, Y, X)
-    elif X_raw.ndim == 3 and Y_raw.ndim == 3:
-        print("TRAINER: Processing 3D Stack (Grayscale)...")
-        for i in range(X_raw.shape[0]):
-            if np.max(Y_raw[i]) > 0:
-                X_train_all.append(X_raw[i])
-                Y_train_all.append(Y_raw[i].astype(int))
+        out_X, out_Y = [], []
+        for x, y in zip(Xs, Ys):
+            if x.shape[:2] != y.shape:              # spatial dims must align
+                raise ValueError(f"Spatial mismatch: image {x.shape} vs label {y.shape}")
+            if np.max(y) > 0:                       # keep only annotated samples
+                out_X.append(x)
+                out_Y.append(y.astype(int))
+        return out_X, out_Y
 
-    # Handle Single 2D
-    elif X_raw.ndim == 2:
-        X_train_all = [X_raw]
-        Y_train_all = [Y_raw.astype(int)]
-
-    else:
-        print(f"TRAINER ERROR: Shape combination not supported. X:{X_raw.shape}, Y:{Y_raw.shape}")
+    try:
+        X_train_all, Y_train_all = _as_samples(X_raw, Y_raw)
+    except ValueError as e:
+        print(f"TRAINER ERROR: {e}")
         sys.exit(1)
 
     if len(X_train_all) == 0:
         print("TRAINER ERROR: No labeled frames found.")
         sys.exit(1)
 
-    print(f"TRAINER: Found {len(X_train_all)} annotated frames.")
+    _ch = X_train_all[0].shape[-1] if X_train_all[0].ndim == 3 else 1
+    print(f"TRAINER: {len(X_train_all)} annotated sample(s), {_ch} channel(s).")
 
     # --- 3. IMPORT LIBRARIES ---
     try:
@@ -127,27 +130,25 @@ def train_model(img_path, lbl_path, model_name, output_dir, epochs, patch_size, 
     if n_val > 0:
         X_v = [X_norm[i] for i in val_idx]
         Y_v = [Y_clean[i] for i in val_idx]
-        validation_data = (X_v, Y_v)
         print(f"TRAINER: Training on {len(X_t)} frames, Validating on {len(X_v)} frames.")
     else:
-        validation_data = None
-        print("TRAINER: Warning - Not enough data for validation. Training on all frames.")
+        # StarDist2D.train() requires validation_data. With a single annotated sample
+        # there's nothing to hold out, so reuse the training sample for validation.
+        # The validation metric is then meaningless (it's the training data) -- annotate
+        # more frames for a model that actually generalises.
+        X_v, Y_v = X_t, Y_t
+        print("TRAINER: Warning - only one annotated sample; reusing it for validation "
+              "(metric not meaningful). Annotate more frames for a usable model.")
+
+    validation_data = (X_v, Y_v)
 
     # --- 7. TRAIN ---
     print(f"TRAINER: Starting loop ({epochs} epochs)...")
-    
-    # Pass the manual tuple 'validation_data' instead of 'validation_split'
-    if validation_data:
-        history = model.train(X_t, Y_t, validation_data=validation_data)
-    else:
-        history = model.train(X_t, Y_t)
+    history = model.train(X_t, Y_t, validation_data=validation_data)
 
     # --- 8. OPTIMIZE ---
     print("TRAINER: Optimizing thresholds...")
-    if validation_data:
-        model.optimize_thresholds(X_v, Y_v)
-    else:
-        model.optimize_thresholds(X_t, Y_t)
+    model.optimize_thresholds(X_v, Y_v)
 
     print("TRAINER: Done. Model saved.")
 

@@ -82,13 +82,18 @@ def run_cellpose(image,
         image = image.astype(np.uint8) * 255
 
     # --- 3. EXECUTION ---
-    torch.set_num_threads(1)
+    # Use all CPU cores. (Don't cap to 1 thread — this node runs in-process, so a
+    # single-thread cap would throttle Cellpose to one core. On GPU this is moot.)
+    torch.set_num_threads(max(1, os.cpu_count() or 1))
 
     print(f"  > Loading model...")
     try:
-        model = models.CellposeModel(gpu=use_gpu, pretrained_model=final_model_arg)
+        if custom_path and os.path.exists(custom_path):
+            model = models.CellposeModel(gpu=use_gpu, pretrained_model=custom_path)
+        else:
+            model = models.CellposeModel(gpu=use_gpu, model_type=model_type)
     except Exception as e:
-        print(f"  > Error loading model specific way, trying generic: {e}")
+        print(f"  > Primary model load failed ({e}); trying generic fallback...")
         model = models.CellposeModel(gpu=use_gpu, model_type=model_type)
 
     masks = None
