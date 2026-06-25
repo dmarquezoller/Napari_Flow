@@ -8,6 +8,7 @@ from .deep_learning import _ensure_numpy
     label="Save Table (CSV)",
     category="Outputs",
     outputs=[],
+    input_types={"table": "table"},
     params_config={
         "filename": {"type": "text", "value": "results.csv", "label": "Filename"},
         "folder": {"type": "path", "mode": "directory", "label": "Save Folder"}
@@ -50,6 +51,7 @@ def save_table(table, folder: str = "", filename: str = "results.csv"):
     label="Save Image",
     category="Outputs",
     outputs=[],  # No outputs, it's a sink
+    input_types={"image": "any"},
     params_config={
         "folder": {"type": "path", "mode": "directory", "label": "Save Folder"},
         "base_name": {"type": "text", "label": "Filename Prefix", "value": "crop_output"},

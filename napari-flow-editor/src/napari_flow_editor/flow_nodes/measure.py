@@ -41,6 +41,8 @@ def _measure_array(lab, img, properties, has_image):
     label="Region Properties",
     category="Measure",
     outputs=["measurements_table"],
+    input_types={"image": "image", "labels": "labels"},
+    output_types={"measurements_table": "table"},
     params_config={
         "properties": {
             "options": ["Basic (Area, Perim)", "Shape (Eccentricity, Solidity)", "All"],
@@ -342,7 +344,7 @@ def _load_table(data):
                 "'approximate' columns are matched together by nearest-neighbor within each block, "
                 "rejecting matches beyond Max Distance.",
     outputs=["joined_table"],
-    input_types={"csv1": "any", "csv2": "any"},
+    input_types={"csv1": "table", "csv2": "table"},
     output_types={"joined_table": "table"},
     params_config={
         "rules": {

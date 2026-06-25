@@ -167,6 +167,7 @@ DATA_TYPE_COLORS = {
     "vectors": "#E76F51",
     "scalar": "#9B8AFB",
     "layers": "#B6A3FF",
+    "tracks": "#FFB6C1",
     "any": "#9AA0A6",
 }
 

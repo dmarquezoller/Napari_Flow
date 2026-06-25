@@ -3083,8 +3083,8 @@
       "allow_multi_out": true
     },
     "input_types": {
-      "csv1": "any",
-      "csv2": "any"
+      "csv1": "table",
+      "csv2": "table"
     },
     "output_types": {
       "joined_table": "table"
@@ -3130,6 +3130,13 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "image",
+      "labels": "labels"
+    },
+    "output_types": {
+      "measurements_table": "table"
     }
   },
   "track_statistics": {
@@ -3580,6 +3587,9 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "image": "any"
     }
   },
   "save_table": {
@@ -3609,6 +3619,9 @@
       "out": true,
       "allow_multi_in": true,
       "allow_multi_out": true
+    },
+    "input_types": {
+      "table": "table"
     }
   },
   "chan_vese": {
